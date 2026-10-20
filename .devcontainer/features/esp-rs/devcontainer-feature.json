@@ -1,0 +1,22 @@
+{
+  "id": "esp-rs",
+  "version": "1.0.0",
+  "name": "esp-rs toolchain",
+  "description": "Installs espup (Xtensa + RISC-V Rust toolchains), espflash and esp-generate for no_std esp-hal development.",
+  "options": {
+    "targets": {
+      "type": "string",
+      "default": "all",
+      "description": "Comma separated list of chips passed to `espup install --targets` (e.g. esp32,esp32s3,esp32c3 or all)."
+    },
+    "toolchainVersion": {
+      "type": "string",
+      "default": "",
+      "description": "Xtensa Rust toolchain version (empty = latest)."
+    }
+  },
+  "installsAfter": [
+    "ghcr.io/devcontainers/features/common-utils",
+    "ghcr.io/devcontainers/features/rust"
+  ]
+}

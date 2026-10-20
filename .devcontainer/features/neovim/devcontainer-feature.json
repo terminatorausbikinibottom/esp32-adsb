@@ -1,0 +1,16 @@
+{
+  "id": "neovim",
+  "version": "1.0.0",
+  "name": "Neovim (release binary)",
+  "description": "Installs the official prebuilt Neovim release into /opt/nvim and links it to /usr/local/bin/nvim.",
+  "options": {
+    "version": {
+      "type": "string",
+      "default": "stable",
+      "description": "Neovim release tag (stable, nightly, or e.g. v0.11.4)."
+    }
+  },
+  "installsAfter": [
+    "ghcr.io/devcontainers/features/common-utils"
+  ]
+}

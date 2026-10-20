@@ -1,0 +1,72 @@
+{
+  "name": "esp32-adsb (Rust / esp-hal)",
+  "image": "mcr.microsoft.com/devcontainers/base:trixie",
+
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "installZsh": true,
+      "configureZshAsDefaultShell": true,
+      "installOhMyZsh": false,
+      "upgradePackages": false
+    },
+    "ghcr.io/devcontainers/features/rust:1": {
+      "version": "stable",
+      "profile": "minimal",
+      "components": "rust-src,rustfmt,clippy,rust-analyzer"
+    },
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "lts"
+    },
+    "ghcr.io/rio/features/chezmoi:1": {},
+    "./features/esp-rs": {
+      "targets": "all"
+    },
+    "./features/neovim": {
+      "version": "stable"
+    }
+  },
+  "overrideFeatureInstallOrder": [
+    "ghcr.io/devcontainers/features/common-utils",
+    "ghcr.io/devcontainers/features/rust",
+    "./features/esp-rs",
+    "./features/neovim"
+  ],
+
+  "remoteUser": "vscode",
+  "containerUser": "vscode",
+  "updateRemoteUserUID": false,
+
+  // Podman (rootless): map the host user onto vscode (1000) so the bind-mounted
+  // workspace is writable; disable SELinux relabeling for Linux hosts.
+  "runArgs": [
+    "--userns=keep-id:uid=1000,gid=1000",
+    "--security-opt=label=disable"
+  ],
+  "containerEnv": {
+    "HOME": "/home/vscode"
+  },
+
+  "mounts": [
+    // Persist cargo downloads across container rebuilds.
+    "source=esp32-adsb-cargo-registry,target=/usr/local/cargo/registry,type=volume"
+  ],
+
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "fill-labs.dependi",
+        "vadimcn.vscode-lldb",
+        "probe-rs.probe-rs-debugger"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh",
+        "rust-analyzer.check.allTargets": false,
+        "rust-analyzer.cargo.allTargets": false
+      }
+    }
+  }
+}

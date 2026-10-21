@@ -5,10 +5,8 @@
 //! altitude/squawk/Gillham decoding.
 #![cfg_attr(not(test), no_std)]
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn placeholder() {
-        assert_eq!(2 + 2, 4);
-    }
-}
+mod frame;
+mod source;
+
+pub use frame::{ClockKind, FrameData, RawFrame, SignalLevel, Timestamp};
+pub use source::{AvrSource, Counters, FrameSource};

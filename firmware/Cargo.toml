@@ -13,6 +13,13 @@ path = "./src/bin/main.rs"
 # Extra log line before the scanout starts; changes timing and code layout only. Build with and
 # without it to check the image position does not depend on the build (see vendor/esp-hal/VENDORED.md).
 diag-shift = []
+# Step 1.5 fix-loop diagnostics (see docs/design/adsb-display.md): `no-resync` drops the per-frame DMA
+# restart, `diag-norefill` stops the refills (both buffers keep rows 0..19), `diag-ruler` paints the ruler.
+no-resync     = []
+diag-norefill = []
+diag-ruler    = []
+# 16 MHz pixel clock (~55 % core-1 load) instead of 10 MHz.
+pclk-16mhz = []
 
 [dependencies]
 esp-hal = { version = "~1.2.2", features = ["esp32s3", "log-04", "unstable"] }

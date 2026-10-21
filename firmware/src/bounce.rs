@@ -5,7 +5,11 @@
 //!
 //! Frame sync: both buffers are prefilled with rows 0..2*BB_ROWS before the DMA starts. Every
 //! EOF then refills the finished buffer with chunk `fill` (BB_ROWS rows) and `fill` counts mod
-//! `CHUNKS`. The LCD VSYNC interrupt re-aligns `fill` to the frame start.
+//! `CHUNKS`.
+//!
+//! The S3 LCD_CAM/GDMA pair can lose its frame alignment for good (ESP-IDF works around it in
+//! `lcd_rgb_panel_try_restart_transmission`), so the VSYNC interrupt restarts the DMA at the start of
+//! buffer 0 every frame (`resync`). Feature `no-resync` keeps only the old counter correction.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering::Relaxed};
 
@@ -24,7 +28,11 @@ pub const CHUNKS: usize = HEIGHT / BB_ROWS;
 /// Max bytes per descriptor (hardware limit 4095), a multiple of 4.
 const DESC_BYTES: usize = 4000;
 const BB_DESCS: usize = BB_BYTES.div_ceil(DESC_BYTES);
-pub const DESCRIPTORS: usize = 2 * BB_DESCS;
+/// Two buffers plus the restart descriptor.
+pub const DESCRIPTORS: usize = 2 * BB_DESCS + 1;
+/// The async FIFO keeps LCD_FIFO_DEPTH (16) + 1 pixels of the next frame across a reset, so the
+/// restart skips them (ESP-IDF `LCD_FIFO_PRESERVE_SIZE_PX`).
+const RESTART_SKIP_BYTES: usize = 17 * 2;
 
 // Even chunk count: the frame then starts on the same buffer every time.
 const _: () = assert!(
@@ -39,6 +47,10 @@ struct State {
     /// Address of each buffer's last (EOF) descriptor; identifies which buffer an EOF belongs to.
     eof_desc: [AtomicUsize; 2],
     bufs: [AtomicUsize; 2],
+    /// Chunk currently held by each buffer.
+    loaded: [AtomicU32; 2],
+    /// Descriptor that restarts the DMA inside buffer 0.
+    restart_desc: AtomicUsize,
     /// Buffer the next EOF is expected from, and the chunk to load into it.
     next_buf: AtomicU32,
     fill: AtomicU32,
@@ -63,6 +75,8 @@ static STATE: State = State {
     fb: ZU,
     eof_desc: [ZU; 2],
     bufs: [ZU; 2],
+    loaded: [Z; 2],
+    restart_desc: ZU,
     next_buf: Z,
     fill: Z,
     handlers_ready: AtomicBool::new(false),
@@ -201,7 +215,11 @@ fn on_eof() {
         buf = done as u32;
         fill = (fill + 1) % CHUNKS as u32;
     }
-    load_chunk(STATE.bufs[buf as usize].load(Relaxed), fill);
+    // diag-norefill: leave the buffers as prefilled (rows 0..2*BB_ROWS repeated).
+    if !cfg!(feature = "diag-norefill") {
+        load_chunk(STATE.bufs[buf as usize].load(Relaxed), fill);
+    }
+    STATE.loaded[buf as usize].store(fill, Relaxed);
     STATE.fill.store((fill + 1) % CHUNKS as u32, Relaxed);
     STATE.next_buf.store(buf ^ 1, Relaxed);
 
@@ -229,13 +247,45 @@ fn on_vsync() {
     lcd.lc_dma_int_clr()
         .write(|w| w.lcd_vsync_int_clr().set_bit());
     STATE.vsyncs.fetch_add(1, Relaxed);
-    // Between frames the DMA is stalled inside buffer 0 with no EOF yet: the next EOF refills
-    // buffer 0 with chunk 2. Only correct the chunk counter, and only when the buffer agrees;
-    // otherwise an EOF is probably still pending and the state is not ours to judge.
-    if STATE.next_buf.load(Relaxed) == 0 && STATE.fill.load(Relaxed) != 2 {
-        STATE.fill.store(2, Relaxed);
-        STATE.vsync_fix.fetch_add(1, Relaxed);
+    if cfg!(feature = "no-resync") {
+        // Between frames the DMA is stalled inside buffer 0 with no EOF yet: the next EOF refills
+        // buffer 0 with chunk 2. Only correct the chunk counter, and only when the buffer agrees;
+        // otherwise an EOF is probably still pending and the state is not ours to judge.
+        if STATE.next_buf.load(Relaxed) == 0 && STATE.fill.load(Relaxed) != 2 {
+            STATE.fill.store(2, Relaxed);
+            STATE.vsync_fix.fetch_add(1, Relaxed);
+        }
+    } else {
+        resync(lcd);
     }
+}
+
+/// Restarts the DMA at the start of buffer 0 inside the vertical blanking, as ESP-IDF's RGB panel
+/// does on the S3: FIFO reset, GDMA reset, restart descriptor that skips the pixels the FIFO kept.
+/// If this runs after the LCD took the first pixels the frame shifts for one frame (IDF has the
+/// same limit).
+#[esp_hal::ram]
+fn resync(lcd: &esp32s3::lcd_cam::RegisterBlock) {
+    // Normally both buffers already hold chunks 0 and 1; only copy if a refill is still pending.
+    for b in 0..2 {
+        if STATE.loaded[b].load(Relaxed) != b as u32 {
+            load_chunk(STATE.bufs[b].load(Relaxed), b as u32);
+            STATE.loaded[b].store(b as u32, Relaxed);
+        }
+    }
+    // SAFETY: shared register block; only this channel's out registers and its EOF bit are touched.
+    let ch = unsafe { (*esp32s3::DMA::ptr()).ch(CH) };
+    lcd.lcd_misc().modify(|_, w| w.lcd_afifo_reset().set_bit());
+    ch.out_conf0().modify(|_, w| w.out_rst().set_bit());
+    ch.out_conf0().modify(|_, w| w.out_rst().clear_bit());
+    ch.out_link().modify(|_, w| unsafe {
+        w.outlink_addr()
+            .bits(STATE.restart_desc.load(Relaxed) as u32)
+    });
+    ch.out_link().modify(|_, w| w.outlink_start().set_bit());
+    ch.out_int().clr().write(|w| w.out_eof().clear_bit_by_one());
+    STATE.next_buf.store(0, Relaxed);
+    STATE.fill.store(2, Relaxed);
 }
 
 /// Two bounce buffers in a circular descriptor chain, EOF on the last descriptor of each buffer.
@@ -254,16 +304,27 @@ impl BounceFb {
         assert_eq!(fb.len(), FB_BYTES);
         STATE.fb.store(fb.as_ptr() as usize, Relaxed);
         let head = descriptors.as_mut_ptr();
-        for (i, d) in descriptors.iter_mut().enumerate() {
+        for (i, d) in descriptors[..2 * BB_DESCS].iter_mut().enumerate() {
             let (b, k) = (i / BB_DESCS, i % BB_DESCS);
             let len = DESC_BYTES.min(BB_BYTES - k * DESC_BYTES);
             d.buffer = unsafe { bufs[b].as_mut_ptr().add(k * DESC_BYTES) };
-            d.next = unsafe { head.add((i + 1) % DESCRIPTORS) };
+            d.next = unsafe { head.add((i + 1) % (2 * BB_DESCS)) };
             d.set_size(len);
             d.set_length(len);
             d.set_suc_eof(k == BB_DESCS - 1);
             d.set_owner(Owner::Dma);
         }
+        // Restart descriptor: rest of buffer 0's first descriptor, then the normal chain (EOF at its end).
+        let r = &mut descriptors[2 * BB_DESCS];
+        r.buffer = unsafe { bufs[0].as_mut_ptr().add(RESTART_SKIP_BYTES) };
+        r.next = unsafe { head.add(1) };
+        r.set_size(DESC_BYTES - RESTART_SKIP_BYTES);
+        r.set_length(DESC_BYTES - RESTART_SKIP_BYTES);
+        r.set_suc_eof(false);
+        r.set_owner(Owner::Dma);
+        STATE
+            .restart_desc
+            .store(r as *mut DmaDescriptor as usize, Relaxed);
         for (b, buf) in bufs.iter().enumerate() {
             STATE.bufs[b].store(buf.as_ptr() as usize, Relaxed);
             STATE.eof_desc[b].store(
@@ -289,6 +350,8 @@ unsafe impl DmaTxBuffer for BounceFb {
         // bytes are already in SRAM when the DMA begins: no PSRAM latency at start-up.
         load_chunk(STATE.bufs[0].load(Relaxed), 0);
         load_chunk(STATE.bufs[1].load(Relaxed), 1);
+        STATE.loaded[0].store(0, Relaxed);
+        STATE.loaded[1].store(1, Relaxed);
         STATE.next_buf.store(0, Relaxed);
         STATE.fill.store(2, Relaxed);
         Preparation {

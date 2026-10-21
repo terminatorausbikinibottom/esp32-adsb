@@ -2,6 +2,7 @@
 //! Compare with the browser: pick overflight, "Go to t (s)" = the keyframe second, "Dump frame".
 //! Run `cargo test --test hash -- --nocapture` to see them; also written to
 //! `target/ui-snapshots/hashes.txt`. Own binary: the Slint platform can be installed once.
+use adsb_app::{PointerEvent, PointerPhase};
 use adsb_core::scenario::{Kind, overflight as t};
 use sim::Sim;
 
@@ -28,6 +29,38 @@ fn keyframe_hashes_are_stable_and_distinct() {
         hashes.push(h);
     }
     print!("{report}");
+    const REF: [u64; 6] = [
+        0x6b49247fc0bf1dd9,
+        0x433b01e4770dd89d,
+        0xcc420b1cf6272329,
+        0xc9004ea77ce75502,
+        0x5d8024eabbf59435,
+        0x6f1a39b4951a7374,
+    ];
+    assert_eq!(hashes, REF, "reference hashes changed");
+
+    // Whatever happened before (long run, other scenario, navigation), a seek is a fresh start.
+    for ((name, at), want) in frames.iter().zip(REF) {
+        sim.seek(Kind::Overflight, 1, 455_000);
+        sim.seek(Kind::Overflight, 1, *at);
+        assert_eq!(sim.frame_hash(), want, "{name} after long run");
+        sim.seek(Kind::Busy, 1, 100_000);
+        sim.seek(Kind::Overflight, 1, *at);
+        assert_eq!(sim.frame_hash(), want, "{name} after scenario switch");
+        sim.seek(Kind::Overflight, 1, 20_000);
+        sim.pointer(PointerEvent {
+            x: 724.0,
+            y: 440.0,
+            phase: PointerPhase::Down,
+        });
+        sim.pointer(PointerEvent {
+            x: 724.0,
+            y: 440.0,
+            phase: PointerPhase::Up,
+        });
+        sim.seek(Kind::Overflight, 1, *at);
+        assert_eq!(sim.frame_hash(), want, "{name} after tap");
+    }
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ui-snapshots");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("hashes.txt"), report).unwrap();

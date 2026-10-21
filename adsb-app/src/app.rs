@@ -271,6 +271,23 @@ impl App {
         self.screen.get()
     }
 
+    /// Back to the start-up state (card screen, rate zeroed) for a restarted feed; the window and
+    /// platform are kept. Slint is returned to its initial properties and a full repaint is forced
+    /// (partial repaints blend anti-aliased edges over stale pixels, so the output would depend on
+    /// history), so the next `update` renders exactly what a new `App` would.
+    pub fn reset(&mut self) -> Result<(), PlatformError> {
+        self.rate = Rate {
+            since_ms: 0,
+            since_n: 0,
+            per_s: 0,
+        };
+        self.screen.set(Screen::Card);
+        self.ui.set_screen(Screen::Card);
+        self.apply(Ui::default());
+        self.ui.hide()?;
+        self.ui.show()
+    }
+
     /// Recompute the view from the latest snapshot and push only what changed to Slint.
     /// Returns whether anything changed.
     pub fn update(&mut self, snap: &Snapshot, st: &Status) -> bool {

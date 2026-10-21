@@ -44,6 +44,7 @@ impl Sim {
         self.scenario = Scenario::new(kind, seed);
         self.pipeline = FeedPipeline::new(self.scenario.receiver());
         self.feed_ok = true;
+        self.app.reset().expect("slint window");
     }
 
     /// Restart and replay in whole-second steps up to `ms`: the same sequence of states the
@@ -74,9 +75,10 @@ impl Sim {
         self.render();
     }
 
-    pub fn pointer(&mut self, ev: PointerEvent) {
+    /// Returns whether the framebuffer changed.
+    pub fn pointer(&mut self, ev: PointerEvent) -> bool {
         self.app.pointer(ev);
-        self.render();
+        self.render()
     }
 
     /// Repaint whatever is dirty (timers, animations); returns whether the framebuffer changed.

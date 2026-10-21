@@ -12,6 +12,7 @@ use web_sys::{
 };
 
 const SEED: u64 = 1;
+const MAX_DT_MS: f64 = 1000.0;
 type Frame = Closure<dyn FnMut(f64)>;
 
 struct State {
@@ -21,7 +22,10 @@ struct State {
     virt_ms: f64,
     /// Whole scenario second last fed to the sim (the UI ticks at 1 Hz, like the device).
     ticked_s: u64,
+    /// Length of the current scenario (cached; building a `Scenario` is not free).
+    duration_ms: u64,
     last_frame: f64,
+    pressed: bool,
     speed: f64,
     paused: bool,
     ctx: CanvasRenderingContext2d,
@@ -75,6 +79,7 @@ impl State {
 
     fn restart(&mut self, kind: Kind, at_ms: u64) {
         self.kind = kind;
+        self.duration_ms = adsb_core::scenario::Scenario::new(kind, SEED).duration_ms();
         self.sim.seek(kind, SEED, at_ms);
         self.virt_ms = at_ms as f64;
         self.ticked_s = at_ms / 1000;
@@ -83,12 +88,13 @@ impl State {
     }
 
     fn frame(&mut self, now: f64) {
-        let dt = now - self.last_frame;
+        // A hidden tab stops rAF; don't let the first frame back jump the scenario by minutes.
+        let dt = (now - self.last_frame).clamp(0.0, MAX_DT_MS);
         self.last_frame = now;
         let mut changed = self.sim.render();
         if !self.paused {
             self.virt_ms += dt * self.speed;
-            if self.virt_ms >= self.sim_duration() as f64 {
+            if self.virt_ms >= self.duration_ms as f64 {
                 self.restart(self.kind, 0);
                 return;
             }
@@ -105,21 +111,27 @@ impl State {
         }
     }
 
-    fn sim_duration(&self) -> u64 {
-        adsb_core::scenario::Scenario::new(self.kind, SEED).duration_ms()
-    }
-
     fn pointer(&mut self, ev: &MouseEvent, phase: PointerPhase) {
+        match phase {
+            PointerPhase::Down => self.pressed = true,
+            // Slint has no hover state today: moves only matter while dragging.
+            PointerPhase::Move if !self.pressed => return,
+            PointerPhase::Up if !self.pressed => return,
+            PointerPhase::Up => self.pressed = false,
+            PointerPhase::Move => {}
+        }
         // The canvas is CSS-scaled: map client pixels back to 800x480.
         let r = self.canvas.get_bounding_client_rect();
         let x = (ev.client_x() as f64 - r.left()) * WIDTH as f64 / r.width();
         let y = (ev.client_y() as f64 - r.top()) * HEIGHT as f64 / r.height();
-        self.sim.pointer(PointerEvent {
+        let changed = self.sim.pointer(PointerEvent {
             x: x as f32,
             y: y as f32,
             phase,
         });
-        self.blit();
+        if changed {
+            self.blit();
+        }
     }
 
     fn dump(&self) {
@@ -170,7 +182,9 @@ fn start() {
         kind: Kind::Overflight,
         virt_ms: 0.0,
         ticked_s: 0,
+        duration_ms: 0,
         last_frame: perf_ms(),
+        pressed: false,
         speed: 1.0,
         paused: false,
         ctx,
@@ -181,7 +195,8 @@ fn start() {
 
     let c: &web_sys::EventTarget = &canvas;
     on::<MouseEvent>(c, "mousedown", &st, |s, e| s.pointer(e, PointerPhase::Down));
-    on::<MouseEvent>(c, "mouseup", &st, |s, e| s.pointer(e, PointerPhase::Up));
+    // Window-level so a release outside the canvas still ends the press.
+    on::<MouseEvent>(&win, "mouseup", &st, |s, e| s.pointer(e, PointerPhase::Up));
     on::<MouseEvent>(c, "mousemove", &st, |s, e| s.pointer(e, PointerPhase::Move));
 
     let scenario: HtmlSelectElement = by_id(&doc, "scenario");

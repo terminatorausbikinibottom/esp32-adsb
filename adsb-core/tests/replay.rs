@@ -87,13 +87,29 @@ fn replay() {
         }
     };
     let (frames, src) = load(&path);
-    let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok());
+    assert!(
+        frames
+            .iter()
+            .any(|(_, f)| matches!(f.data.df(), 17 | 18) && f.data.length_matches_df()),
+        "no DF17/18 frames in capture"
+    );
+    // Unset -> None, set but unparseable -> fail; never echoes the value.
+    let env = |k: &str| match std::env::var(k) {
+        Err(std::env::VarError::NotPresent) => None,
+        r => Some(
+            r.ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or_else(|| panic!("{k} is set but not a valid number")),
+        ),
+    };
     let (rx_lat_deg, rx_lon_deg) = match (env("ADSB_RX_LAT"), env("ADSB_RX_LON")) {
         (Some(a), Some(o)) => (a, o),
-        _ => {
+        (None, None) => {
             println!("ADSB_RX_LAT/LON unset: using in-memory pseudo-receiver (dev convenience)");
             pseudo_receiver(&frames)
         }
+        (None, _) => panic!("ADSB_RX_LON is set but ADSB_RX_LAT is not; set both or neither"),
+        (_, None) => panic!("ADSB_RX_LAT is set but ADSB_RX_LON is not; set both or neither"),
     };
     let mut table = AircraftTable::new(Config {
         rx_lat_deg,
@@ -101,7 +117,7 @@ fn replay() {
         rx_elev_m: 0.0,
     });
 
-    let (mut df_long, mut df_ok) = (0u32, 0u32);
+    let (mut df_long, mut df_ok, mut pos_msgs) = (0u32, 0u32, 0u32);
     let mut max_ground_m = 0f64;
     let mut tracked: HashSet<u32> = HashSet::new();
     let mut next_snapshot = SNAPSHOT_EVERY_MS;
@@ -112,6 +128,7 @@ fn replay() {
             df_ok += f.data.crc_ok() as u32;
         }
         if let Some(m) = decode(f) {
+            pos_msgs += matches!(m.body, Body::AirbornePosition { .. }) as u32;
             table.update(&m, *ms);
         }
         if *ms >= next_snapshot {
@@ -146,7 +163,7 @@ fn replay() {
     println!("aircraft with callsign and position: {}", tracked.len());
     println!("max resolved distance: {:.0} km", max_ground_m / 1000.0);
     println!(
-        "known-ICAO filter drops: {}/{} ({:.1} %), implausible positions: {}",
+        "known-ICAO filter drops: {}/{} ({:.1} %), implausible positions: {}/{pos_msgs}",
         c.filtered,
         c.messages,
         c.filtered as f64 * 100.0 / c.messages.max(1) as f64,
@@ -156,6 +173,13 @@ fn replay() {
     assert!(df_long > 0, "no DF17/18 frames in capture");
     assert!(rate > 0.95, "CRC pass rate too low");
     assert!(max_ground_m <= 450_000.0, "position beyond 450 km");
+    // The 450 km check above passes vacuously if the gate rejects everything, so a wrong receiver
+    // location must be caught here. A correct one rejects only the odd garbled CPR (well under 5 %).
+    assert!(
+        c.implausible as f64 <= pos_msgs as f64 * 0.05,
+        "implausible positions {}/{pos_msgs} exceed 5 %: receiver location likely wrong (check ADSB_RX_LAT/LON)",
+        c.implausible
+    );
     assert!(
         tracked.len() >= 5,
         "fewer than 5 aircraft with callsign and position"

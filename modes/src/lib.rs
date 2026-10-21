@@ -5,9 +5,11 @@
 //! altitude/squawk/Gillham decoding.
 #![cfg_attr(not(test), no_std)]
 
+mod adsb;
 mod basics;
 mod frame;
 mod source;
 
+pub use adsb::{CategorySet, EmitterCategory, Identification};
 pub use frame::{ClockKind, FrameData, RawFrame, SignalLevel, Timestamp};
 pub use source::{AvrSource, Counters, FrameSource};

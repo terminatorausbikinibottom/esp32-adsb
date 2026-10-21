@@ -13,7 +13,9 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering::Relaxed};
 
-use esp_hal::dma::{BurstConfig, DmaDescriptor, DmaTxBuffer, Owner, Preparation};
+use esp_hal::dma::{
+    BurstConfig, DmaDescriptor, DmaTxBuffer, InternalBurstConfig, Owner, Preparation,
+};
 use esp_hal::interrupt;
 use esp_hal::peripherals::Interrupt;
 use esp_hal::time::Instant;
@@ -126,6 +128,21 @@ pub fn bind_handlers() {
     interrupt::bind_handler(Interrupt::DMA_OUT_CH0, dma_out_eof);
     interrupt::bind_handler(Interrupt::LCD_CAM, lcd_vsync);
     STATE.handlers_ready.store(true, Relaxed);
+}
+
+/// ESP-IDF's RGB panel sets `lcd_always_out_en` (the DOUT phase then lasts until LCD_START is cleared,
+/// not `lcd_dout_cyclelen` cycles); esp-hal does not. Call before `Dpi::send` (it latches with
+/// `lcd_update`).
+pub fn configure_lcd() {
+    if cfg!(feature = "exp-no-always-out") {
+        return;
+    }
+    // SAFETY: only this bit is touched, once, before the transfer starts.
+    unsafe {
+        (*esp32s3::LCD_CAM::ptr())
+            .lcd_user()
+            .modify(|_, w| w.lcd_always_out_en().set_bit());
+    }
 }
 
 /// Unmasks the out-EOF and VSYNC sources. Call before `Dpi::send` (its DMA reset only clears raw
@@ -302,6 +319,10 @@ impl BounceFb {
         fb: &'static [u8],
     ) -> Self {
         assert_eq!(fb.len(), FB_BYTES);
+        assert!(
+            bufs.as_ptr().cast::<u32>().is_aligned(),
+            "bounce buffers must be 4-aligned"
+        );
         STATE.fb.store(fb.as_ptr() as usize, Relaxed);
         let head = descriptors.as_mut_ptr();
         for (i, d) in descriptors[..2 * BB_DESCS].iter_mut().enumerate() {
@@ -311,7 +332,7 @@ impl BounceFb {
             d.next = unsafe { head.add((i + 1) % (2 * BB_DESCS)) };
             d.set_size(len);
             d.set_length(len);
-            d.set_suc_eof(k == BB_DESCS - 1);
+            d.set_suc_eof(k == BB_DESCS - 1 && !cfg!(feature = "exp-solid-noeof"));
             d.set_owner(Owner::Dma);
         }
         // Restart descriptor: rest of buffer 0's first descriptor, then the normal chain (EOF at its end).
@@ -348,8 +369,18 @@ unsafe impl DmaTxBuffer for BounceFb {
     fn prepare(&mut self) -> Preparation {
         // Called by `Dpi::send` after the LCD reset and right before the DMA starts, so the first
         // bytes are already in SRAM when the DMA begins: no PSRAM latency at start-up.
-        load_chunk(STATE.bufs[0].load(Relaxed), 0);
-        load_chunk(STATE.bufs[1].load(Relaxed), 1);
+        if cfg!(feature = "exp-solid") {
+            // Test ring: buffer 0 red, buffer 1 blue (RGB565, little endian), never refilled.
+            for (b, px) in [(0, 0xF800u16), (1, 0x001F)] {
+                let p = STATE.bufs[b].load(Relaxed) as *mut u16;
+                for i in 0..BB_BYTES / 2 {
+                    unsafe { p.add(i).write(px) };
+                }
+            }
+        } else {
+            load_chunk(STATE.bufs[0].load(Relaxed), 0);
+            load_chunk(STATE.bufs[1].load(Relaxed), 1);
+        }
         STATE.loaded[0].store(0, Relaxed);
         STATE.loaded[1].store(1, Relaxed);
         STATE.next_buf.store(0, Relaxed);
@@ -357,7 +388,12 @@ unsafe impl DmaTxBuffer for BounceFb {
         Preparation {
             start: self.descriptors.as_mut_ptr(),
             accesses_psram: false,
-            burst_transfer: BurstConfig::default(),
+            // IDF enables data burst for internal memory too; esp-hal defaults to off.
+            burst_transfer: BurstConfig::from(if cfg!(feature = "exp-no-burst") {
+                InternalBurstConfig::Disabled
+            } else {
+                InternalBurstConfig::Enabled
+            }),
             // Owner bit is never cleared, so the DMA must not check it on the wrap-around.
             check_owner: Some(false),
             auto_write_back: false,

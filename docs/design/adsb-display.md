@@ -1710,3 +1710,14 @@ Unverified (summary): every [VERIFY] item above, especially:
   160 MHz PLL; ~24 Hz refresh)**: buffer time 0.8 ms, expected load ~71 %, slack ~0.23 ms.
   Constants: `display::PCLK_MHZ`, `bounce::BB_ROWS`. 1.5 stays open until the board shows
   load/late/seq_err and the image position.
+- 2026-10-21, **step 1.5 fix loop 2 (board result pending)**: boards showed a full-screen single
+  colour cycling over time for every bounce variant (DMA consumption still exactly the active pixel
+  rate), while the direct PSRAM ring (1.3) was correct. Differences vs ESP-IDF's RGB panel found by
+  reading it: IDF sets `lcd_always_out_en` (DOUT phase lasts until LCD_START is cleared; esp-hal
+  leaves it clear) and enables GDMA data burst for internal memory (esp-hal default off). Both are
+  now the default (`fw-1.5-a`, `-b` = a + diag-shift). Root cause **not proven**; matrix, each a
+  single change from a (`exp-*` features in `firmware/Cargo.toml`):
+  e1 `exp-no-always-out`, e2 `exp-no-burst` (a correct but e1 or e2 wrong names the culprit);
+  e3 `exp-solid` (static ring, buffer 0 red, buffer 1 blue, EOF on, no interrupts, no core 1:
+  expect 10-row red/blue bands; fail means EOF or the SRAM ring itself);
+  e4 `exp-solid,exp-solid-noeof` (same without suc_eof: bands here but not in e3 means suc_eof).

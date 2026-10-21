@@ -22,7 +22,6 @@ use esp_hal::lcd_cam::LcdCam;
 use esp_hal::lcd_cam::lcd::dpi::{self, Dpi, Format, FrameTiming};
 use esp_hal::lcd_cam::lcd::{ClockMode, Phase, Polarity};
 use esp_hal::psram::{Psram, PsramConfig, PsramMode, SpiRamFreq};
-use esp_hal::system::Stack;
 use esp_hal::time::{Duration as HalDuration, Instant, Rate};
 use esp_hal::timer::timg::TimerGroup;
 use log::info;
@@ -242,20 +241,26 @@ async fn main(_spawner: Spawner) -> ! {
         ConstStaticCell::new([DmaDescriptor::EMPTY; bounce::DESCRIPTORS]);
     static BOUNCE_BUFS: ConstStaticCell<[[u8; bounce::BB_BYTES]; 2]> =
         ConstStaticCell::new([[0; bounce::BB_BYTES]; 2]);
-    static CORE1_STACK: ConstStaticCell<Stack<4096>> = ConstStaticCell::new(Stack::new());
     let buf = BounceFb::new(DESCRIPTORS.take(), BOUNCE_BUFS.take(), fb);
 
     // Core 1 only binds the refill handlers (to its own interrupt map) and returns to idle.
-    esp_rtos::start_second_core(
-        peripherals.CPU_CTRL,
-        peripherals.FROM_CPU_INTR1,
-        CORE1_STACK.take(),
-        bounce::bind_handlers,
-    );
-    while !bounce::handlers_ready() {
-        Timer::after(Duration::from_millis(1)).await;
+    // The exp-solid test rings have no refill and run without interrupts.
+    #[cfg(not(feature = "exp-solid"))]
+    {
+        static CORE1_STACK: ConstStaticCell<esp_hal::system::Stack<4096>> =
+            ConstStaticCell::new(esp_hal::system::Stack::new());
+        esp_rtos::start_second_core(
+            peripherals.CPU_CTRL,
+            peripherals.FROM_CPU_INTR1,
+            CORE1_STACK.take(),
+            bounce::bind_handlers,
+        );
+        while !bounce::handlers_ready() {
+            Timer::after(Duration::from_millis(1)).await;
+        }
+        bounce::enable_interrupts();
     }
-    bounce::enable_interrupts();
+    bounce::configure_lcd();
     #[cfg(feature = "diag-shift")]
     info!("diag-shift: extra log line before scanout start");
     // Looped transfer: kept alive forever, never dropped (drop would stop the DMA).

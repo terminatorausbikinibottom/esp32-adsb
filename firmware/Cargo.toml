@@ -20,6 +20,12 @@ diag-norefill = []
 diag-ruler    = []
 # 16 MHz pixel clock (~55 % core-1 load) instead of 10 MHz.
 pclk-16mhz = []
+# Step 1.5 fix-loop 2 matrix (see docs/design/adsb-display.md). Default build = IDF-parity LCD/DMA config
+# (`lcd_always_out_en` set, internal-SRAM burst on). Each flag changes one thing back / to a test ring:
+exp-no-always-out = []  # e1: leave lcd_always_out_en clear (as esp-hal/1.5 before)
+exp-no-burst      = []  # e2: internal burst off (esp-hal default, as 1.5 before)
+exp-solid         = []  # e3: two SRAM buffers, buffer 0 solid red, buffer 1 solid blue, once, no refill, no interrupts, no core 1
+exp-solid-noeof   = []  # e4: with exp-solid, no suc_eof on any descriptor
 
 [dependencies]
 esp-hal = { version = "~1.2.2", features = ["esp32s3", "log-04", "unstable"] }

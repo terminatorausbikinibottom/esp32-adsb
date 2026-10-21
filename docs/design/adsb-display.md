@@ -420,7 +420,7 @@ and the same software renderer run unchanged in the browser simulator (ADR-002).
      |-------|---------|-------|
      | `esp-hal` | 1.2.2 | `unstable` feature for LCD_CAM/PSRAM |
      | `esp-rtos` | 0.4.0 | Embassy integration that replaced `esp-hal-embassy` (last release 0.9.1, 2025-10) |
-     | `esp-radio` | 0.18.0 | WiFi; renamed from `esp-wifi` (last release 0.15.1, 2025-10) |
+     | `esp-radio` | 1.0.0-beta.1 (esp-generate 1.4.0; crates.io max stable 0.18.0) | WiFi; renamed from `esp-wifi` (last release 0.15.1, 2025-10) |
      | `esp-alloc` | 0.11.0 | |
      | `embassy-executor` | 0.10.0 | |
      | `embassy-net` | 0.9.1 | TCP, DHCPv4, UDP (SNTP), DNS (Phase 5) |
@@ -1275,7 +1275,7 @@ only adds the platform glue.
 | R2 | PSRAM bandwidth contention → horizontal drift, worse with WiFi | **High** (was medium–high: Waveshare's own code needs a bounce buffer "to avoid screen drift") / high | Concrete plan M0–M4 under Bandwidth: a drift gate in 1.4 under synthetic load, **bounce buffers planned as step 1.5** (no longer deferred), PCLK reduction as M3, palette framebuffer in SRAM as M4. Re-verified in 3.5 and 4.6. |
 | R3 | Cache coherence: CPU writes not visible to DMA | Medium / medium | Explicit writeback after rendering via `esp_hal::soc::cache_writeback_addr` (verified to exist; `#[doc(hidden)] unsafe`, so unstable, and wrapped in one function). Tested in 1.4. Not needed on the bounce-buffer path. |
 | R4 | Pin map, CH422G addressing or panel timings wrong for the actual board | Low (was medium: verified against Waveshare's demo code and docs; the board is confirmed as -7 800×480, N16R8) / medium | Remaining risk is a PCB revision differing from the demo. Steps 1.2/1.3/1.6 are designed to expose errors. 1.2 also confirms EXIO5 keeps USB alive. |
-| R5 | Crate churn: renames confirmed (esp-wifi → esp-radio 0.18.0, esp-hal-embassy → esp-rtos 0.4.0); embassy version skew with Slint/reqwless/embedded-tls/mbedtls-rs | High / medium | Pin versions from esp-generate 1.4.0 output (0.2). Record them in the revision log. Upgrade deliberately, not incidentally. |
+| R5 | Crate churn: renames confirmed (esp-wifi → esp-radio 1.0.0-beta.1 (per esp-generate), esp-hal-embassy → esp-rtos 0.4.0); embassy version skew with Slint/reqwless/embedded-tls/mbedtls-rs | High / medium | Pin versions from esp-generate 1.4.0 output (0.2). Record them in the revision log. Upgrade deliberately, not incidentally. |
 | R6 | Internal SRAM pressure: WiFi + embassy-net + Slint line buffers + DMA descriptors + **2×16 KB bounce buffers** (+ TLS in P5) | Medium / medium | Log heap stats from 1.1 on. TLS buffers and Slint heap go in PSRAM. Reduce TCP buffer sizes if needed. |
 | R7 | Slint licence | **Resolved (D3):** GPLv3 accepted, never commercial. Residual: GPL obligations if binaries are ever distributed (they aren't; they contain secrets) | Licence files per D7. embedded-graphics remains the technical fallback only. |
 | R8 | Software render too slow at 800×480 from PSRAM, made worse by bounce-copy cache pollution | Low–medium / medium | Partial rendering, 1 Hz model updates (2 Hz card only if measured OK), render on core 0 with bounce on core 1. Measured in 4.1. |
@@ -1669,3 +1669,4 @@ Unverified (summary): every [VERIFY] item above, especially:
     GPLv3 text from gnu.org. `.gitignore` adds `target/`, `.env`, `captures/`, `*.capture`.
     `cargo build --release` and `cargo clippy --release` pass (one linker warning about an RWX
     LOAD segment, generated code, ignored).
+- 2026-10-21, **step 0.2 QA follow-up**: ADR version table row and R5 updated to esp-radio 1.0.0-beta.1 to match the recorded deviation. No other changes.

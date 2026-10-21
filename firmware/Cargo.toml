@@ -16,6 +16,8 @@ diag-shift = []
 
 [dependencies]
 esp-hal = { version = "~1.2.2", features = ["esp32s3", "log-04", "unstable"] }
+# Same PAC esp-hal uses; the GDMA out-EOF and LCD VSYNC interrupt registers are not exposed by esp-hal.
+esp32s3 = "0.36"
 
 esp-rtos = { version = "0.4.0", features = [
   "embassy",

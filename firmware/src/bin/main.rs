@@ -16,21 +16,22 @@ use esp_backtrace as _;
 use esp_hal::Async;
 use esp_hal::clock::CpuClock;
 use esp_hal::dma::DmaDescriptor;
-use esp_hal::dma::aligned::{DmaAlignedMut, InternalMemory};
 use esp_hal::gpio::Level;
 use esp_hal::i2c::master::{Config as I2cConfig, I2c, SoftwareTimeout};
 use esp_hal::lcd_cam::LcdCam;
 use esp_hal::lcd_cam::lcd::dpi::{self, Dpi, Format, FrameTiming};
 use esp_hal::lcd_cam::lcd::{ClockMode, Phase, Polarity};
 use esp_hal::psram::{Psram, PsramConfig, PsramMode, SpiRamFreq};
-use esp_hal::time::{Duration as HalDuration, Rate};
+use esp_hal::system::Stack;
+use esp_hal::time::{Duration as HalDuration, Instant, Rate};
 use esp_hal::timer::timg::TimerGroup;
 use log::info;
 use modes as _;
 
+use firmware::bounce::{self, BounceFb};
 use firmware::ch422g::{self, Ch422g};
-use firmware::display::{self, LoopedFb};
-use static_cell::StaticCell;
+use firmware::display;
+use static_cell::ConstStaticCell;
 
 extern crate alloc;
 
@@ -125,8 +126,7 @@ async fn main(_spawner: Spawner) -> ! {
         "psram: allocation did not land in PSRAM"
     );
     // Never freed: the LCD DMA reads it for the life of the program.
-    let fb: &'static mut [u8] =
-        unsafe { core::slice::from_raw_parts_mut(fb_ptr, display::FB_BYTES) };
+    let fb: &'static [u8] = unsafe { core::slice::from_raw_parts(fb_ptr, display::FB_BYTES) };
     info!("psram: fb ptr={fb_ptr:p} len={}", display::FB_BYTES);
     // SAFETY: 64-byte aligned, 2-byte multiple length, exclusively owned.
     display::draw_pattern(unsafe {
@@ -186,7 +186,7 @@ async fn main(_spawner: Spawner) -> ! {
     // "front porch" fields are really line start to first active pixel, i.e. pulse + back porch.
     let lcd_cam = LcdCam::new(peripherals.LCD_CAM);
     let dpi_config = dpi::Config::default()
-        .with_frequency(Rate::from_mhz(16))
+        .with_frequency(Rate::from_mhz(display::PCLK_MHZ))
         // IDF pclk_active_neg=1 sets LCD_CK_OUT_EDGE=1, which esp-hal calls ShiftHigh.
         .with_clock_mode(ClockMode {
             polarity: Polarity::IdleLow,
@@ -237,16 +237,25 @@ async fn main(_spawner: Spawner) -> ! {
         .with_data14(peripherals.GPIO41)
         .with_data15(peripherals.GPIO40);
 
-    static DESCRIPTORS: StaticCell<InternalMemory<[DmaDescriptor; display::DESCRIPTORS]>> =
-        StaticCell::new();
-    let descriptors = DESCRIPTORS
-        .init(InternalMemory::new(
-            [DmaDescriptor::EMPTY; display::DESCRIPTORS],
-        ))
-        .get_mut()
-        .unsize();
-    let fb = DmaAlignedMut::new(fb).expect("framebuffer not DMA-aligned");
-    let buf = LoopedFb::new(descriptors, fb);
+    // Bounce buffers and descriptors are statics, not heap: the internal heap is mostly taken by WiFi.
+    static DESCRIPTORS: ConstStaticCell<[DmaDescriptor; bounce::DESCRIPTORS]> =
+        ConstStaticCell::new([DmaDescriptor::EMPTY; bounce::DESCRIPTORS]);
+    static BOUNCE_BUFS: ConstStaticCell<[[u8; bounce::BB_BYTES]; 2]> =
+        ConstStaticCell::new([[0; bounce::BB_BYTES]; 2]);
+    static CORE1_STACK: ConstStaticCell<Stack<4096>> = ConstStaticCell::new(Stack::new());
+    let buf = BounceFb::new(DESCRIPTORS.take(), BOUNCE_BUFS.take(), fb);
+
+    // Core 1 only binds the refill handlers (to its own interrupt map) and returns to idle.
+    esp_rtos::start_second_core(
+        peripherals.CPU_CTRL,
+        peripherals.FROM_CPU_INTR1,
+        CORE1_STACK.take(),
+        bounce::bind_handlers,
+    );
+    while !bounce::handlers_ready() {
+        Timer::after(Duration::from_millis(1)).await;
+    }
+    bounce::enable_interrupts();
     #[cfg(feature = "diag-shift")]
     info!("diag-shift: extra log line before scanout start");
     // Looped transfer: kept alive forever, never dropped (drop would stop the DMA).
@@ -255,8 +264,13 @@ async fn main(_spawner: Spawner) -> ! {
         .map_err(|e| e.0)
         .expect("dpi: send failed");
     info!(
-        "lcd: scanout started pclk=16MHz 800x480 total=820x500 (~39 Hz) burst=64B descriptors={}",
-        display::DESCRIPTORS
+        "lcd: bounce scanout started pclk={}MHz 800x480 total=820x500 (~{} Hz) bounce={}x{}B descriptors={} sram_static={}B core1_stack=4096B",
+        display::PCLK_MHZ,
+        display::REFRESH_HZ,
+        2,
+        bounce::BB_BYTES,
+        bounce::DESCRIPTORS,
+        BounceFb::SRAM_BYTES
     );
     expander
         .set_pin(ch422g::BACKLIGHT, true)
@@ -265,11 +279,28 @@ async fn main(_spawner: Spawner) -> ! {
     info!("ch422g: backlight on");
 
     let mut n = 0u32;
+    let mut last = Instant::now();
     loop {
+        Timer::after(Duration::from_secs(1)).await;
+        let now = Instant::now();
+        let elapsed_us = (now - last).as_micros().max(1) as u32;
+        last = now;
+        let st = bounce::take_stats();
         info!("alive {n}s");
+        // load = handler busy time / wall time; one refill must finish within one buffer time
+        info!(
+            "bounce: refills/s={} avg_us={} max_us={} load={}% late={} seq_err={} vsync/s={} vsync_fix={}",
+            st.refills,
+            st.busy_us.checked_div(st.refills).unwrap_or(0),
+            st.max_us,
+            (st.busy_us as u64 * 100 / elapsed_us as u64),
+            st.late,
+            st.seq_err,
+            st.vsyncs,
+            st.vsync_fix
+        );
         log_heap("heartbeat");
         n += 1;
-        Timer::after(Duration::from_secs(1)).await;
     }
 
     // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.2.2/examples

@@ -2082,6 +2082,7 @@ dependencies = [
  "esp-println",
  "esp-radio",
  "esp-rtos",
+ "esp32s3 0.36.0",
  "log",
  "modes",
  "smoltcp 0.14.0",

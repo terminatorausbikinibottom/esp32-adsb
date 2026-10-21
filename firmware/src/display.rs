@@ -8,6 +8,11 @@ use esp_hal::dma::{
 pub const WIDTH: usize = 800;
 pub const HEIGHT: usize = 480;
 pub const FB_BYTES: usize = WIDTH * HEIGHT * 2;
+/// Pixel clock. 10 MHz is an exact divide of the 160 MHz PLL and gives the bounce-buffer refill
+/// headroom (see docs/design/adsb-display.md, step 1.5 result); the panel was verified at 16 MHz.
+pub const PCLK_MHZ: u32 = 10;
+/// Frame rate for the 820 x 500 total frame.
+pub const REFRESH_HZ: u32 = PCLK_MHZ * 1_000_000 / (820 * 500);
 /// Framebuffer alignment: covers the data-cache line (32/64 B) and the 64 B external burst.
 pub const FB_ALIGN: usize = 64;
 pub const BURST: ExternalBurstConfig = ExternalBurstConfig::Size64;

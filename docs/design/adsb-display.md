@@ -1697,3 +1697,16 @@ Unverified (summary): every [VERIFY] item above, especially:
   as in ESP-IDF; to be upstreamed, possibly carried as a git fork instead of vendoring), and bring
   **step 1.5 (bounce buffers) forward to before 1.4**. Bounce buffers prefilled in SRAM before
   `lcd_start` remove the latency race and address R2. Step 1.3 is closed by 1.5s board result.
+- 2026-10-21, **step 1.5 implemented (code only, board result pending)**: `firmware/src/bounce.rs`.
+  esp-hal 1.2.2 has no public hook for the Dpi's GDMA channel interrupts, so the handlers are
+  bound with `esp_hal::interrupt::bind_handler` (`DMA_OUT_CH0`, `LCD_CAM`) and the out-EOF /
+  VSYNC enables, EOF descriptor address and raw status are accessed through the `esp32s3` PAC
+  (already in the lock file; no vendor change). The custom `DmaTxBuffer` (2 x 16,000 B buffers,
+  4 x 4000 B descriptors each, EOF on each buffer's last descriptor, ring) is accepted by
+  `Dpi::send`. Handlers run on core 1 (`esp_rtos::start_second_core`, Priority2). Buffers are
+  prefilled in `prepare()`, i.e. after the LCD/afifo reset and right before the DMA starts. The
+  CPU copy of 16,000 B at the measured ~28 MB/s PSRAM read takes ~0.57 ms, which is longer than
+  the 0.5 ms a buffer lasts at 16 MHz, so **PCLK is lowered to 10 MHz (M3; exact /16 of the
+  160 MHz PLL; ~24 Hz refresh)**: buffer time 0.8 ms, expected load ~71 %, slack ~0.23 ms.
+  Constants: `display::PCLK_MHZ`, `bounce::BB_ROWS`. 1.5 stays open until the board shows
+  load/late/seq_err and the image position.

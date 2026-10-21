@@ -8,3 +8,10 @@ license = "GPL-3.0-or-later"
 heapless = "0.9"
 libm = "0.2"
 modes = { path = "../modes" }
+
+[features]
+# Deterministic seeded scenarios (fictitious receiver) emitting AVR lines; pulls in `modes/encode`.
+scenario = ["modes/encode"]
+
+[dev-dependencies]
+modes = { path = "../modes", features = ["encode"] }

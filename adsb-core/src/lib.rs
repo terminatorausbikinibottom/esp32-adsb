@@ -7,4 +7,7 @@
 
 pub mod geo;
 pub mod kinematics;
+pub mod pipeline;
+#[cfg(feature = "scenario")]
+pub mod scenario;
 pub mod tracker;

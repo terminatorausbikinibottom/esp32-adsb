@@ -17,6 +17,11 @@
     "ghcr.io/devcontainers/features/node:1": {
       "version": "lts"
     },
+    // python3 >= 3.11 for the agentic-harness hooks (trixie ships 3.13).
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "os-provided"
+    },
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1": {},
     "ghcr.io/rio/features/chezmoi:1": {},
     "./features/esp-rs": {
       "targets": "all"
@@ -48,10 +53,16 @@
 
   "mounts": [
     // Persist cargo downloads across container rebuilds.
-    "source=esp32-adsb-cargo-registry,target=/usr/local/cargo/registry,type=volume"
+    "source=esp32-adsb-cargo-registry,target=/usr/local/cargo/registry,type=volume",
+    // Persist Claude Code login/config across container rebuilds.
+    "source=esp32-adsb-claude-config,target=/home/vscode/.claude,type=volume",
+    // SSH config and personal key (read-only) for git over SSH.
+    "source=${localEnv:HOME}/.ssh/config,target=/home/vscode/.ssh/config,type=bind,readonly",
+    "source=${localEnv:HOME}/.ssh/personal,target=/home/vscode/.ssh/personal,type=bind,readonly"
   ],
 
   "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "postStartCommand": "bash .devcontainer/post-start.sh",
 
   "customizations": {
     "vscode": {

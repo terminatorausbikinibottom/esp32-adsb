@@ -1721,3 +1721,30 @@ Unverified (summary): every [VERIFY] item above, especially:
   e3 `exp-solid` (static ring, buffer 0 red, buffer 1 blue, EOF on, no interrupts, no core 1:
   expect 10-row red/blue bands; fail means EOF or the SRAM ring itself);
   e4 `exp-solid,exp-solid-noeof` (same without suc_eof: bands here but not in e3 means suc_eof).
+- 2026-10-21, **step 1.5 bounce buffers failed on the board; decision for option A (user-approved
+  extra attempt beyond the 2-fix-loop limit)**. Evidence: with any descriptor ring whose source is
+  internal SRAM, the panel shows one full-screen single colour that changes every frame (about one
+  pattern pixel per frame: the same pixel, then the next, ...), although GDMA moves data at the
+  full pixel rate (refill metrics perfect: 289 us per 16 KB, load 33 %, late/seq_err/vsync_fix 0 at
+  10 MHz). The VSYNC resync (592d6d3) and the IDF-parity LCD/DMA config (`lcd_always_out_en`, SRAM
+  burst; cb30ea0) changed nothing. e3 (`exp-solid`: static 2 x 16,000 B ring, buffer 0 red, buffer
+  1 blue, suc_eof, no interrupts, no core 1) and e4 (`exp-solid,exp-solid-noeof`, no EOF at all)
+  both show the same cycling single colour instead of red/blue bands, which rules out the refill
+  code, the interrupts and suc_eof: the SRAM-sourced ring alone fails, while the identical LCD
+  config reading the 191-descriptor PSRAM ring (1.3, b64805b) is correct apart from the start
+  phase. Cause unknown (suspected esp-hal Dpi/GDMA setup for internal memory; see the upstream
+  issue text kept with the step report). The code stays behind the Cargo feature `bounce` (off by
+  default, `pclk-16mhz`/`exp-*`/`diag-norefill` apply to it only); `display::PCLK_MHZ` is 16 again.
+  **Decision (option A):** direct circular PSRAM ring (1.3) at 16 MHz plus a per-VBLANK DMA
+  restart on core 1 (`firmware/src/restart.rs`), copying ESP-IDF's S3 workaround
+  (`lcd_rgb_panel_try_restart_transmission`): on `lcd_vsync_int` reset the LCD afifo and the GDMA
+  out channel and start a dedicated restart descriptor at framebuffer + 17 px (34 B; 17 = FIFO
+  depth 16 + 1 preserved pixels), chaining into ring descriptor 1. IDF mounts that node with the
+  buffer alignment check bypassed ("doesn't really matter"), so the unaligned 64 B-burst start is
+  deliberate and unverified until the board run. Core 1 is used because core 0 runs WiFi and
+  critical sections that could push the ISR out of the 12-line vertical blank (~0.6 ms at 16 MHz,
+  8 lines ~0.4 ms after the VSYNC pulse ends). The log reports restarts/s (expect ~39) and ISR
+  us per restart. Variants: `no-resync` (1.3 without restart), `diag-shift`, `diag-ruler`.
+  **Consequence for step 1.4:** the drift gate must now verify R2 (PSRAM contention under synthetic
+  load, then WiFi) on this direct PSRAM path with the per-frame restart, with no bounce-buffer
+  fallback available; if 1.4 fails, M3 (lower PCLK) or M4 (palette framebuffer in SRAM) is next.

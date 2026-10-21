@@ -10,11 +10,14 @@ name = "firmware"
 path = "./src/bin/main.rs"
 
 [features]
+# Old step 1.5 SRAM bounce-buffer scanout (does not work, see docs/design/adsb-display.md). Off by default;
+# the exp-*, diag-norefill and pclk-16mhz features only apply to it.
+bounce = []
 # Extra log line before the scanout starts; changes timing and code layout only. Build with and
 # without it to check the image position does not depend on the build (see vendor/esp-hal/VENDORED.md).
 diag-shift = []
-# Step 1.5 fix-loop diagnostics (see docs/design/adsb-display.md): `no-resync` drops the per-frame DMA
-# restart, `diag-norefill` stops the refills (both buffers keep rows 0..19), `diag-ruler` paints the ruler.
+# `no-resync` drops the per-frame DMA restart (1.3 behaviour; with `bounce`: keeps only the counter fix),
+# step 1.5 diagnostics (see docs/design/adsb-display.md): `diag-norefill` stops the refills (both buffers keep rows 0..19), `diag-ruler` paints the ruler.
 no-resync     = []
 diag-norefill = []
 diag-ruler    = []

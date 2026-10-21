@@ -1,4 +1,4 @@
-//! 800x480 RGB565 scanout: static test pattern and a looped DMA buffer over a PSRAM framebuffer.
+//! 800x480 RGB565 scanout: static test pattern and a looped DMA buffer over a PSRAM framebuffer with a restart descriptor.
 
 use esp_hal::dma::aligned::DmaAlignedMut;
 use esp_hal::dma::{
@@ -8,10 +8,13 @@ use esp_hal::dma::{
 pub const WIDTH: usize = 800;
 pub const HEIGHT: usize = 480;
 pub const FB_BYTES: usize = WIDTH * HEIGHT * 2;
-/// Pixel clock. 10 MHz is an exact divide of the 160 MHz PLL and gives the bounce-buffer refill
-/// headroom (see docs/design/adsb-display.md, step 1.5 result); the panel was verified at 16 MHz
-/// (feature `pclk-16mhz`).
-pub const PCLK_MHZ: u32 = if cfg!(feature = "pclk-16mhz") { 16 } else { 10 };
+/// Pixel clock: 16 MHz (panel verified). The old bounce-buffer path (feature `bounce`) runs at 10 MHz
+/// unless `pclk-16mhz` is also set.
+pub const PCLK_MHZ: u32 = if cfg!(feature = "bounce") && !cfg!(feature = "pclk-16mhz") {
+    10
+} else {
+    16
+};
 /// Frame rate for the 820 x 500 total frame.
 pub const REFRESH_HZ: u32 = PCLK_MHZ * 1_000_000 / (820 * 500);
 /// Framebuffer alignment: covers the data-cache line (32/64 B) and the 64 B external burst.
@@ -19,8 +22,13 @@ pub const FB_ALIGN: usize = 64;
 pub const BURST: ExternalBurstConfig = ExternalBurstConfig::Size64;
 /// Bytes per descriptor: 4095 rounded down to a burst multiple so every chunk starts burst-aligned.
 const CHUNK: usize = 4032;
-/// `FB_BYTES.div_ceil(CHUNK)`; the descriptors must live in internal RAM.
-pub const DESCRIPTORS: usize = FB_BYTES.div_ceil(CHUNK);
+/// Ring length: `FB_BYTES.div_ceil(CHUNK)`.
+const RING: usize = FB_BYTES.div_ceil(CHUNK);
+/// Ring plus the restart descriptor; the descriptors must live in internal RAM.
+pub const DESCRIPTORS: usize = RING + 1;
+/// The LCD async FIFO keeps 16 + 1 pixels across its reset, so a restart skips them (ESP-IDF
+/// `LCD_FIFO_PRESERVE_SIZE_PX`, esp_lcd_panel_rgb.c).
+const RESTART_SKIP_BYTES: usize = 17 * 2;
 
 const R: u16 = 0xF800;
 const G: u16 = 0x07E0;
@@ -129,10 +137,10 @@ impl LoopedFb {
         assert!(descriptors.len() >= DESCRIPTORS);
         let base = fb.as_mut_ptr();
         let head = descriptors.as_mut_ptr();
-        for i in 0..DESCRIPTORS {
+        for i in 0..RING {
             let off = i * CHUNK;
             let len = CHUNK.min(FB_BYTES - off);
-            let next = if i + 1 == DESCRIPTORS {
+            let next = if i + 1 == RING {
                 head
             } else {
                 unsafe { head.add(i + 1) }
@@ -145,6 +153,17 @@ impl LoopedFb {
             d.set_suc_eof(false);
             d.set_owner(Owner::Dma);
         }
+        // Restart descriptor (used by `restart`): the rest of ring chunk 0 from 17 px in, then the
+        // normal ring. Like IDF's, its start is not burst-aligned (IDF bypasses the alignment check
+        // for it: "it doesn't really matter in this case").
+        let r = &mut descriptors[RING];
+        r.buffer = unsafe { base.add(RESTART_SKIP_BYTES) };
+        r.next = unsafe { head.add(1) };
+        r.set_size(CHUNK - RESTART_SKIP_BYTES);
+        r.set_length(CHUNK - RESTART_SKIP_BYTES);
+        r.set_suc_eof(false);
+        r.set_owner(Owner::Dma);
+        crate::restart::set_desc(r as *mut DmaDescriptor as usize);
         Self { descriptors, fb }
     }
 }

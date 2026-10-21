@@ -1,6 +1,6 @@
 //! Spherical-earth geo maths (f64 + libm). Distances in metres, angles in degrees.
 
-/// Mean earth radius; the spherical model is good to ~0.3 %, plenty for a 5 km vicinity.
+/// Mean earth radius; the spherical model is good to ~0.6 %, plenty for a 5 km vicinity.
 pub const EARTH_RADIUS_M: f64 = 6_371_008.8;
 
 /// Great-circle (ground) distance via haversine.

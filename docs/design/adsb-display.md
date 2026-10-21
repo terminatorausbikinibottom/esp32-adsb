@@ -1089,7 +1089,8 @@ S.1 **[code]** Encoder, scenarios and ingest pipeline (no UI yet).
      feed-outage events. Scenarios:
      - `overflight`, in order: quiet; a jet approaching; overhead at FL350; just passed; a GA
        aircraft at 1,500 ft passing 2 km abeam with short frames only after its first DF17;
-       quiet; a 40 s feed outage (no data);
+       quiet; a 40 s feed outage (the No data card appears 30 s after the outage starts, per
+       `NO_DATA_AFTER_MS`);
      - `busy`: 30 aircraft;
      - `edge`: long callsigns, no position, stale, squawk 7700.
    - *Verify:* encode→decode round-trip property tests for every encoded type, including CPR
@@ -1133,6 +1134,10 @@ S.4 **[code]** `sim-bridge/` (tokio + axum or similar [VERIFY current versions a
      [Configuration](#configuration).
    - It refuses to start on a non-loopback address.
    - Origin/Host allow-list on every request, including the WebSocket upgrade (403 otherwise).
+     A *missing* Origin is refused on the WebSocket upgrade only: browsers omit Origin on
+     same-origin GETs, so plain GETs are protected by the Host check plus rejection of
+     `Sec-Fetch-Site: cross-site|same-site`. Behind trunk, the browser's Host arrives as
+     `X-Forwarded-Host` (trunk rewrites Host); exactly one value is accepted.
      No CORS headers. Coordinates are never logged.
    - trunk `[[proxy]]` entries for `/ws` (with `ws = true`) and `/local` [VERIFY syntax].
    - *Verify:*
@@ -1670,3 +1675,7 @@ Unverified (summary): every [VERIFY] item above, especially:
     `cargo build --release` and `cargo clippy --release` pass (one linker warning about an RWX
     LOAD segment, generated code, ignored).
 - 2026-10-21, **step 0.2 QA follow-up**: ADR version table row and R5 updated to esp-radio 1.0.0-beta.1 to match the recorded deviation. No other changes.
+- 2026-10-21, **implementation clarifications** (from QA of S.1/S.4; no plan change): No data
+  timing in the `overflight` scenario is 30 s after the outage starts; sim-bridge Origin rule
+  narrowed to the WebSocket upgrade for *missing* Origin, with Sec-Fetch-Site and single
+  X-Forwarded-Host checks added (trunk 0.22 rewrites Host). No other changes.

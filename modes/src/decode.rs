@@ -38,6 +38,10 @@ pub enum Body {
     },
     /// DF17/18: TC 19.
     Velocity(Velocity),
+    /// CRC-valid DF17 / DF18 CF=0 whose content is not decoded (surface position, TC 0, 23-31,
+    /// unsupported velocity subtypes). Still proves the address is alive, so the tracker can use
+    /// it for the known-ICAO set (R15).
+    Other { df: u8, tc: u8 },
     /// DF11 all-call reply. `iid` is the interrogator ID when the remainder is 1..=127.
     AllCall { capability: u8, iid: Option<u8> },
     /// DF0/4/16/20 altitude reply. `mb` is the raw Comm-B payload (DF20 only; BDS not inferred).
@@ -88,8 +92,9 @@ impl FrameData {
 }
 
 /// Decode one frame. `None` for: long frames failing the CRC, DF11 with a remainder above 127,
-/// DF mismatching the frame length, and formats/type codes not decoded (surface position, DF18
-/// CF != 0, DF19, ...).
+/// DF mismatching the frame length, DF19 and DF18 with CF != 0 (TIS-B/ADS-R: the AA is not
+/// necessarily an ICAO address, so it must never be `Verified`). CRC-valid DF17 / DF18 CF=0 with
+/// an undecoded type code yields `Body::Other`.
 pub fn decode(frame: &RawFrame) -> Option<Message> {
     let f = &frame.data;
     let (address, body) = match f.df() {
@@ -97,17 +102,20 @@ pub fn decode(frame: &RawFrame) -> Option<Message> {
             if !f.crc_ok() {
                 return None;
             }
+            // DF18 with CF != 0 (TIS-B, ADS-R, ...) has no ICAO AA, so `me()` rejects it here.
+            let tc = f.type_code()?;
             let body = if let Some(id) = f.identification() {
                 Body::Identification(id)
             } else if let Some(v) = f.velocity() {
                 Body::Velocity(v)
-            } else {
-                let cpr = f.cpr_position()?;
+            } else if let Some(cpr) = f.cpr_position() {
                 Body::AirbornePosition {
                     cpr,
                     altitude_ft: f.adsb_altitude(),
-                    gnss: f.type_code()? >= 20,
+                    gnss: tc >= 20,
                 }
+            } else {
+                Body::Other { df: f.df(), tc }
             };
             (Address::Verified(f.icao()?), body)
         }
@@ -364,12 +372,62 @@ mod tests {
         assert_eq!(decode(&raw(frame(19 << 3, &[0; 10], 0))), None);
         assert_eq!(decode(&raw(frame(18 << 3 | 1, &[0; 10], 0))), None); // DF18 CF=1
         assert_eq!(
-            decode(&raw(frame(17 << 3, &[0x28, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0))),
-            None
-        ); // TC5 surface
-        assert_eq!(
             decode(&raw(FrameData::Short([0x8D, 0, 0, 0, 0, 0, 0]))),
             None
         ); // length mismatch
+    }
+
+    #[test]
+    fn unsupported_type_codes_give_verified_other() {
+        for (df, cf, tc) in [
+            (17u8, 0u8, 0u8),
+            (17, 0, 5),
+            (17, 0, 28),
+            (17, 0, 29),
+            (17, 0, 31),
+            (18, 0, 5),
+            (18, 0, 0),
+        ] {
+            let mut body = [0u8; 10];
+            body[0] = 0xAB;
+            body[1] = 0xCD;
+            body[2] = 0xEF;
+            body[3] = tc << 3;
+            let good = raw(frame(df << 3 | cf, &body, 0));
+            let m = decode(&good).unwrap();
+            assert_eq!(m.address, Address::Verified(0xABCDEF));
+            assert_eq!(m.body, Body::Other { df, tc }, "df{df} tc{tc}");
+        }
+    }
+
+    #[test]
+    fn velocity_unsupported_subtype_is_other() {
+        let mut body = [0u8; 10];
+        body[3] = 19 << 3; // ST 0
+        let m = decode(&raw(frame(17 << 3, &body, 0))).unwrap();
+        assert_eq!(m.body, Body::Other { df: 17, tc: 19 });
+    }
+
+    #[test]
+    fn df18_nonzero_cf_is_dropped() {
+        for cf in 1..8 {
+            assert_eq!(decode(&raw(frame(18 << 3 | cf, &[0; 10], 0))), None);
+        }
+    }
+
+    #[test]
+    fn corrupted_other_frames_are_never_verified() {
+        let FrameData::Long(good) =
+            frame(17 << 3, &[0xAB, 0xCD, 0xEF, 28 << 3, 0, 0, 0, 0, 0, 0], 0)
+        else {
+            unreachable!()
+        };
+        for bit in 0..112 {
+            let mut b = good;
+            b[bit / 8] ^= 0x80 >> (bit % 8);
+            if let Some(m) = decode(&raw(FrameData::Long(b))) {
+                assert!(!m.address.is_verified(), "bit {bit}");
+            }
+        }
     }
 }

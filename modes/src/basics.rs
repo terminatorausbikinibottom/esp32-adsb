@@ -45,7 +45,7 @@ impl FrameData {
     }
 
     /// Explicit AA field of DF11/17/18. Unvalidated: check `crc_ok` before trusting it.
-    /// The decoder (2.7+) should only expose validated addresses.
+    /// `decode()` wraps it as `Address::Verified` / `Address::Recovered` according to the CRC.
     pub fn icao(&self) -> Option<u32> {
         match self.df() {
             11 | 17 | 18 if self.length_matches_df() => {
@@ -59,7 +59,7 @@ impl FrameData {
     /// Address recovered from the parity overlay of DF0/4/5/16/20/21.
     ///
     /// Cannot be validated here: the caller must apply a known-ICAO filter (R15).
-    /// The decoder (2.7+) should only expose validated addresses.
+    /// `decode()` exposes it as `Address::Recovered`, never `Verified`.
     pub fn recovered_address(&self) -> Option<u32> {
         match self.df() {
             0 | 4 | 5 | 16 | 20 | 21 if self.length_matches_df() => Some(self.crc_remainder()),

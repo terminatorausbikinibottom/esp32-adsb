@@ -64,6 +64,7 @@ smoltcp = { version = "0.14.0", default-features = false, features = [
 ] }
 
 adsb-core        = { path = "../adsb-core" }
+adsb-app         = { path = "../adsb-app", default-features = false, features = ["single-threaded"] }
 modes             = { path = "../modes" }
 critical-section = "1.2.0"
 static_cell      = "2.1.1"

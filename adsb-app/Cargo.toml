@@ -1,0 +1,27 @@
+[package]
+name = "adsb-app"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+build = "build.rs"
+
+[dependencies]
+adsb-core = { path = "../adsb-core" }
+slint = { version = "=1.18.1", default-features = false, features = [
+  "compat-1-2",
+  "renderer-software",
+  "libm",
+] }
+
+[features]
+# Host and wasm32 builds (Slint's wasm code path needs std). The firmware turns this off.
+default = ["std"]
+std = ["slint/std"]
+# no_std targets: Slint's thread-locals become statics. Only ever use `App` from one thread.
+single-threaded = ["slint/unsafe-single-threaded"]
+
+[build-dependencies]
+slint-build = "=1.18.1"
+
+[dev-dependencies]
+adsb-core = { path = "../adsb-core", features = ["scenario"] }

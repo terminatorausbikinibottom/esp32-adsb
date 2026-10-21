@@ -1,0 +1,134 @@
+import "../fonts/LiberationSans-Regular.ttf";
+import "../fonts/LiberationSans-Bold.ttf";
+
+export enum CardKind { no-data, overhead, just-passed, quiet, approaching }
+export enum Screen { card, list }
+
+component Dot inherits Rectangle {
+    in property <bool> ok;
+    width: 14px;
+    height: 14px;
+    border-radius: 7px;
+    background: ok ? #3ddc84 : #e5484d;
+}
+
+component StatusBar inherits Rectangle {
+    in property <bool> wifi-ok;
+    in property <bool> feed-ok;
+    in property <string> counts;
+    in property <string> rate;
+    in property <string> clock;
+    height: 32px;
+    background: #1b1f27;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 10px;
+        alignment: start;
+        Dot { ok: wifi-ok; y: 9px; }
+        Text { text: "WiFi"; font-size: 16px; color: #9aa4b2; vertical-alignment: center; }
+        Dot { ok: feed-ok; y: 9px; }
+        Text { text: "Feed"; font-size: 16px; color: #9aa4b2; vertical-alignment: center; }
+        Text { text: counts; font-size: 16px; color: #e6e9ef; vertical-alignment: center; }
+        Text { text: rate; font-size: 16px; color: #e6e9ef; vertical-alignment: center; }
+    }
+    Text {
+        x: parent.width - self.width - 12px;
+        text: clock;
+        font-size: 16px;
+        color: #e6e9ef;
+        vertical-alignment: center;
+    }
+}
+
+component NavButton inherits Rectangle {
+    in property <string> label;
+    callback tapped();
+    width: 120px;
+    height: 48px;
+    border-radius: 8px;
+    background: ta.pressed ? #3b82f6 : #2a3140;
+    Text { text: label; font-size: 20px; color: #e6e9ef; horizontal-alignment: center; vertical-alignment: center; }
+    ta := TouchArea { clicked => { root.tapped(); } }
+}
+
+export component AppWindow inherits Window {
+    width: 800px;
+    height: 480px;
+    background: #0e1117;
+    default-font-family: "Liberation Sans";
+
+    in property <bool> wifi-ok;
+    in property <bool> feed-ok;
+    in property <string> counts;
+    in property <string> rate;
+    in property <string> clock;
+
+    in property <CardKind> kind;
+    in property <string> heading;
+    in property <string> line1;
+    in property <string> line2;
+    in property <string> line3;
+    in property <string> more;
+    // Greyed card (nearest beyond the radius, just passed) vs. full-contrast.
+    in property <bool> dim;
+    // Position decoded against the receiver only: may be wrong far out.
+    in property <bool> flagged;
+    in property <Screen> screen;
+
+    callback navigate(Screen);
+
+    // Not shown: its literals make the font embedder bake these non-ASCII glyphs in.
+    out property <string> glyph-seed: "°→↑↓·±×−–—·áàâäãåçéèêëíìîïñóòôöõøúùûüýÿÁÀÂÄÅÇÉÈÊËÍÎÏÑÓÔÖØÚÛÜßœŠšŽžłŁ";
+
+    StatusBar {
+        y: 0px;
+        width: parent.width;
+        wifi-ok: root.wifi-ok;
+        feed-ok: root.feed-ok;
+        counts: root.counts;
+        rate: root.rate;
+        clock: root.clock;
+    }
+
+    if screen == Screen.card: VerticalLayout {
+        y: 32px;
+        height: parent.height - 32px;
+        padding: 24px;
+        spacing: 10px;
+        Rectangle {
+            height: 4px;
+            background: kind == CardKind.overhead ? #3b82f6
+                : kind == CardKind.no-data ? #e5484d
+                : kind == CardKind.approaching ? #f5a524 : #3a4150;
+        }
+        Text {
+            text: heading;
+            font-size: kind == CardKind.overhead ? 72px : 40px;
+            font-weight: 700;
+            color: dim ? #7b8494 : #ffffff;
+            overflow: elide;
+        }
+        Text { text: line1; font-size: 32px; color: dim ? #7b8494 : #e6e9ef; overflow: elide; }
+        Text { text: line2; font-size: 28px; color: dim ? #7b8494 : #c3c9d4; overflow: elide; }
+        Text { text: line3; font-size: 28px; color: dim ? #7b8494 : #c3c9d4; overflow: elide; }
+        Text { text: flagged ? "position unverified" : ""; font-size: 20px; color: #f5a524; }
+        Rectangle { vertical-stretch: 1; }
+        Text { text: more; font-size: 24px; color: #9aa4b2; }
+    }
+
+    if screen == Screen.list: Text {
+        y: 32px;
+        x: 24px;
+        text: "List view";
+        font-size: 40px;
+        color: #7b8494;
+    }
+
+    NavButton {
+        x: parent.width - self.width - 16px;
+        y: parent.height - self.height - 16px;
+        label: screen == Screen.card ? "List" : "Card";
+        tapped => { navigate(screen == Screen.card ? Screen.list : Screen.card); }
+    }
+}

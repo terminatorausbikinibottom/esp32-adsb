@@ -9,6 +9,11 @@ license      = "GPL-3.0-or-later"
 name = "firmware"
 path = "./src/bin/main.rs"
 
+[features]
+# Extra log line before the scanout starts; changes timing and code layout only. Build with and
+# without it to check the image position does not depend on the build (see vendor/esp-hal/VENDORED.md).
+diag-shift = []
+
 [dependencies]
 esp-hal = { version = "~1.2.2", features = ["esp32s3", "log-04", "unstable"] }
 
@@ -69,6 +74,10 @@ modes             = { path = "../modes" }
 critical-section = "1.2.0"
 static_cell      = "2.1.1"
 
+
+# Patched esp-hal (Dpi::send ordering), see vendor/esp-hal/VENDORED.md. Drop once fixed upstream.
+[patch.crates-io]
+esp-hal = { path = "vendor/esp-hal" }
 
 # For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html
 [profile.dev]

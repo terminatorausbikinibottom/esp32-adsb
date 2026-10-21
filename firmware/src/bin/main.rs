@@ -247,6 +247,8 @@ async fn main(_spawner: Spawner) -> ! {
         .unsize();
     let fb = DmaAlignedMut::new(fb).expect("framebuffer not DMA-aligned");
     let buf = LoopedFb::new(descriptors, fb);
+    #[cfg(feature = "diag-shift")]
+    info!("diag-shift: extra log line before scanout start");
     // Looped transfer: kept alive forever, never dropped (drop would stop the DMA).
     let _transfer = dpi
         .send(true, buf)

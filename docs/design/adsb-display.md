@@ -1684,3 +1684,7 @@ Unverified (summary): every [VERIFY] item above, especially:
   (73744 free). CPU-side sequential timings: write 21 ms (~36 MB/s), read 27 ms (~28 MB/s) for
   768 KB at 80 MHz octal. Scanout needs ~32 MB/s continuous, so R2 contention is expected;
   the 1.4 drift gate and 1.5 bounce buffers stay as planned. Flash: DIO 40 MHz (bootloader).
+- 2026-10-21, **step 1.2 result (board)**: PASS. CH422G ACKs every address 0x20–0x27 and 0x30–0x3F
+  (address-only probes; includes 0x23/0x24/0x26/0x38), GT911 at 0x5D. Outputs 0x1E: backlight
+  (EXIO2) blinks at 1 Hz; USB-Serial-JTAG stays connected after the write, so EXIO5 low = USB is
+  confirmed. Bit mapping EXIOn = WR_IO bit n confirmed.

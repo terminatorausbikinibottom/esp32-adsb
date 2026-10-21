@@ -1,7 +1,10 @@
 # ADS-B display on Waveshare ESP32-S3-Touch-LCD-7
 
-Status: **revision 2, approved by the user 2026-10-21 (D1–D8 resolved)**. Implementation in
-progress on this branch.
+Status: **revision 3, awaiting review.** Revision 2 was approved by the user on 2026-10-21
+(D1–D8 resolved) and implementation is in progress on this branch. Revision 3 adds the
+approved-scope browser simulator (D9), records the step 0.1 results, and re-sequences the plan so
+UI work can start without the board. Step numbers from revision 2 are kept as stable IDs; new
+simulator steps are numbered S.1–S.8.
 Date: 2026-10-21. Branch: `feature/adsb-display`.
 
 Conventions used in this doc:
@@ -19,8 +22,7 @@ Conventions used in this doc:
 
 ## Decisions needed from user
 
-D1–D6 are **resolved** (answers below). D7 and D8 are new in revision 2. Each has a
-recommendation that the plan follows unless the user overrides it.
+D1–D9 are **resolved**. D7 and D8 were added in revision 2, D9 in revision 3.
 
 | # | Decision | Options | Recommendation / resolution | Blocks |
 |---|----------|---------|-----------------------------|--------|
@@ -32,6 +34,7 @@ recommendation that the plan follows unless the user overrides it.
 | D6 | **Confirm fr24feed output.** | Port 30002 must be enabled and reachable from the LAN (fr24feed `raw="yes"`; check the bind address). Same check for 30003 if D2 changes. | **Resolved:** 30002 is enabled and reachable. Additional requirement: **design a general ADS-B/Mode S client** that might later be connected directly to an SDR. Result: a transport-agnostic frame-source boundary (see [Frame-source boundary](#frame-source-boundary-general-mode-s-client)). Also: **don't commit local data** (captures, receiver location). | Phase 2 |
 | D7 | **Licence files** (follows from D3). | Whole repo GPL-3.0-or-later; or `firmware/` + `ui-sim/` GPL-3.0-or-later and the libraries (`modes`, `adsb-core`, which don't use Slint) MIT/Apache-2.0. | **Resolved:** user doesn't mind (personal use, maybe published later) → **GPL-3.0-or-later for the whole repo** (default; one licence, simplest). Pick the split instead if you want the Mode S library to be reusable under permissive terms. | Step 0.2 (LICENSE file) |
 | D8 | **"Overhead" UX choices.** | Empty state when nothing is within the radius: blank "nothing overhead" vs. nearest aircraft beyond the radius, greyed out. Distance metric: ground distance vs slant range. | **Resolved: defaults accepted by user** — show the nearest aircraft beyond the radius, greyed out, with an "approaching" hint. Filter and rank by **ground distance**, using dead-reckoned position; show altitude and elevation angle separately. Reasoning in ["Vicinity"](#vicinity). | Steps 2.10, 4.3 |
+| D9 | **Simulator** (revision 3): the user wants to iterate on the UI from the devcontainer on macOS (podman) without the board. A previous Slint + XQuartz setup was bad: there's no X11 forwarding. | Native app over X11/XQuartz; native app on the mac host; VNC/noVNC of a native app in the container; WebAssembly in the browser. | **Resolved: WebAssembly in the browser**, served from the container on a forwarded port. Mouse stands in for touch. Inputs: live (through a localhost WebSocket→TCP bridge), replay of the local capture, and synthetic scenarios. Design in ADR-002 under [Decision (ADR)](#decision-adr). A native macOS host build is a nice-to-have ("should compile"), with no steps planned. | Phase S |
 
 ---
 
@@ -49,6 +52,11 @@ secondary.
 
 Secondary goal (from D6): the decoding side should be a **general Mode S / ADS-B client
 library** that isn't tied to fr24feed's TCP output. It might later be fed by an SDR directly.
+
+Third goal (from D9, revision 3): **iterate on the UI without the board.** A browser simulator,
+built from the same UI and logic code as the firmware, runs from the devcontainer and is viewed in
+the mac's browser. It has to be usable before any hardware step is done, and it must not leak the
+receiver location.
 
 Repo state: only `README.md` and `.devcontainer/`. There's no firmware project yet. The
 container has rustup (`stable` and `esp` toolchains via espup, all targets), `espflash`,
@@ -199,7 +207,7 @@ covered by that check.
 
 | Port | Format | Device-side work | Trade-off |
 |------|--------|------------------|-----------|
-| **30002** (specified) | AVR raw text: `*8D4840D6202CC371C32CE0576098;\n`, possibly also `@<12 hex timestamp><frame>;` | Full Mode S / ADS-B decode: CRC, DF17/18 type codes, CPR, velocity, altitude | Most work, but well specified, self-contained and fully host-testable. No dependence on fr24feed's decoder quirks. |
+| **30002** (specified) | AVR raw text. **This fr24feed emits only the timestamped form** `@<12 hex timestamp><14 or 28 hex>;\n` (step 0.1). The plain `*8D4840D6202CC371C32CE0576098;\n` form is what other feeders emit; it's still supported. | Full Mode S / ADS-B decode: CRC, DF17/18 type codes, CPR, velocity, altitude | Most work, but well specified, self-contained and fully host-testable. No dependence on fr24feed's decoder quirks. |
 | 30003 | SBS/BaseStation CSV (`MSG,3,...,callsign,alt,gs,track,lat,lon,...`) | Parse CSV | Least work, and positions/velocity come pre-decoded. Depends on fr24feed's SBS output being enabled and correct. Fields are sparse per message type. |
 | 30005 | Beast binary (0x1A escaping, MLAT timestamp, signal level) | Binary framing + full decode, same as 30002 | Adds framing complexity, gains nothing for this use case. Its adapter fits the frame-source boundary below and is deferred. |
 
@@ -226,7 +234,8 @@ The boundary sits at **raw Mode S frames**, not at text lines:
   and it's testable byte by byte. [The exact trait shape is settled in step 2.1; the
   `Input`-associated-type form lets an SDR adapter take I/Q samples instead of bytes.]
 - **Adapters:**
-  - `AvrSource` (port 30002 text, `Input = u8`): **built now**.
+  - `AvrSource` (port 30002 text, `Input = u8`): **built now**. The `@`-timestamped form is the
+    primary path, since it's all this receiver sends (step 0.1); the `*` form is secondary.
   - `BeastSource` (port 30005 binary, `Input = u8`): named, **deferred**.
   - `Demodulator` (direct 1090 MHz I/Q samples from an SDR, `Input = IQ sample`, on another host
     or, in principle, on the device): named, **deferred**. Not built in this project.
@@ -262,7 +271,9 @@ Decoding scope (v1):
     message rate is a few hundred per second, which is fine).
 - **Short Mode S frames (changed in revision 2: now in scope)**, because a general client is
   wanted (D6). They're also useful here: they give altitude and squawk for nearby aircraft that
-  have a Mode S transponder but no ADS-B out (common in general aviation).
+  have a Mode S transponder but no ADS-B out (common in general aviation). **Step 0.1 confirms
+  they dominate this feed:** 339 of 372 sampled lines (91 %) were short frames. So the
+  known-ICAO filter below is on the hot path.
   - **DF11** all-call reply: AA (ICAO address) + capability. Accept it when the CRC remainder is 0
     (acquisition squitter, II/SI = 0). A non-zero remainder that fits in 7 bits is an interrogator
     ID: expose the IID, and accept the address only if it's already known.
@@ -276,7 +287,11 @@ Decoding scope (v1):
   - DF20/21 Comm-B payload (MB, 56 bits): exposed raw. BDS register inference is **deferred**
     (ambiguous, low value here).
   - DF0/DF16 (ACAS): decode altitude through the same AP path. The ACAS fields are deferred.
-- Mode A/C replies (`*XXXX;`, 4 hex digits in AVR) are skipped and counted, not decoded.
+- Mode A/C replies (`*XXXX;`, 4 hex digits in AVR) are skipped and counted, not decoded. None
+  appeared in the step 0.1 sample.
+- **`@` timestamps:** 12 hex digits = 48-bit counter. The tick rate is assumed to be 12 MHz (the
+  dump1090/Beast convention) [VERIFY for fr24feed; calibrate from the 10-minute capture, see
+  0.1]. The tracker doesn't need the timestamp, but simulator replay uses it for pacing (S.6).
 
 ---
 
@@ -360,7 +375,8 @@ cuts the request rate to a few per minute and keeps well inside any reasonable r
 
 **Decision: Slint under GPLv3** (D3 resolved). embedded-graphics stays the technical fallback,
 for example if render performance fails in 4.1. The UI is a thin layer over `adsb-core::Snapshot`,
-so switching costs only Phase 4.
+so switching costs only Phase 4. Revision 3 also counts in Slint's favour: the same `.slint` files
+and the same software renderer run unchanged in the browser simulator (ADR-002).
 
 ---
 
@@ -389,11 +405,11 @@ so switching costs only Phase 4.
      - `firmware/`: generated by `esp-generate` for `esp32s3`, uses the `esp` toolchain via
        `rust-toolchain.toml`, target `xtensa-esp32s3-none-elf`, and depends on `modes` and
        `adsb-core` via path.
-     - `ui-sim/` (Phase 4): host binary/test that renders the firmware's `.slint` files with
-       fixture data (fictitious coordinates only) through Slint's software renderer into PNGs
-       (headless, CI-able).
+     - `adsb-app/`, `sim/` and `sim-bridge/` (revision 3, replacing the former `ui-sim/`): the
+       shared UI/app layer, the browser simulator plus headless PNG renderer, and the localhost
+       bridge. See ADR-002. The `.slint` files now live in `adsb-app/ui/`, not in `firmware/`.
      - Separate projects stop the firmware's `.cargo/config.toml` (target, `build-std`) and the
-       `esp` toolchain from affecting host tests.
+       `esp` toolchain from affecting host and wasm builds.
   2. **Feed:** 30002 raw AVR through `AvrSource`, decoded on the device (D2). Other transports
      plug in at the `FrameSource` boundary (D6).
   3. **Stack.** Versions are from crates.io on 2026-10-21. The compatible set that `esp-generate`
@@ -415,8 +431,8 @@ so switching costs only Phase 4.
 
      Also: `esp-backtrace`, `esp-println` + `log`, `embassy-time`, `embassy-sync`, `static_cell`
      (versions from esp-generate).
-  4. **UI:** Slint software renderer, line-by-line into an SRAM line buffer, copied into a single
-     PSRAM framebuffer. Scanout is either direct looped `Dpi` DMA or, more likely, through
+  4. **UI:** shared in `adsb-app` (ADR-002). On the device: Slint software renderer, line-by-line
+     into an SRAM line buffer, copied into a single PSRAM framebuffer. Scanout is either direct looped `Dpi` DMA or, more likely, through
      firmware-owned SRAM bounce buffers (M2, step 1.5). Tearing is accepted in v1. Main screen is
      an "overhead" card, with a list secondary (D4).
   5. **Metadata:** adsbdb.com over HTTPS from the device (D1 = b). embedded-tls by default,
@@ -426,7 +442,7 @@ so switching costs only Phase 4.
   7. **Privacy (new):** no local data is committed. No captures, no receiver location, no
      responses recorded from local traffic. The receiver location isn't logged at `info` level.
      See [Privacy](#privacy-no-local-data-in-the-repo).
-  8. **CI:** GitHub Actions (D5), see step 0.5.
+  8. **CI:** GitHub Actions (D5), see steps 0.5 and S.7.
 - **Consequences:**
   - All decoding logic is CI-tested on the host with no device.
   - `modes` is reusable on its own (host tools, a future SDR path) and stays free of
@@ -438,8 +454,71 @@ so switching costs only Phase 4.
     must not be shared.
   - Changing the WiFi network means rebuilding and reflashing. A runtime provisioning UI is
     deferred.
-  - Slint's GPLv3 applies to the firmware (and `ui-sim`). For the licence files, see D7.
+  - Slint's GPLv3 applies to the firmware, `adsb-app` and `sim`. The whole repo is
+    GPL-3.0-or-later (D7).
   - The pinned root CA can rotate. That needs a firmware update (R16).
+
+**ADR-002: Browser simulator and shared app layer** (revision 3, D9)
+
+- **Context:** the user wants to work on the UI without the board, from a podman devcontainer
+  on macOS. X11/XQuartz forwarding was a bad experience and is ruled out. The user chose
+  WebAssembly in the browser. The simulator has to exercise the *same* UI and app code as the
+  firmware, or it validates nothing. It also has to keep the receiver location out of anything
+  committed or shareable.
+- **Options considered.** Rendering in the browser:
+  - (A) Slint's stock web backend (winit + femtovg/WebGL canvas, wasm-bindgen) [VERIFY the
+    current Slint 1.18 wasm setup and features]. Least glue code. But it's a different renderer
+    from the device (GPU vector rendering vs the device's software renderer), it loads fonts
+    differently, and our platform layer isn't exercised. Pixels won't match the device.
+  - (B) **A custom minimal Slint platform:** `MinimalSoftwareWindow` + the software renderer
+    with the same embedded fonts as the device, rendering into an 800×480 RGB565 buffer that's
+    converted to RGBA and blitted to a 2D `<canvas>` via `web-sys`. Driven by
+    `requestAnimationFrame`, with pointer events mapped exactly like touch. About 200–300 lines
+    of glue. In exchange: **the same renderer, fonts, RGB565 quantisation and partial-repaint
+    path as the device**, and the same code renders PNGs headlessly.
+  - (C) VNC/noVNC of a native Linux build in the container: no XQuartz, but a heavy stack, laggy,
+    and still a different backend.
+  - (D) A native build on the mac host: the default Slint backend works, but it runs outside the
+    container (a second toolchain on the mac). It's kept as a nice-to-have only.
+- **Options considered.** Live data into the browser (browsers can't open raw TCP):
+  - `websockify`: off the shelf, Python, fixed target.
+  - **A small Rust bridge** (`sim-bridge`).
+  - The Rust bridge is chosen. It's the same toolchain with no Python dependency, and one
+    process can also serve the *local-only* data the simulator needs (receiver config, the
+    replay capture, Phase 5 metadata proxy) with Origin/Host checks. websockify would need a
+    second server for those anyway.
+- **Options considered.** Build tool: `trunk` vs `wasm-pack`.
+  - **trunk** is chosen. It builds, runs wasm-bindgen and serves with watch/rebuild, and has a
+    WebSocket-capable dev proxy, so the browser sees a single origin. No node/npm needed.
+  - wasm-pack targets npm packaging and would need a separate server. [VERIFY trunk's current
+    version, its `[[proxy]]` `ws = true` support, and whether it fetches wasm-bindgen-cli itself
+    or needs it pre-installed in an offline container.]
+- **Decision:** (B) + `sim-bridge` + trunk. Option (A) is the fallback if the custom platform hits
+  a wall. If it's used, note that pixel parity is lost.
+- **Code split** (avoid duplicating the Slint model glue):
+
+  | Crate | Kind | Contents | Used by |
+  |-------|------|----------|---------|
+  | `modes` | no_std lib | decoder (unchanged), plus an `encode` feature: frame and CPR *encoder* for tests and scenarios | all |
+  | `adsb-core` | no_std lib | tracker, vicinity, meta cache (unchanged). **New:** `pipeline` (`FeedPipeline`: `AvrSource` → decode → tracker, with counters; the one ingest path for firmware and sim) and a `scenario` feature (deterministic, seeded synthetic traffic around a fictitious receiver, emitting `@`-timestamped AVR lines plus feed-outage events) | firmware, sim, tests |
+  | **`adsb-app`** (new) | no_std + alloc lib | all `.slint` files and `slint-build` (software-renderer font embedding, committed OFL font [VERIFY licence fit]); the `App` view-model (screen/navigation state, chip override, selected aircraft); `Snapshot`/`Status`/meta → Slint model binding with diffing; `PointerEvent { x, y, phase }` → `slint::WindowEvent` mapping (touch and mouse share it); a generic line-render helper used by both platform layers, so partial repaint is identical | firmware, sim |
+  | `firmware` | esp binary | platform layer only: esp `Platform` impl, `Dpi`/bounce scanout, GT911 → `PointerEvent`, Embassy tasks, TCP, TLS | — |
+  | **`sim`** (new) | lib + wasm entry + native tests | platform layer only: buffer platform (`MinimalSoftwareWindow` → RGB565 buffer); web glue (canvas blit, rAF loop, pointer events, WebSocket/fetch/File inputs, controls); headless PNG renderer (native `cargo test`, replaces the old `ui-sim`); optional `native` feature for the mac host (default Slint backend, "should compile", no steps) | — |
+  | **`sim-bridge`** (new) | std binary (tokio) | localhost-only: `/ws/live` (WebSocket ↔ TCP to the configured feed), `/local/config.json`, `/local/capture`, and from Phase 5 `/local/meta/*` (proxy to adsbdb) | sim (dev only) |
+
+  Rule: anything that decides *what the UI shows or how it reacts* lives in `adsb-core` or
+  `adsb-app`. `firmware` and `sim` only move bytes, pixels, time and pointer events.
+- **Consequences:**
+  - UI work can start as soon as the tracker (2.10) exists, without the board.
+  - Sim PNGs and browser frames are bit-identical to each other and nearly so to the device. The
+    remaining differences are panel colour and gamma and the scanout path.
+  - The sim validates **none** of: drift/PSRAM bandwidth, render timing on Xtensa, memory limits,
+    touch calibration, WiFi. Every [hw] step stays.
+  - Slint features unify per build: `adsb-app` depends on `slint` with
+    `default-features = false`, and each binary (firmware, sim) adds its own features.
+    [VERIFY that the `slint-build` output for the software renderer with embedded fonts works
+    for both xtensa and wasm32 from one build script.]
+  - New tooling in the devcontainer (0.6) and a new CI job (S.7).
 
 ### Configuration
 
@@ -466,6 +545,20 @@ Test-only (host) variable: `ADSB_REPLAY_CAPTURE` is the path to a local, gitigno
 capture for the replay test (step 2.11). The replay test also reads `ADSB_RX_LAT/LON` at runtime
 from the same local `.env`.
 
+Simulator (revision 3). **Nothing location-related is compiled into the wasm bundle.**
+`sim-bridge` reads the same local `.env` at runtime:
+
+| Var | Used by | Default |
+|-----|---------|---------|
+| `ADSB_FEED_HOST`, `ADSB_FEED_PORT` | bridge `/ws/live` upstream (fixed; the client can't choose it) | — / 30002 |
+| `ADSB_RX_LAT`, `ADSB_RX_LON`, `ADSB_RX_ELEV_M`, `ADSB_RADIUS_KM` | bridge `/local/config.json` | — |
+| `ADSB_REPLAY_CAPTURE` | bridge `/local/capture` | — |
+| `ADSB_SIM_BRIDGE_ADDR` | bridge listen address; **must be a loopback address**, anything else is refused at startup | `127.0.0.1:8081` |
+| `ADSB_SIM_ALLOWED_ORIGINS` | accepted `Origin`/`Host` values | `http://localhost:8080,http://127.0.0.1:8080` |
+
+trunk serves the app on port 8080 and proxies `/ws/*` and `/local/*` to the bridge. The browser
+only ever talks to one forwarded port.
+
 ### Privacy: no local data in the repo
 
 The receiver location is sensitive (D4/D6: doxxing). Aircraft positions near the receiver reveal
@@ -485,6 +578,33 @@ it just as well, especially with a 5 km radius. Rules:
   distance and bearing still reveal the location, so device logs shouldn't be pasted into public
   issues without review.
 - The firmware binary contains the location, so it isn't shared (see Consequences).
+- **Simulator (revision 3).** The goal is that a built sim (`sim/dist/`) is always safe to share
+  and that local data only exists at runtime, served from the container's loopback.
+  - **Receiver location:** the wasm bundle has no location in it. At startup the sim fetches
+    `/local/config.json` from the bridge (read from the local `.env`). If that's unavailable
+    (no bridge, CI, a shared `dist/`), the sim runs scenarios around a **fictitious** receiver and
+    shows a "SIM: fictitious location" banner. Live mode stays disabled, because vicinity would be
+    meaningless. **Query parameters and localStorage are deliberately not used** for the location:
+    URLs end up in browser history, sync, screenshots and shared links, and localStorage persists
+    in the browser profile beyond the session.
+  - **Replay capture:** streamed by the bridge from `ADSB_REPLAY_CAPTURE` on request, or loaded
+    with a browser file picker (the File API reads locally; nothing is uploaded). It's never
+    copied into `sim/` or `dist/`. trunk must not reference `captures/` as an asset.
+  - **Bundle check:** `dist/` is gitignored. The CI build (S.7) runs without any `.env`, and a
+    check fails the build if `dist/` contains `config.json`, `*.capture` or the `captures/` path.
+  - **Bridge exposure:**
+    - It listens on loopback only.
+    - Its upstream is fixed from env, so it isn't an open proxy.
+    - It sends no CORS headers, so other sites can't read `/local/*`.
+    - It **checks `Origin` and `Host`** on every request, including the WebSocket upgrade, which
+      CORS doesn't protect. Without that, any web page open in the mac's browser could connect to
+      the forwarded `localhost` port and read the location or the live feed. The same check also
+      blocks DNS-rebinding attacks.
+    - It never logs coordinates.
+  - **Port forwarding** publishes to the mac's **loopback only** (`127.0.0.1`), never on the LAN
+    (0.6).
+  - Screenshots of the sim in live or replay mode carry the same risk as photos of the device.
+    The detail view shows no raw lat/lon in either.
 
 ### "Vicinity"
 
@@ -546,11 +666,11 @@ main (core 0)
  ├─ wifi_task        esp-radio controller: connect, wait for disconnect, back off, reconnect
  ├─ net_task         embassy-net runner
  ├─ feed_task        loop { wait for link+IP; TCP connect HOST:PORT (timeout 10 s);
- │                          read → AvrSource.feed → modes::decode → TABLE.lock(update);
+ │                          read → FeedPipeline.feed (AvrSource → decode → TABLE.lock(update));
  │                          idle timeout 60 s → reconnect; exponential backoff 1 s → 30 s }
  ├─ touch_task       owns I2C after init; GT911 poll at about 60 Hz (or INT-triggered);
  │                   → Channel<TouchEvent> to ui_task
- ├─ ui_task          owns the Slint window; every 1 s (card: 2 Hz if render cost allows):
+ ├─ ui_task          owns the Slint window + adsb-app::App; every 1 s (card: 2 Hz if allowed):
  │                   TABLE.lock(age + snapshot(now)) → models; queue metadata lookups per
  │                   lookup policy; drains touch channel → window.dispatch_event;
  │                   render dirty region → line buffer → framebuffer (+ cache writeback if
@@ -570,6 +690,31 @@ bounce ISR (core 1, if M2): GDMA out-EOF → copy next 10 lines PSRAM → SRAM b
   last-seen entry is evicted. Entries are removed after 60 s with no messages, and a position is
   marked stale after 30 s. Dead reckoning applies only up to 15 s (see Vicinity).
 - `Status` also counts frames dropped by the known-ICAO filter and skipped Mode A/C lines.
+
+### Simulator structure (revision 3)
+
+The browser is single-threaded, so there's no executor: a `requestAnimationFrame` callback does
+the work.
+
+```
+browser tab (wasm, sim crate)
+ ├─ startup: fetch /local/config.json → receiver (else fictitious + banner); App::new(window)
+ ├─ input (one active):
+ │   live      WebSocket /ws/live (binary msgs = raw feed bytes) → queue; reconnect w/ backoff
+ │   replay    fetch-stream /local/capture or File picker → paced by @ timestamps × speed
+ │   scenario  adsb-core::scenario (seeded) → AVR lines + outage events, × speed
+ ├─ rAF tick: now = sim clock (performance.now() for live; scaled virtual clock otherwise)
+ │   drain queue → FeedPipeline.feed(bytes, now)            ← same code as firmware feed_task
+ │   at 1 Hz (2 Hz card): tracker.snapshot(now) → App::tick  ← same code as firmware ui_task
+ │   slint::platform::update_timers_and_animations; render dirty region via the adsb-app
+ │   line helper → RGB565 buffer → RGBA → canvas putImageData (CSS-scaled, pixelated)
+ └─ pointer events on canvas (mouse = touch) → PointerEvent → App/WindowEvent (shared mapping)
+sim-bridge (container, 127.0.0.1:8081) ⇄ trunk serve (8080, proxy /ws, /local) ⇄ forwarded port
+```
+
+Controls (an HTML strip outside the 800×480 canvas, so the device UI itself stays unchanged):
+input selector, scenario picker, speed (×1/×5/×20/×60), pause/step, "dump frame" (downloads the
+RGB565 buffer's hash and PNG, for parity checks against the headless renderer).
 
 ### UI layout (800×480 landscape)
 
@@ -608,8 +753,25 @@ a couple of metres away. Items marked * are "—" until Phase 5.
 
 ## Plan
 
-Each step finishes with its verification green before the next starts. Steps inside a phase are
-ordered. Phase 2 (pure host work) can run in parallel with Phase 1 (hardware).
+Each step finishes with its verification green before the next starts. Step IDs are stable from
+revision 2; revision 3 adds 0.6 and Phase S (S.1–S.8), moves 4.2 into S.2, and changes the
+**execution order** to two parallel tracks so UI work doesn't wait for the board:
+
+```
+Track B — host / simulator (no board needed)
+  0.2 → 0.4 → 0.5 → 0.6 → 2.1 … 2.11 → S.1 → S.2 → S.3 → S.4 → S.5 → S.6 → S.7
+      → 4.3 → 4.4 → 4.5   (implemented and verified in the sim; device verification later)
+      → 5.1 → S.8
+Track A — board (starts after 0.2)
+  0.3 → 1.1 … 1.6 → 3.1 … 3.5 (3.4 needs S.1's FeedPipeline)
+      → 4.1 (needs S.2's adsb-app) → device verification of 4.3–4.5 → 4.6
+Join — device metadata
+  5.2 → 5.3 → 5.4   (needs Track A through 3.5, plus 5.1)
+```
+
+0.1 is done for formats; its 10-minute capture follows 0.2 (which creates `.gitignore`). Within a
+track steps are sequential. The two tracks only synchronise where noted. One developer can
+interleave them freely; the order inside each track is what matters.
 
 ### Phase 0 — scaffolding
 
@@ -621,6 +783,16 @@ ordered. Phase 2 (pure host work) can run in parallel with Phase 1 (hardware).
    or outside it) for the local replay test (2.11). **The capture is never committed**: it
    reveals the receiver location. Run `git status` and `git check-ignore -v captures/` to
    confirm it's ignored.
+   **Status (revision 3): format check DONE.** Sample of 12 s, 372 lines, kept outside the repo:
+   - **every** line is `@` + 12 hex timestamp + 14 or 28 hex + `;`;
+   - 339 short (14 hex) and 33 long (28 hex);
+   - **zero** plain `*` lines, no Mode A/C lines;
+   - LF line endings only (no CR).
+
+   **Remaining:** the 10-minute capture, taken after 0.2 creates `.gitignore`. When taking it, also
+   note the wall-clock start and end times in a gitignored sidecar file next to the capture. From
+   that and the first/last `@` timestamps, compute the timestamp tick rate (expected 12 MHz
+   [VERIFY]) for S.6 replay pacing. Record only the derived tick rate in the revision log.
 
 0.2 **[devops]** Generate `firmware/` with esp-generate 1.4.0 for `esp32s3` with options
    embassy, unstable-hal, alloc, wifi/radio, PSRAM (if offered), log via esp-println
@@ -647,7 +819,8 @@ ordered. Phase 2 (pure host work) can run in parallel with Phase 1 (hardware).
    - **Job `libs`** (`ubuntu-latest`, stable toolchain via `dtolnay/rust-toolchain@stable`
      [VERIFY action ref], plus the no_std target): runs `cargo fmt --check`,
      `cargo clippy --all-targets -- -D warnings`, `cargo test` and the no_std build, for `modes/`
-     and `adsb-core/` (matrix over the two directories). `ui-sim/` joins later (4.2).
+     and `adsb-core/` (matrix over the two directories). `adsb-app/`, `sim/` and `sim-bridge/`
+     join in S.7.
    - **Job `firmware`**: esp toolchain via `esp-rs/xtensa-toolchain@v1.x` with
      `default: true, buildtargets: esp32s3, ldproxy: false` [VERIFY current version and inputs].
      Runs `cargo build --release` and `cargo clippy` in `firmware/` with **dummy** env vars (fake
@@ -663,6 +836,41 @@ ordered. Phase 2 (pure host work) can run in parallel with Phase 1 (hardware).
      note that and rely on the pipeline run). The remote is on GitHub, so the real check is to
      push the feature branch, **but only with the user's OK**. Check that the pipeline goes green,
      then push a commit with a deliberately failing test, check that it turns red, and revert it.
+
+0.6 **[devops]** Devcontainer tooling for the simulator (revision 3).
+   - **Add a new local feature** `./.devcontainer/features/wasm-sim/` (`devcontainer-feature.json` +
+     `install.sh`, modelled on `./features/esp-rs`, running as the remote user):
+     - `rustup target add wasm32-unknown-unknown` for the **stable** toolchain;
+     - `cargo binstall -y --locked trunk wasm-bindgen-cli` [VERIFY: whether trunk needs a
+       pre-installed wasm-bindgen-cli, which must match the `wasm-bindgen` crate version
+       exactly, or downloads it; pre-installing avoids network fetches at build time];
+     - optionally `wasm-opt` (binaryen) [VERIFY whether trunk fetches it].
+
+     No websockify (D9: Rust bridge).
+   - **Ports:**
+     - add `"forwardPorts": [8080]` to `devcontainer.json`, which covers the VS Code path. Only
+       the trunk port; the bridge stays internal.
+     - For the devcontainer CLI path (no VS Code), document `runArgs` `-p 127.0.0.1:8080:8080`.
+       Podman then publishes the port on the mac's loopback only, and inside the container trunk
+       must bind `0.0.0.0` for the published port to reach it. Never publish without the
+       `127.0.0.1:` prefix. [VERIFY that podman machine (libkrun/applehv) forwards published
+       ports to the mac's loopback.]
+   - **The user's `.devcontainer/` has uncommitted local modifications.** The devops engineer
+     must:
+     - run `git status`/`git diff -- .devcontainer` first and **coordinate with the user**
+       before touching anything;
+     - make only additive edits: a new feature directory, plus one `features` entry and
+       `forwardPorts` in `devcontainer.json`, and `runArgs` only if the user wants the CLI path;
+     - never run `git checkout`, `git restore`, `git stash` or overwrite whole files in
+       `.devcontainer/`;
+     - never commit the user's unrelated local changes along with this step.
+   - The container rebuild is done by the user.
+   - *Verify:* after rebuild, `rustup target list --installed` includes `wasm32-unknown-unknown`,
+     and `trunk --version` and `wasm-bindgen --version` work. A throwaway hello page served by
+     `trunk serve --address 127.0.0.1 --port 8080` opens at `http://localhost:8080` in the mac
+     browser (VS Code path), or with `--address 0.0.0.0` behind the loopback publish (CLI path).
+     `lsof -iTCP:8080 -sTCP:LISTEN` on the mac shows `127.0.0.1` only. `git diff -- .devcontainer`
+     shows only the intended additions on top of the user's local changes.
 
 ### Phase 1 — hardware bring-up spike (de-risk first)
 
@@ -744,14 +952,16 @@ Privacy).
 2.1 **[code]** `RawFrame`, the `FrameSource` trait (sans-IO, see [Frame-source
    boundary](#frame-source-boundary-general-mode-s-client)) and the `AvrSource` adapter (was
    `LineParser`): streaming and fixed-capacity. It accepts arbitrary byte chunks (lines split
-   across TCP reads), and handles `*…;` and `@<12-hex ts>…;` with CR/LF (the timestamp goes into
-   `RawFrame.timestamp`). It emits 14/28-hex frames as Short/Long, skips and counts 4-hex Mode A/C,
+   across TCP reads), and handles `@<12-hex ts>…;` (**primary**: it's the only form this feed
+   sends, per 0.1) and `*…;`, with LF and tolerated CR/LF. The timestamp goes into
+   `RawFrame.timestamp`. It emits 14/28-hex frames as Short/Long, skips and counts 4-hex Mode A/C,
    and rejects non-hex, other lengths and overlong garbage (resyncs at the next `*`/`@`) without
    panicking. Also write a short doc comment sketching how `BeastSource` and an SDR
    `Demodulator` would implement the trait. They aren't built. Review that the trait shape fits
    them (I/Q input type, timestamp clock kind, signal level).
    *Verify:* unit tests for each case, including byte-at-a-time feeding and timestamp parsing.
-   A random-bytes test (`proptest` or a simple PRNG loop) shows no panics.
+   Synthetic `@` lines mirror the observed shape (12 + 14 and 12 + 28 hex, LF only). A
+   random-bytes test (`proptest` or a simple PRNG loop) shows no panics.
 
 2.2 **[code]** Frame basics: DF; ICAO24 for DF11/17/18; CRC-24 (poly 0xFFF409); parity
    remainder; **address recovery** for AP-overlay formats (DF0/4/5/16/20/21); DF11 IID
@@ -850,7 +1060,8 @@ Privacy).
    the port) leads to logged reconnect attempts with growing backoff. Restarting it resumes
    without a reboot.
 
-3.4 **[code+hw]** Wire the decoder and tracker. Every 5 s, log the snapshot summary at `info`:
+3.4 **[code+hw]** Wire the decoder and tracker through `adsb-core::pipeline::FeedPipeline` (from
+   S.1; the same ingest code the simulator uses). Every 5 s, log the snapshot summary at `info`:
    primary/overhead/approaching callsigns with ground distance, bearing and altitude. Log the 5
    nearest with lat/lon at `debug` only (Privacy).
    *Verify:* compare against fr24feed's local status page or flightradar24 for the same moment.
@@ -864,44 +1075,153 @@ Privacy).
    *Verify:* no drift over 30 min. If drift appears, apply M2 (if not yet done), then M3, and
    record the final scanout mode, PCLK and PSRAM settings here.
 
+### Phase S — shared app layer and browser simulator (revision 3, Track B)
+
+Starts after 2.10 (tracker). It doesn't need the board.
+
+S.1 **[code]** Encoder, scenarios and ingest pipeline (no UI yet).
+   - **`modes` `encode` feature:** builds DF17 identification, airborne position (CPR even/odd
+     *encoding*), velocity ST1, DF11 and DF4/5 with AP. It supersedes the 2.2 test helper.
+   - **`adsb-core::pipeline::FeedPipeline`:** `AvrSource` → decode → tracker update, plus
+     counters. The single ingest path for firmware (3.4) and sim.
+   - **`adsb-core` `scenario` feature:** deterministic, seeded scripts around a **fictitious**
+     receiver, emitting `@`-timestamped AVR lines (so `AvrSource` is exercised too) and
+     feed-outage events. Scenarios:
+     - `overflight`, in order: quiet; a jet approaching; overhead at FL350; just passed; a GA
+       aircraft at 1,500 ft passing 2 km abeam with short frames only after its first DF17;
+       quiet; a 40 s feed outage (no data);
+     - `busy`: 30 aircraft;
+     - `edge`: long callsigns, no position, stale, squawk 7700.
+   - *Verify:* encode→decode round-trip property tests for every encoded type, including CPR
+     even/odd at random positions (error < 5 m). `overflight` run through `FeedPipeline` and
+     `snapshot()` produces the state sequence Quiet → Approaching → Overhead → Just passed →
+     Quiet → No data at the scripted times ±2 s. Same seed gives identical output.
+
+S.2 **[code]** `adsb-app/` shared crate and the headless PNG renderer (replaces 4.2).
+   - **`adsb-app`** (no_std + alloc):
+     - the `.slint` files (status bar and card skeleton for now);
+     - a `build.rs` with software-renderer font embedding and a committed OFL font;
+     - the `App` view-model, model binding with diffing, `PointerEvent` mapping, and the generic
+       line-render helper.
+   - **`sim/` native part:** a buffer platform (`MinimalSoftwareWindow` → 800×480 RGB565 buffer)
+     and a `cargo test` that renders scenario keyframes to `target/ui-snapshots/*.png`.
+     Reference PNGs can optionally be committed later; they only ever contain fictitious data.
+   - *Verify:*
+     - `adsb-app` builds for the host, `wasm32-unknown-unknown`, and (via `cargo check` in
+       `firmware/`) `xtensa-esp32s3-none-elf`. The latter proves the no_std/feature split.
+     - The PNG test produces images for each `overflight` state.
+     - A unit test drives `App` with `PointerEvent`s and asserts navigation state.
+
+S.3 **[code]** Browser simulator with scenario input.
+   - The `sim` wasm entry (wasm-bindgen, web-sys): the canvas blit, rAF loop and pointer events
+     as in [Simulator structure](#simulator-structure-revision-3).
+   - Controls: scenario picker, speed and pause.
+   - The fictitious-location banner. `trunk serve` on 8080. `dist/` is added to `.gitignore`.
+   - *Verify (manual, mac browser via the forwarded port):*
+     - `overflight` walks through all card states.
+     - Clicks behave like taps.
+     - "Dump frame" at a scripted keyframe gives the **same hash** as the S.2 PNG renderer for
+       that keyframe (pixel parity of the shared render path).
+     - The devtools console shows no errors.
+     - The wasm size is logged (target < 5 MB uncompressed, an estimate).
+     - Optional: `cargo build --features native` for `sim` on the mac host compiles. That's the
+       only native-host check; no further steps.
+
+S.4 **[code]** `sim-bridge/` (tokio + axum or similar [VERIFY current versions and WebSocket
+   support]).
+   - Endpoints: `/ws/live`, `/local/config.json` and `/local/capture`, as in
+     [Configuration](#configuration).
+   - It refuses to start on a non-loopback address.
+   - Origin/Host allow-list on every request, including the WebSocket upgrade (403 otherwise).
+     No CORS headers. Coordinates are never logged.
+   - trunk `[[proxy]]` entries for `/ws` (with `ws = true`) and `/local` [VERIFY syntax].
+   - *Verify:*
+     - Unit tests cover config parsing, the loopback-only check, and Origin/Host rejection
+       (foreign origin, missing origin, rebinding-style Host).
+     - Integration test: a local fake TCP server streams `overflight` lines, and a WebSocket
+       client through the bridge receives them byte-exact.
+     - Manual: `ss -ltnp` shows only `127.0.0.1:8081`. `curl -H 'Origin: http://evil.example'`
+       is rejected. `/local/config.json` without a `.env` returns 404 and the sim shows the
+       fictitious banner.
+
+S.5 **[code + manual]** Live mode in the sim: WebSocket client with backoff → `FeedPipeline`,
+   using real time. The receiver comes from `/local/config.json`; without it, live mode is
+   disabled.
+   *Verify (local, manual):* live aircraft appear. Cross-check 3 aircraft against flightradar24
+   as in 3.4; this is now possible **before the board exists**. Stopping the bridge gives the No
+   data state within 30 s, and restarting it recovers without a page reload. Don't share
+   screenshots (Privacy).
+
+S.6 **[code]** Replay mode: input from `/local/capture` or the file picker; pacing from `@`
+   timestamps using the tick rate calibrated in 0.1; speed ×1/×5/×20/×60; restart. A virtual
+   clock drives `now_ms`, so tracker timing (CPR pair window, dead reckoning) stays consistent
+   at any speed.
+   *Verify:* the 10-minute capture at ×20 completes in about 30 s (±10 %). The final
+   `FeedPipeline` counters (frames, CRC failures, known-ICAO drops, aircraft seen) **equal** the
+   2.11 host replay test's counters for the same capture, which shows determinism across
+   targets. The file picker path gives the same counters.
+
+S.7 **[devops]** CI for the new crates (extends 0.5).
+   - `adsb-app` and `sim-bridge` join the `libs` matrix (fmt, clippy, test).
+   - New job `sim`: add the wasm32 target; install trunk (binstall, or a trunk action [VERIFY]);
+     run `trunk build --release` in `sim/`; run the native PNG test; upload the PNGs and `dist/`
+     as artefacts; run the bundle check (fail if `dist/` contains `config.json`, `*.capture` or
+     `captures/`).
+   - `firmware` job: `cargo check` also covers `adsb-app` for xtensa (happens via the dependency).
+   - Cache: add the new projects to `rust-cache` `workspaces`.
+   - *Verify:* `actionlint` passes. With the user's OK, push: green; then a deliberately broken
+     `.slint` turns both `sim` and `firmware` jobs red.
+
+S.8 **[code]** (after 5.1) Metadata in the sim: bridge `/local/meta/callsign/{cs}` and
+   `/local/meta/aircraft/{icao}` proxy to adsbdb over HTTPS (std HTTP client, same rate limit and
+   lookup policy). The sim reuses `adsb-core::meta` cache + parser unchanged. Scenario mode uses
+   the hand-written fixtures from 5.1.
+   *Verify:* in live mode the card shows routes for at least 3 aircraft matching flightradar24.
+   Scenario mode shows fixture routes with no network. Bridge unit tests cover the rate limit and
+   the 404/429 pass-through.
+
 ### Phase 4 — UI (D3 resolved: Slint)
 
-4.1 **[code+hw]** Slint platform: implement `slint::platform::Platform` (time from
-   `embassy-time`), `MinimalSoftwareWindow` with partial repaint, `render_by_line` into an SRAM
-   line buffer → framebuffer copy → cache writeback (skipped when bounce buffers are in use).
-   Show a static "hello" `.slint`.
-   *Verify:* renders correctly with correct colours. Log full-screen and partial render times.
+Revision 3: 4.3–4.5 are implemented and first verified **in the simulator** (Track B, after
+S.7). Their device verification runs after 4.1 (Track A). UI code goes in `adsb-app`; firmware
+only adds the platform glue.
+
+4.1 **[code+hw]** Slint platform on the device: implement `slint::platform::Platform` (time from
+   `embassy-time`), `MinimalSoftwareWindow` with partial repaint, and the `adsb-app` line-render
+   helper into an SRAM line buffer → framebuffer copy → cache writeback (skipped when bounce
+   buffers are in use). Show the `adsb-app` UI. For bring-up before networking, a build flag
+   `ADSB_DEMO=overflight` feeds the S.1 scenario into `FeedPipeline` on the device.
+   *Verify:* renders correctly with correct colours, and a photo of the demo keyframe matches
+   the S.2 PNG. Log full-screen and partial render times.
    Target: full redraw under 150 ms, typical 1 Hz update under 30 ms [targets are estimates;
    adjust after measuring]. Decide here whether the card can update at 2 Hz.
 
-4.2 **[code/devops]** `ui-sim/`: host test that loads the same `.slint` files, fills a fixture
-   model (fictitious coordinates and the book's callsigns only), renders through the software
-   renderer into a PNG under `target/ui-snapshots/`, and (optionally) compares against committed
-   reference PNGs. Add `ui-sim` to the CI `libs` job, uploading the PNGs as an artefact.
-   *Verify:* `cargo test` in `ui-sim/` produces PNGs in CI (artefact). Manual review of the first
-   render.
+4.2 **Moved to S.2 in revision 3.** The headless PNG renderer is now part of `sim/`.
 
 4.3 **[code]** Main screen (changed in revision 2: previously the list view): overhead card +
    status bar bound to `snapshot()` (1 Hz, or 2 Hz per 4.1), with all four states (Overhead,
    Just passed, Quiet with nearest beyond / approaching, No data) and the "+N more" strip. Uses
    model diffing so unchanged parts don't repaint.
-   *Verify:* ui-sim snapshots for each state, plus: 0 / 1 / 3 in radius; long callsign; no route;
-   dead-reckoned "~" marker; elevation 10° vs 85°. Readability check on the device from 2 m
-   (callsign and route legible). On device, the card matches the 3.4 log output for the same
-   moment.
+   *Verify (sim):* PNG snapshots for each state from the `overflight`/`edge` scenarios, plus:
+   0 / 1 / 3 in radius; long callsign; no route; dead-reckoned "~" marker; elevation 10° vs 85°.
+   In the browser, the live/replay modes look right.
+   *Verify (device, after 4.1):* readability from 2 m (callsign and route legible). The card
+   matches the 3.4 log output for the same moment.
 
-4.4 **[code+hw]** Touch and navigation: touch → `WindowEvent::PointerPressed/Moved/Released`
-   (plus scroll). Card ↔ list (swipe or tab button). Tap a "+N more" chip to make it primary for
-   60 s. Tap the card or a list row to open details. Back button. The list view (rows as in UI
-   layout, in-radius rows highlighted) is built in this step.
-   *Verify:* drag-scrolls a 30-entry list smoothly enough (no missed taps). A tap opens the row
-   that was tapped (check by callsign). Back returns to the list at the same scroll position. The
-   chip override expires after 60 s.
+4.4 **[code+hw]** Touch and navigation: `PointerEvent` → `WindowEvent::PointerPressed/Moved/Released`
+   (plus scroll), with the mapping shared in `adsb-app`. Card ↔ list (swipe or tab button). Tap a
+   "+N more" chip to make it primary for 60 s. Tap the card or a list row to open details. Back
+   button. The list view (rows as in UI layout, in-radius rows highlighted) is built in this step.
+   *Verify (sim, mouse):* drag-scrolls a 30-entry list (`busy`) smoothly enough (no missed
+   clicks). A click opens the row that was clicked (check by callsign). Back returns to the list
+   at the same scroll position. The chip override expires after 60 s (virtual clock).
+   *Verify (device, after 4.1 and 1.6):* the same checks with the finger on the GT911, plus tap
+   accuracy at the screen edges (calibration isn't covered by the sim).
 
 4.5 **[code]** Detail view with track arrow (rotated path), receiver bearing/ground
    distance/elevation, squawk and CPA.
-   *Verify:* ui-sim snapshots at tracks 0/90/180/270/45 show the arrow pointing correctly. On
-   device, compare with the 3.4 log.
+   *Verify (sim):* PNG snapshots at tracks 0/90/180/270/45 show the arrow pointing correctly.
+   *Verify (device):* compare with the 3.4 log.
 
 4.6 **[hw]** Soak: 12 h run, logging heap free (internal and PSRAM), reconnect count, aircraft
    count and (if M2 is in use) bounce-handler core-1 load every minute.
@@ -942,8 +1262,8 @@ Privacy).
 
 5.4 **[code]** UI: airline, type/registration and `ORIG → DEST` on the card, list and detail; "—"
    while unknown or not found.
-   *Verify:* ui-sim snapshots with and without metadata. On device, routes for at least 3
-   aircraft match flightradar24.
+   *Verify:* sim PNG snapshots (S.2 renderer) with and without metadata. On device, routes for
+   at least 3 aircraft match flightradar24.
 
 ---
 
@@ -959,23 +1279,37 @@ Privacy).
 | R6 | Internal SRAM pressure: WiFi + embassy-net + Slint line buffers + DMA descriptors + **2×16 KB bounce buffers** (+ TLS in P5) | Medium / medium | Log heap stats from 1.1 on. TLS buffers and Slint heap go in PSRAM. Reduce TCP buffer sizes if needed. |
 | R7 | Slint licence | **Resolved (D3):** GPLv3 accepted, never commercial. Residual: GPL obligations if binaries are ever distributed (they aren't; they contain secrets) | Licence files per D7. embedded-graphics remains the technical fallback only. |
 | R8 | Software render too slow at 800×480 from PSRAM, made worse by bounce-copy cache pollution | Low–medium / medium | Partial rendering, 1 Hz model updates (2 Hz card only if measured OK), render on core 0 with bounce on core 1. Measured in 4.1. |
-| R9 | fr24feed 30002 quirks: Mode-AC lines, timestamp format, drops idle clients. (Enabled and reachable is confirmed, D6.) | Low / low | Step 0.1 checks the formats. Parser tolerant to unknown lines. Idle timeout and reconnect. |
+| R9 | fr24feed 30002 quirks. Step 0.1 found **only `@`-timestamped lines** (12-hex timestamp + 14/28 hex, LF only, no `*` lines, no Mode A/C). Remaining unknowns: the timestamp tick rate (assumed 12 MHz) and dropping of idle clients. (Enabled and reachable is confirmed, D6.) | Low / low | `AvrSource` treats `@` as the primary form, keeps `*` and CR tolerance, and skips unknown lines. Tick rate calibrated from the 10-minute capture (0.1) before S.6 relies on it. Idle timeout and reconnect. |
 | R10 | CPR mis-decode producing wrong positions (zone boundaries, stale pairs, far aircraft aliased by receiver-relative local decode) | Medium / medium | Global+local strategy, provisional first fix, plausibility gate, local replay test (2.11), cross-check with FR24 (3.4). |
 | R11 | Metadata API (adsbdb): rate limits, terms of use, downtime, schema change, unknown HTTP status semantics | Medium / low–medium | Caching, lookup policy (only card-relevant aircraft), rate limiting, back-off on 429, "—" on failure. Schema details [VERIFY] in 5.1. |
 | R12 | Secrets in binary / accidental commit of `.env` | Low / medium | `.gitignore`, build-time vars only, `.env.example` with fictitious values. Reviewers check the diff in 3.1. |
-| R13 | **Doxxing: the receiver location leaks** through committed captures, fixtures, `.env.example`, CI vars, ui-sim PNGs, logs, screenshots of the detail view, or the firmware binary | Medium (rewritten: was low/low "ask before committing capture") / **high** | Nothing local is ever committed (Privacy section). The replay test reads a gitignored capture through `ADSB_REPLAY_CAPTURE` and is `#[ignore]`d. Fixtures use book vectors, synthetic frames and fictitious coordinates. Coordinates are never logged at `info`. The detail view shows no raw lat/lon. Binary not shared. Checked in 0.1, 2.11 and 3.1. |
+| R13 | **Doxxing: the receiver location leaks** through committed captures, fixtures, `.env.example`, CI vars, sim PNGs, the sim bundle (`dist/`), the sim bridge, logs, screenshots of the detail view or sim, or the firmware binary | Medium (rewritten: was low/low "ask before committing capture") / **high** | Nothing local is ever committed (Privacy section). The replay test reads a gitignored capture through `ADSB_REPLAY_CAPTURE` and is `#[ignore]`d. Fixtures use book vectors, synthetic frames and fictitious coordinates. Coordinates are never logged at `info`. The detail view shows no raw lat/lon. Binary not shared. Sim: location only at runtime from the loopback bridge, never in the bundle, query string or localStorage; `dist/` bundle check in CI; bridge Origin/Host checks (R23). Checked in 0.1, 2.11, 3.1, S.3, S.4 and S.7. |
 | R14 | TLS (new): embedded-tls can't negotiate with or verify api.adsbdb.com; mbedtls-rs too new or S3 support incomplete | Medium / medium | Gated spike 5.2 with a wrong-CA negative test. Fallback order embedded-tls → mbedtls-rs → stop and ask the user. |
 | R15 | Ghost aircraft from AP-overlay short frames (new): a corrupted DF4/5/20/21 recovers a random address | High (without the filter) / medium | Known-ICAO filter (address seen in DF11/17/18 within 60 s). Drops counted in `Status`. Tested in 2.10. |
 | R16 | Pinned root CA rotates, or there's no wall clock (new) | Low–medium / medium | Pin the root (not the leaf). Pin a second plausible root if the stack allows it. SNTP before the first lookup, with lookups paused until time is valid. Metadata failure degrades to "—", never breaks the main display. |
 | R17 | Bounce-buffer handler too expensive (new): about 30 MB/s of PSRAM memcpy on core 1, plus cache thrash | Medium / medium | Measured in 1.5. M3 (lower PCLK) reduces load. M4 palette framebuffer as a last resort. |
-| R18 | "Overhead" UX misleads (new): dead-reckoning error, sound lag, baro vs true altitude, hysteresis choosing the wrong aircraft | Medium / low | Ground-distance metric, a 15 s DR horizon with "~"/"?" markers, the "just passed" state, CPA "approaching". Field check in 3.4. Thresholds are constants tuned after real-world use. |
+| R18 | "Overhead" UX misleads (new): dead-reckoning error, sound lag, baro vs true altitude, hysteresis choosing the wrong aircraft | Medium / low | Ground-distance metric, a 15 s DR horizon with "~"/"?" markers, the "just passed" state, CPA "approaching". Field check in 3.4 (and earlier in S.5). Thresholds are constants tuned after real-world use. |
+| R19 | Slint on wasm with a custom platform (rev. 3): rAF/timer integration, canvas blit cost, devicePixelRatio scaling, `slint-build` config shared between xtensa and wasm32, wasm size | Medium / medium | Render at a fixed 800×480 and CSS-scale with `image-rendering: pixelated`. Blit only the dirty region. One `adsb-app` build script verified for both targets in S.2. Fallback is ADR-002 option (A), the stock web backend, losing pixel parity. [VERIFY Slint 1.18 wasm specifics.] |
+| R20 | Fonts (rev. 3): wasm has no system fonts; the embedded font's licence and size; glyph sets for callsigns/airport names (accents in municipality names) | Medium / low | One committed OFL font, embedded through the software renderer for both targets (no runtime font loading). Pre-render only the sizes in use. A test renders a string with diacritics. Flash cost measured in 4.1. |
+| R21 | Numeric differences between targets (rev. 3): f64/`libm` on xtensa vs wasm vs host | Low / low | All maths goes through `libm` (no `std` float intrinsics in core). S.6 checks that the replay counters match the host test exactly. Distance display rounding hides last-bit differences. |
+| R22 | Port forwarding with podman on macOS (rev. 3): VS Code `forwardPorts` vs devcontainer CLI `-p`, gvproxy behaviour, bind address inside the container | Medium / low | Two documented paths in 0.6, each with a mac-side `lsof` check. Only one port (8080) is needed thanks to the trunk proxy. [VERIFY on the user's podman machine.] |
+| R23 | Bridge exposure (rev. 3): a localhost service reachable by any web page in the mac browser (cross-site WebSocket hijacking, DNS rebinding), or accidentally exposed on the LAN | Medium (without mitigations) / **high** (location and live feed) | Loopback-only bind enforced at startup. Publish to the mac's loopback only. Origin/Host allow-list including the WS upgrade. No CORS. Fixed upstream (not an open proxy). Tests in S.4. |
+| R24 | Sim ≠ device (rev. 3): the sim doesn't validate drift/PSRAM bandwidth, Xtensa render timing, memory limits, touch calibration, WiFi or TLS | High (by design) / medium | Every [hw] step stays. 4.3–4.5 keep their device verification. Render-time budgets are measured only on the device (4.1). |
+| R25 | Unknown `@` timestamp tick rate or counter wrap (rev. 3) | Medium / low | Calibrate in 0.1. Replay handles 48-bit wrap and falls back to fixed-rate pacing if timestamps go backwards. |
+| R26 | Devcontainer changes clobber the user's uncommitted local `.devcontainer` modifications (rev. 3) | Medium / medium | 0.6 rules: diff first, coordinate with the user, additive edits only, no checkout/restore/stash, don't commit unrelated changes. |
 
 Deliberately deferred: surface positions, TIS-B/ADS-R, Comm-B BDS register decoding, ACAS field
 decoding, single-bit CRC error correction, the **Beast adapter and SDR demodulator** (boundary
 named, not built), SBS/30003 input, the GNSS−baro altitude correction, double buffering, the
 palette framebuffer (M4), on-device WiFi provisioning, radar/map view, OTA updates, backlight
 dimming (hardware is on/off only), moving UI rendering to core 1, pinning an aircraft
-indefinitely.
+indefinitely. Revision 3 adds:
+
+- any native-host sim work beyond "should compile";
+- hosting the sim publicly (e.g. GitHub Pages; it would be safe in scenario-only mode, but it's
+  not planned);
+- committed reference PNGs as a pixel-diff gate;
+- driving the sim from an SDR.
 
 Unverified (summary): every [VERIFY] item above, especially:
 
@@ -990,7 +1324,15 @@ Unverified (summary): every [VERIFY] item above, especially:
 - the adsbdb found-aircraft schema, HTTP status codes, rate limits and combined query, and the
   issuing CA of api.adsbdb.com;
 - the `esp-generate` chip flag syntax;
-- the test-vector values from the book.
+- the test-vector values from the book;
+- revision 3:
+  - the Slint 1.18 wasm specifics for a custom platform and a shared `slint-build` config;
+  - trunk's version, proxy (`ws = true`) syntax and wasm-bindgen-cli handling;
+  - the tokio/axum (or alternative) versions for `sim-bridge`;
+  - podman-on-macOS loopback port publishing;
+  - the `@` timestamp tick rate;
+  - OFL font licence fit;
+  - the trunk CI action.
 
 ---
 
@@ -1201,3 +1543,104 @@ Unverified (summary): every [VERIFY] item above, especially:
 - 2026-10-21, **approval**: user approved the revision-2 plan. D7 resolved (user indifferent →
   default GPL-3.0-or-later, whole repo). D8 resolved (defaults accepted). Status line updated.
   No other changes.
+- 2026-10-21, **revision 3** (approved-scope addition: browser simulator; step 0.1 results). Base:
+  the approved doc at 0515239. Every change:
+  - **Status line:** replaced "revision 2, approved by the user 2026-10-21 (D1–D8 resolved).
+    Implementation in progress on this branch." with the revision 3 status, which keeps the
+    approval and in-progress facts and adds the stable-ID note.
+  - **Decisions intro:** **removed** "D1–D6 are resolved (answers below). D7 and D8 are new in
+    revision 2. Each has a recommendation that the plan follows unless the user overrides it."
+    It was stale, since all decisions are resolved. Replaced with "D1–D9 are resolved…". **Added
+    D9** (simulator = WebAssembly in the browser, resolved).
+  - **Context:** added the third goal (UI iteration without the board, D9).
+  - **Data source table, 30002 row:** **replaced** "possibly also `@<12 hex timestamp><frame>;`"
+    with the observed fact that this feed sends only the `@` form; the `*` form stays supported.
+  - **Frame-source boundary:** the `AvrSource` bullet now names `@` as the primary path.
+  - **Decoding scope:** added the 91 % short-frame observation; Mode A/C bullet notes none were
+    observed; **added** an `@` timestamp bullet (48-bit, assumed 12 MHz [VERIFY], used for replay
+    pacing).
+  - **UI framework decision:** added one sentence (the same `.slint` and renderer run in the sim).
+  - **ADR-001:**
+    - Item 1: **removed** the `ui-sim/` bullet ("host binary/test that renders the firmware's
+      `.slint` files with fixture data … into PNGs"), replaced by the `adsb-app/`, `sim/` and
+      `sim-bridge/` bullet. **The `.slint` files move from `firmware/` to `adsb-app/ui/`.** The
+      separate-projects rationale changed from "host tests" to "host and wasm builds".
+    - Item 4 starts with "shared in `adsb-app`".
+    - Item 8 also references S.7.
+    - Consequences: "Slint's GPLv3 applies to the firmware (and `ui-sim`). For the licence files,
+      see D7." **replaced** by "…firmware, `adsb-app` and `sim`. The whole repo is
+      GPL-3.0-or-later (D7)."
+  - **Added ADR-002** (browser simulator and shared app layer), covering:
+    - the rendering options A–D: chosen (B), a custom software-renderer platform blitting to a
+      canvas, with (A), the stock web backend, as fallback;
+    - websockify vs a Rust bridge: the Rust bridge is chosen;
+    - trunk vs wasm-pack: trunk is chosen;
+    - the code-split table (`modes` `encode` feature; `adsb-core` `pipeline` + `scenario`; new
+      `adsb-app`; firmware and `sim` as platform layers only; new `sim-bridge`);
+    - the consequences.
+  - **Configuration:** added the simulator/bridge variables table and the single-origin note.
+  - **Privacy:** added the simulator bullet:
+    - location only at runtime from the loopback bridge, fictitious fallback with a banner, and
+      query params/localStorage deliberately not used;
+    - capture via the bridge or the file picker, never bundled;
+    - the `dist/` bundle check;
+    - bridge exposure rules including Origin/Host checks;
+    - loopback-only publishing;
+    - screenshots.
+  - **Embassy task structure:**
+    - The `feed_task` line changed from `read → AvrSource.feed → modes::decode → TABLE.lock(update)`
+      to the shared `FeedPipeline`.
+    - The `ui_task` line now names `adsb-app::App`, and its wording was shortened from "if
+      render cost allows" to "if allowed". Same meaning.
+  - **Added "Simulator structure"** section (browser loop, inputs, controls, port layout).
+  - **Plan intro:** **removed** "Phase 2 (pure host work) can run in parallel with Phase 1
+    (hardware)." Replaced by the explicit two-track execution order (Track A board, Track B
+    host/sim, join for device metadata), with the stable-ID note.
+  - **Step 0.1:** added the "Status: format check DONE" block (12 s, 372 lines, all `@`, 339
+    short / 33 long, no `*`, no Mode A/C, LF only, sample outside the repo). The remaining
+    10-minute capture comes after 0.2, with a gitignored wall-clock sidecar for tick-rate
+    calibration. The original step text is unchanged.
+  - **Step 0.5:** "`ui-sim/` joins later (4.2)" **replaced** by "`adsb-app/`, `sim/` and
+    `sim-bridge/` join in S.7".
+  - **Added step 0.6** [devops]:
+    - new local feature `features/wasm-sim` (wasm32 target, trunk, wasm-bindgen-cli, optional
+      wasm-opt; no websockify);
+    - `forwardPorts: [8080]`, or a `-p 127.0.0.1:8080:8080` CLI path;
+    - explicit rules not to clobber the user's uncommitted `.devcontainer` changes;
+    - mac-side checks.
+  - **Step 2.1:** `@` marked primary and CR changed to tolerated (was "with CR/LF"). Verify adds
+    synthetic `@` lines that mirror the observed shape.
+  - **Step 3.4:** now wires through `FeedPipeline` (S.1), which adds a dependency of 3.4 on S.1.
+  - **Added Phase S** (S.1–S.8): encoder/scenarios/pipeline; `adsb-app` + PNG renderer; browser
+    sim; `sim-bridge`; live mode; replay mode; CI; sim metadata.
+  - **Phase 4:**
+    - Added an intro: 4.3–4.5 are first done in the sim, with device verification after 4.1.
+    - 4.1: **removed** "Show a static 'hello' `.slint`", replaced by "Show the `adsb-app` UI"
+      plus the `ADSB_DEMO=overflight` flag; it uses the shared line-render helper; verify adds a
+      photo-vs-PNG check.
+    - **4.2's content removed and moved to S.2/S.7.** The old text was: "`ui-sim/`: host test
+      that loads the same `.slint` files, fills a fixture model…, renders… into a PNG under
+      `target/ui-snapshots/`, and (optionally) compares against committed reference PNGs. Add
+      `ui-sim` to the CI `libs` job…; Verify: `cargo test` in `ui-sim/` produces PNGs in CI…
+      Manual review of the first render." The ID 4.2 remains as a pointer.
+    - 4.3: verify split into sim and device. "ui-sim snapshots" became "PNG snapshots from the
+      `overflight`/`edge` scenarios", and a browser check was added.
+    - 4.4: "touch →" became "`PointerEvent` →" (mapping shared in `adsb-app`). Verify split into
+      sim (mouse, `busy` scenario, virtual clock) and device (GT911 plus edge tap accuracy, new).
+    - 4.5: verify split, with "ui-sim snapshots" becoming "PNG snapshots".
+  - **Step 5.4:** "ui-sim snapshots" became "sim PNG snapshots (S.2 renderer)".
+  - **Risks:**
+    - **R9 rewritten** with the observed formats. The old text was "fr24feed 30002 quirks:
+      Mode-AC lines, timestamp format, drops idle clients… Step 0.1 checks the formats. Parser
+      tolerant to unknown lines." Mitigation is now `@` primary plus tick-rate calibration.
+    - R13: the leak vectors **replace "ui-sim PNGs" with "sim PNGs"** and add the sim bundle,
+      the bridge and sim screenshots. Mitigation adds the sim rules, and the checked-in steps add
+      S.3/S.4/S.7.
+    - R18 mitigation mentions S.5.
+    - **Added R19–R26** (Slint wasm/custom platform, fonts, numeric parity, podman port
+      forwarding, bridge exposure, sim ≠ device, timestamp tick rate/wrap, devcontainer clobber).
+  - **Deferred list:** added native-host sim work beyond compiling, public sim hosting,
+    committed reference PNGs as a gate, and SDR into the sim.
+  - **Unverified summary:** added the revision 3 items.
+  - **Not changed:** hardware, bandwidth, metadata/TLS, vicinity, UI layout, steps 1.x, 2.2–2.11,
+    3.1–3.3, 3.5, 4.6 and 5.1–5.3. Step IDs are preserved.

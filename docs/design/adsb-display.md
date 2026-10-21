@@ -1748,3 +1748,22 @@ Unverified (summary): every [VERIFY] item above, especially:
   **Consequence for step 1.4:** the drift gate must now verify R2 (PSRAM contention under synthetic
   load, then WiFi) on this direct PSRAM path with the per-frame restart, with no bounce-buffer
   fallback available; if 1.4 fails, M3 (lower PCLK) or M4 (palette framebuffer in SRAM) is next.
+- 2026-10-21, **step 1.5 option A, iteration 2: stopped-panel restart (board result pending)**.
+  Board result for 699b035 (continuous ring + per-VBLANK restart at fb + 17 px): timing perfect
+  (39 restarts/s, ISR avg 2 us, max 2 us), bars at the left edge, border visible, but heavy flicker
+  (~5-10 visible jumps/s). Ruler photos (4 frames): each frame is shifted left by a constant-within-frame
+  but frame-to-frame varying amount, ~14, 20, 28, 34 px (rightmost strip shows the start of the next
+  row); no intra-frame drift, so PSRAM bandwidth is fine at idle CPU. Interpretation: the number of
+  pixels the async FIFO keeps across the reset is not the constant 17 the skip assumes, so the start
+  phase varies per frame.
+  **Change:** mirror ESP-IDF's refresh-on-demand path (`esp_lcd_rgb_panel_refresh` ->
+  `lcd_rgb_panel_start_transmission`, no done interrupt there; the app triggers it): `lcd_next_frame_en`
+  = 0 (the LCD stops after each frame), a linear one-frame chain (last descriptor `suc_eof`, next
+  null; IDF `mark_final`), and per frame GDMA reset, LCD stop + reset, afifo reset, GDMA start at fb[0]
+  (no skip), 1 us delay (IDF has no FIFO-level status bit either), `lcd_update` + `lcd_start`. The
+  trigger is the LCD VSYNC interrupt on core 1 (it fires inside the vertical blank, before the frame
+  ends), which busy-waits (bounded 3 ms) for `lcd_start` to self-clear and then restarts; the wait
+  is reported separately. The gap between frames is only the ISR's few us. Log:
+  `frames/s`, `isr_avg_us (of which lcd wait)`, `isr_max_us`; expect ~39 frames/s (>= 30 target).
+  Features: default = stopped panel; `restart-vsync` = 699b035 behaviour; `no-resync` = 1.3
+  (continuous ring, no ISR); `bounce`, `diag-shift`, `diag-ruler` unchanged. Builds `fw-S-a/-b/-ruler`.

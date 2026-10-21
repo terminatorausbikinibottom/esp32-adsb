@@ -22,6 +22,9 @@ pub const FB_ALIGN: usize = 64;
 pub const BURST: ExternalBurstConfig = ExternalBurstConfig::Size64;
 /// Bytes per descriptor: 4095 rounded down to a burst multiple so every chunk starts burst-aligned.
 const CHUNK: usize = 4032;
+/// Continuous scanout (`next_frame_en` = 1, circular ring) for the old `restart-vsync` and `no-resync`
+/// variants. Default: stopped panel, one frame per start from a linear chain (see `restart`).
+pub const CONTINUOUS: bool = cfg!(any(feature = "restart-vsync", feature = "no-resync"));
 /// Ring length: `FB_BYTES.div_ceil(CHUNK)`.
 const RING: usize = FB_BYTES.div_ceil(CHUNK);
 /// Ring plus the restart descriptor; the descriptors must live in internal RAM.
@@ -118,7 +121,8 @@ pub fn draw_pattern(fb: &mut [u16]) {
     }
 }
 
-/// A circular descriptor chain over a PSRAM framebuffer, so the LCD DMA never stops.
+/// A descriptor chain over a PSRAM framebuffer: circular if `CONTINUOUS` (the DMA never stops), else one
+/// linear frame ending in EOF.
 ///
 /// esp-hal's `DmaTxBuf` ends the chain with EOF and `DmaLoopBuf` is limited to one 4095 byte
 /// descriptor, so neither can loop a full frame with `Dpi::send(true, ..)`.
@@ -140,7 +144,10 @@ impl LoopedFb {
         for i in 0..RING {
             let off = i * CHUNK;
             let len = CHUNK.min(FB_BYTES - off);
-            let next = if i + 1 == RING {
+            let last = i + 1 == RING;
+            let next = if last && !CONTINUOUS {
+                core::ptr::null_mut() // linear chain: the DMA stops after the frame
+            } else if last {
                 head
             } else {
                 unsafe { head.add(i + 1) }
@@ -150,7 +157,7 @@ impl LoopedFb {
             d.next = next;
             d.set_size(len);
             d.set_length(len);
-            d.set_suc_eof(false);
+            d.set_suc_eof(last && !CONTINUOUS);
             d.set_owner(Owner::Dma);
         }
         // Restart descriptor (used by `restart`): the rest of ring chunk 0 from 17 px in, then the
@@ -163,7 +170,12 @@ impl LoopedFb {
         r.set_length(CHUNK - RESTART_SKIP_BYTES);
         r.set_suc_eof(false);
         r.set_owner(Owner::Dma);
-        crate::restart::set_desc(r as *mut DmaDescriptor as usize);
+        let restart = if CONTINUOUS {
+            r as *mut DmaDescriptor
+        } else {
+            head
+        };
+        crate::restart::set_desc(restart as usize);
         Self { descriptors, fb }
     }
 }

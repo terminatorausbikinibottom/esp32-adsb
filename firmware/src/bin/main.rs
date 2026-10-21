@@ -278,7 +278,7 @@ async fn main(_spawner: Spawner) -> ! {
         info!("diag-shift: extra log line before scanout start");
         // Looped transfer: kept alive forever, never dropped (drop would stop the DMA).
         let _transfer = dpi
-            .send(true, buf)
+            .send(display::CONTINUOUS, buf)
             .map_err(|e| e.0)
             .expect("dpi: send failed");
         info!(
@@ -363,7 +363,7 @@ async fn main(_spawner: Spawner) -> ! {
         info!("diag-shift: extra log line before scanout start");
         // Looped transfer: kept alive forever, never dropped (drop would stop the DMA).
         let _transfer = dpi
-            .send(true, buf)
+            .send(display::CONTINUOUS, buf)
             .map_err(|e| e.0)
             .expect("dpi: send failed");
         info!(
@@ -390,9 +390,10 @@ async fn main(_spawner: Spawner) -> ! {
             info!("alive {n}s");
             // The restart must finish inside the vertical blank (12 lines = ~0.6 ms at 16 MHz).
             info!(
-                "restart: restarts/s={} avg_us={} max_us={} load={}%",
+                "restart: frames/s={} isr_avg_us={} (of which lcd wait {}) isr_max_us={} load={}%",
                 st.restarts,
                 st.busy_us.checked_div(st.restarts).unwrap_or(0),
+                st.wait_us.checked_div(st.restarts).unwrap_or(0),
                 st.max_us,
                 st.busy_us as u64 * 100 / elapsed_us as u64
             );

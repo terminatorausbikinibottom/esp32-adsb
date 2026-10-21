@@ -1,15 +1,23 @@
-//! Per-VBLANK DMA restart for the direct PSRAM ring, as ESP-IDF does on the S3
-//! (`lcd_rgb_panel_try_restart_transmission`, esp_lcd_panel_rgb.c): on the VSYNC interrupt reset the
-//! LCD async FIFO and the GDMA out channel, then start the DMA at the restart descriptor (the
-//! framebuffer start plus the 17 pixels the FIFO keeps), which chains into the normal ring. This
-//! pins the frame start phase every frame, so a start-up latency race or a lost beat cannot persist.
-//! If the interrupt runs after the LCD took the first pixels, one frame shifts (IDF has the same limit).
+//! Per-frame restart of the scanout from the VSYNC interrupt (core 1). Two modes, see `display::CONTINUOUS`:
+//!
+//! * Stopped panel (default): the LCD runs one frame per start (`next_frame_en` = 0) over a linear
+//!   one-frame descriptor chain. The VSYNC interrupt fires inside the vertical blank, so the handler
+//!   waits for the LCD to finish the frame (`lcd_start` self-clears), then does exactly what ESP-IDF's
+//!   `esp_lcd_rgb_panel_refresh` (refresh on demand, `lcd_rgb_panel_start_transmission`) does: GDMA
+//!   reset, LCD stop + reset, async FIFO reset, GDMA start at the frame head, 1 us delay, LCD start.
+//!   Every frame therefore starts from a known empty FIFO.
+//! * Continuous (`restart-vsync`): ESP-IDF's stream-mode `lcd_rgb_panel_try_restart_transmission`:
+//!   reset the FIFO and GDMA while the LCD runs on and restart at a descriptor 17 px into the
+//!   framebuffer (the pixels the FIFO keeps). Measured: the kept count varies, so the frame start
+//!   shifts by 14..34 px from frame to frame.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering::Relaxed};
 
 use esp_hal::interrupt;
 use esp_hal::peripherals::Interrupt;
 use esp_hal::time::Instant;
+
+use crate::display;
 
 /// GDMA channel the LCD uses (`DMA_CH0` in main).
 const CH: usize = 0;
@@ -19,6 +27,7 @@ static READY: AtomicBool = AtomicBool::new(false);
 // Written only by the handler; read and cleared by `take_stats` (a torn pair costs one sample).
 static RESTARTS: AtomicU32 = AtomicU32::new(0);
 static BUSY_US: AtomicU32 = AtomicU32::new(0);
+static WAIT_US: AtomicU32 = AtomicU32::new(0);
 static MAX_US: AtomicU32 = AtomicU32::new(0);
 
 /// Counters since the previous call.
@@ -26,6 +35,8 @@ static MAX_US: AtomicU32 = AtomicU32::new(0);
 pub struct Stats {
     pub restarts: u32,
     pub busy_us: u32,
+    /// Part of `busy_us` spent waiting for the LCD to finish the frame (stopped-panel mode).
+    pub wait_us: u32,
     pub max_us: u32,
 }
 
@@ -33,6 +44,7 @@ pub fn take_stats() -> Stats {
     Stats {
         restarts: RESTARTS.swap(0, Relaxed),
         busy_us: BUSY_US.swap(0, Relaxed),
+        wait_us: WAIT_US.swap(0, Relaxed),
         max_us: MAX_US.swap(0, Relaxed),
     }
 }
@@ -61,6 +73,11 @@ pub fn enable_interrupt() {
     }
 }
 
+fn reset_dma(ch: &esp32s3::dma::ch::CH) {
+    ch.out_conf0().modify(|_, w| w.out_rst().set_bit());
+    ch.out_conf0().modify(|_, w| w.out_rst().clear_bit());
+}
+
 fn now_us() -> u32 {
     Instant::now().duration_since_epoch().as_micros() as u32
 }
@@ -80,15 +97,36 @@ fn restart() {
     lcd.lc_dma_int_clr()
         .write(|w| w.lcd_vsync_int_clr().set_bit());
     lcd.lcd_misc().modify(|_, w| w.lcd_afifo_reset().set_bit());
-    ch.out_conf0().modify(|_, w| w.out_rst().set_bit());
-    ch.out_conf0().modify(|_, w| w.out_rst().clear_bit());
+    let mut wait = 0;
+    if display::CONTINUOUS {
+        reset_dma(ch);
+    } else {
+        // The frame ends after the vertical blank (<= ~0.6 ms); the bound only guards a hung LCD.
+        let tw = now_us();
+        while lcd.lcd_user().read().lcd_start().bit_is_set() && now_us().wrapping_sub(tw) < 3000 {}
+        wait = now_us().wrapping_sub(tw);
+        reset_dma(ch);
+        lcd.lcd_user().modify(|_, w| w.lcd_start().clear_bit());
+        lcd.lcd_user().modify(|_, w| w.lcd_reset().set_bit());
+        lcd.lcd_misc().modify(|_, w| w.lcd_afifo_reset().set_bit());
+    }
     ch.out_link()
         .modify(|_, w| unsafe { w.outlink_addr().bits(RESTART_DESC.load(Relaxed) as u32) });
     ch.out_link().modify(|_, w| w.outlink_start().set_bit());
+    if !display::CONTINUOUS {
+        // IDF: "delay 1us is sufficient for DMA to pass data to LCD FIFO".
+        let t = now_us();
+        while now_us().wrapping_sub(t) < 1 {}
+        lcd.lcd_user().modify(|_, w| {
+            w.lcd_update().set_bit();
+            w.lcd_start().set_bit()
+        });
+    }
 
     let dt = now_us().wrapping_sub(t0);
     RESTARTS.fetch_add(1, Relaxed);
     BUSY_US.fetch_add(dt, Relaxed);
+    WAIT_US.fetch_add(wait, Relaxed);
     if dt > MAX_US.load(Relaxed) {
         MAX_US.store(dt, Relaxed);
     }

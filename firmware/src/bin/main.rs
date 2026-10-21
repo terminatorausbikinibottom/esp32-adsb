@@ -13,12 +13,16 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_alloc::MemoryCapability;
 use esp_backtrace as _;
+use esp_hal::Async;
 use esp_hal::clock::CpuClock;
+use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::psram::{Psram, PsramConfig, PsramMode, SpiRamFreq};
-use esp_hal::time::Instant;
+use esp_hal::time::{Instant, Rate};
 use esp_hal::timer::timg::TimerGroup;
 use log::info;
 use modes as _;
+
+use firmware::ch422g::{self, Ch422g};
 
 extern crate alloc;
 
@@ -68,6 +72,37 @@ fn psram_pattern_test(buf: *mut u8, len: usize) -> bool {
         if bad == 0 { "PASS" } else { "FAIL" }
     );
     bad == 0
+}
+
+/// Probes 0x08..=0x77 with an empty write; CH422G ACKs on several addresses in 0x20..0x3F.
+#[allow(
+    clippy::large_stack_frames,
+    reason = "esp-hal's inlined async I2C transaction inflates the future, which lives in task storage"
+)]
+async fn i2c_scan(i2c: &mut I2c<'_, Async>) {
+    for addr in 0x08u8..=0x77 {
+        if i2c.write_async(addr, &[]).await.is_ok() {
+            info!("i2c: found {addr:#04x}");
+        }
+    }
+    info!("i2c: scan done");
+}
+
+#[allow(
+    clippy::large_stack_frames,
+    reason = "esp-hal's inlined async I2C transaction inflates the future, which lives in task storage"
+)]
+#[embassy_executor::task]
+async fn backlight_task(mut expander: Ch422g<'static>) {
+    let mut on = true;
+    loop {
+        Timer::after(Duration::from_secs(1)).await;
+        on = !on;
+        match expander.set_pin(ch422g::BACKLIGHT, on).await {
+            Ok(()) => info!("ch422g: backlight {}", if on { "on" } else { "off" }),
+            Err(e) => log::error!("ch422g: backlight write failed: {e:?}"),
+        }
+    }
 }
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
@@ -120,24 +155,29 @@ async fn main(spawner: Spawner) -> ! {
             ..Default::default()
         },
     );
-    esp_alloc::psram_allocator!(&psram);
     let (psram_start, psram_size) = psram.raw_parts();
-    info!(
-        "psram: start={psram_start:p} size={} MB ({psram_size} bytes)",
-        psram_size / 1024 / 1024
-    );
-    log_heap("psram");
+    if psram_size == 0 {
+        // HeapRegion::new requires size > 0, so don't hand the region to the allocator.
+        log::error!("psram: init failed, size 0");
+    } else {
+        esp_alloc::psram_allocator!(&psram);
+        info!(
+            "psram: start={psram_start:p} size={} MB ({psram_size} bytes)",
+            psram_size / 1024 / 1024
+        );
+        log_heap("psram");
 
-    let layout = Layout::from_size_align(FB_BYTES, 32).unwrap();
-    let fb = unsafe { esp_alloc::HEAP.alloc_caps(MemoryCapability::External.into(), layout) };
-    assert!(!fb.is_null(), "psram: {FB_BYTES} byte alloc failed");
-    let in_psram = PSRAM_VADDR.contains(&(fb as usize));
-    info!("psram: fb ptr={fb:p} len={FB_BYTES} in_psram_range={in_psram}");
-    assert!(in_psram, "psram: allocation did not land in PSRAM");
-    log_heap("psram(fb allocated)");
-    psram_pattern_test(fb, FB_BYTES);
-    unsafe { core::alloc::GlobalAlloc::dealloc(&esp_alloc::HEAP, fb, layout) };
-    log_heap("psram(fb freed)");
+        let layout = Layout::from_size_align(FB_BYTES, 32).unwrap();
+        let fb = unsafe { esp_alloc::HEAP.alloc_caps(MemoryCapability::External.into(), layout) };
+        assert!(!fb.is_null(), "psram: {FB_BYTES} byte alloc failed");
+        let in_psram = PSRAM_VADDR.contains(&(fb as usize));
+        info!("psram: fb ptr={fb:p} len={FB_BYTES} in_psram_range={in_psram}");
+        assert!(in_psram, "psram: allocation did not land in PSRAM");
+        log_heap("psram(fb allocated)");
+        psram_pattern_test(fb, FB_BYTES);
+        unsafe { core::alloc::GlobalAlloc::dealloc(&esp_alloc::HEAP, fb, layout) };
+        log_heap("psram(fb freed)");
+    }
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
@@ -149,8 +189,30 @@ async fn main(spawner: Spawner) -> ! {
             .expect("Failed to initialize Wi-Fi controller");
     let _wifi_interface = esp_radio::wifi::Interface::station();
 
-    // TODO: Spawn some tasks
-    let _ = spawner;
+    // Async I2C0; touch_task will take over the bus (and the expander) in step 1.6.
+    let mut i2c = I2c::new(
+        peripherals.I2C0,
+        I2cConfig::default().with_frequency(Rate::from_khz(400)),
+    )
+    .expect("i2c config")
+    .with_sda(peripherals.GPIO8)
+    .with_scl(peripherals.GPIO9)
+    .into_async();
+    i2c_scan(&mut i2c).await;
+
+    let mut expander = Ch422g::new(i2c);
+    // EXIO5 low = USB stays selected; TP_RST, LCD_RST, SD_CS high, backlight on.
+    let initial = (1 << ch422g::TP_RST)
+        | (1 << ch422g::BACKLIGHT)
+        | (1 << ch422g::LCD_RST)
+        | (1 << ch422g::SD_CS);
+    expander.set_mode_output().await.expect("ch422g: set mode");
+    expander
+        .write_outputs(initial)
+        .await
+        .expect("ch422g: write outputs");
+    info!("ch422g: outputs={initial:#04x} (EXIO5 low = USB)");
+    spawner.spawn(backlight_task(expander).expect("spawn backlight_task"));
 
     loop {
         info!("Hello world!");

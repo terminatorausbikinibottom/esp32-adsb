@@ -1767,3 +1767,12 @@ Unverified (summary): every [VERIFY] item above, especially:
   `frames/s`, `isr_avg_us (of which lcd wait)`, `isr_max_us`; expect ~39 frames/s (>= 30 target).
   Features: default = stopped panel; `restart-vsync` = 699b035 behaviour; `no-resync` = 1.3
   (continuous ring, no ISR); `bounce`, `diag-shift`, `diag-ruler` unchanged. Builds `fw-S-a/-b/-ruler`.
+- 2026-10-21, **steps 1.3/1.5 display scanout: PASS on the board (9e7387e)**. Direct PSRAM framebuffer, one
+  frame per start (next_frame_en=0, linear chain with EOF), restarted from core 1 per frame like
+  ESP-IDF refresh-on-demand: GDMA reset, LCD stop/reset, afifo reset, GDMA start at fb[0], 1 us,
+  LCD start. 16 MHz, 39-40 fps, ISR 5 us avg / 13 us max, image steady with full border and
+  correct bars; one glitch right after boot (first frame via stock Dpi::send). Root cause of all
+  earlier failures: start-up/FIFO phase of the stream, not PSRAM bandwidth at idle. SRAM bounce
+  buffers are not needed for now (kept behind `bounce`); step 1.4 must still verify R2 under load.
+  Follow-ups: backlight on after the first restarted frame; check whether the vendored esp-hal
+  reorder patch is still needed (the ISR does reset-before-start itself).

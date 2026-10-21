@@ -50,6 +50,6 @@ On a Linux host you can pass the device instead, e.g. add
 Inside the container:
 
 ```sh
-esp-generate --headless -o esp32 -o embassy -o unstable-hal -o alloc esp32-adsb   # pick your chip
+esp-generate --headless -s -o esp32s3 -o esp32s3-wroom-1-octal-psram -o embassy -o unstable-hal -o alloc -o wifi -o log -o esp-backtrace firmware
 esp-generate list-options
 ```

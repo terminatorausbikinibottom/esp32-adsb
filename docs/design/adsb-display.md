@@ -1645,3 +1645,27 @@ Unverified (summary): every [VERIFY] item above, especially:
   - **Not changed:** hardware, bandwidth, metadata/TLS, vicinity, UI layout, steps 1.x, 2.2–2.11,
     3.1–3.3, 3.5, 4.6 and 5.1–5.3. Step IDs are preserved.
 - 2026-10-21, **approval of revision 3**: user approved. Status line updated; no other changes.
+- 2026-10-21, **step 0.2 done** (firmware generated). Command (run in the repo root):
+  `esp-generate --headless -s -o esp32s3 -o esp32s3-wroom-1-octal-psram -o embassy -o unstable-hal -o alloc -o wifi -o log -o esp-backtrace firmware`.
+  - **Options:** esp-generate 1.4.0 has no standalone "PSRAM" option. PSRAM is expressed through the
+    module option `esp32s3-wroom-1-octal-psram` (ESP32-S3-WROOM-1, 8 MB octal PSRAM, matches the
+    N16R8), which only reserves GPIO27–37 in the template. **The generated project does not enable
+    PSRAM**: no `psram` feature on `esp-hal` and no PSRAM heap region. Step 1.1/1.3 must add it.
+    `wifi` here means `esp-radio` (it requires `alloc`, `unstable-hal`, `embassy`). `log` +
+    `esp-backtrace` are required together (`log` gives esp-println logging). The README's `-o esp32`
+    was wrong; the chip is selected with `-o esp32s3` (no `--chip` flag exists).
+  - **Resolved versions (Cargo.lock):** `esp-hal` 1.2.2, `esp-rtos` 0.4.0, `esp-radio`
+    **1.0.0-beta.1**, `esp-alloc` 0.11.0, `esp-bootloader-esp-idf` 0.6.0, `esp-println` 0.18.0,
+    `esp-backtrace` 0.20.0, `embassy-executor` 0.10.0, `embassy-net` 0.9.1, `embassy-time` 0.5.1,
+    `smoltcp` 0.14.0, `static_cell` 2.1.1, `log` 0.4.34, `embedded-io` 0.7.1,
+    `embedded-io-async` 0.7.0, `critical-section` 1.2.0. Toolchain: `esp` channel, rustc 1.97.0,
+    `rust-version = "1.95"`.
+  - **Deviation from the ADR table:** only `esp-radio`: **1.0.0-beta.1 instead of 0.18.0**. The
+    generator's set is authoritative (ADR-001 item 3), so the table is superseded for that row.
+    All other rows match. The table gained `esp-bootloader-esp-idf`, which the generator requires.
+    `embassy-sync` is not a direct dependency yet (add it with Phase 1+ code).
+  - **Other:** generated code contains no WiFi credentials or network config (only controller
+    init). `license = "GPL-3.0-or-later"` added to `firmware/Cargo.toml`; root `LICENSE` is the
+    GPLv3 text from gnu.org. `.gitignore` adds `target/`, `.env`, `captures/`, `*.capture`.
+    `cargo build --release` and `cargo clippy --release` pass (one linker warning about an RWX
+    LOAD segment, generated code, ignored).

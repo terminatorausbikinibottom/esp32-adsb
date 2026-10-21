@@ -5,6 +5,8 @@
 //! `Snapshot`, and the metadata cache. Time is passed in as `now_ms: u64`.
 #![cfg_attr(not(test), no_std)]
 
+pub mod geo;
+
 #[cfg(test)]
 mod tests {
     #[test]

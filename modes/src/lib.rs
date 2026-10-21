@@ -6,6 +6,7 @@
 #![cfg_attr(not(test), no_std)]
 
 mod adsb;
+mod altitude;
 mod basics;
 mod frame;
 mod source;

@@ -44,8 +44,20 @@ shared workspace:
 # host, once
 brew install espflash        # or: cargo binstall espflash
 # host, per flash
-espflash flash --monitor target/<triple>/release/<app>
+espflash flash --monitor --port /dev/cu.usbmodem101 \
+  firmware/target/xtensa-esp32s3-none-elf/release/firmware
 ```
+
+The Waveshare ESP32-S3-Touch-LCD-7 enumerates as two serial ports:
+
+| Connector | macOS device | What it is |
+| --- | --- | --- |
+| USB | `/dev/cu.usbmodem101` (VID 303A) | native USB-Serial-JTAG — **use this one** |
+| UART | `/dev/tty.usbmodem<serial>` | USB-UART bridge to UART0 |
+
+`esp-println` is in `auto` mode: while a host is attached to the native USB port, all log
+output goes there and UART0 stays silent. Flashing over the native port also resets reliably
+into the app. Unplug the USB cable if you want logs on the UART port instead.
 
 On a Linux host you can pass the device instead, e.g. add
 `"--device=/dev/ttyUSB0"` (or `/dev/ttyACM0`) to `runArgs`, and `cargo run` works inside the container.

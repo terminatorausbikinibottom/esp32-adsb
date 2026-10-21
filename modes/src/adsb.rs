@@ -24,7 +24,8 @@ pub struct EmitterCategory {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Identification {
-    /// Up to 8 chars of `A-Z 0-9 space`, trailing spaces trimmed (may be empty).
+    /// Up to 8 chars of `A-Z 0-9 space`, trailing spaces trimmed (may be empty). Unassigned
+    /// 6-bit codes appear as `?`; Phase 5 lookup must skip callsigns containing `?`.
     pub callsign: String<8>,
     /// `None` when CA = 0.
     pub category: Option<EmitterCategory>,
@@ -44,9 +45,8 @@ impl FrameData {
         self.me().map(|me| me[0] >> 3)
     }
 
-    /// Identification (TC 1-4). `None` for other type codes, or if any of the 8 characters
-    /// is an unassigned 6-bit code: a CRC-valid frame with such a code is a non-compliant
-    /// transmitter, so the whole callsign is rejected rather than shown with placeholders.
+    /// Identification (TC 1-4). `None` for other type codes. Unassigned 6-bit character
+    /// codes are mapped to `?` (dump1090 style) rather than rejecting the frame.
     pub fn identification(&self) -> Option<Identification> {
         let me = self.me()?;
         let set = match me[0] >> 3 {
@@ -61,7 +61,7 @@ impl FrameData {
         let mut callsign = String::new();
         for i in 0..8 {
             match CHARSET[(bits >> (42 - 6 * i) & 0x3F) as usize] {
-                b'#' => return None,
+                b'#' => callsign.push('?').ok()?,
                 c => callsign.push(c as char).ok()?,
             }
         }
@@ -149,8 +149,12 @@ mod tests {
         for code in 0..64u8 {
             let f = ident_frame(17 << 3, 4, 1, [code; 8]);
             let valid = matches!(code, 1..=26 | 32 | 48..=57);
-            assert_eq!(f.identification().is_some(), valid, "code {code}");
-            if valid {
+            assert!(f.identification().is_some(), "code {code}");
+            if !valid {
+                let id = f.identification().unwrap();
+                assert_eq!(id.callsign.as_str(), "????????", "code {code}");
+                assert!(id.category.is_some());
+            } else {
                 let want = match code {
                     1..=26 => (b'A' + code - 1) as char,
                     32 => ' ',
@@ -168,12 +172,21 @@ mod tests {
     }
 
     #[test]
-    fn invalid_char_in_any_position_rejects() {
+    fn invalid_char_in_any_position_becomes_question_mark() {
         for pos in 0..8 {
             let mut c = codes("ABCDEFGH");
             c[pos] = 0;
-            assert_eq!(ident_frame(17 << 3, 4, 1, c).identification(), None);
+            let id = ident_frame(17 << 3, 4, 1, c).identification().unwrap();
+            let mut want = *b"ABCDEFGH";
+            want[pos] = b'?';
+            assert_eq!(id.callsign.as_bytes(), &want);
+            assert!(id.category.is_some());
         }
+        // trailing-space trimming still applies after an invalid code
+        let mut c = codes("AB");
+        c[0] = 0;
+        let id = ident_frame(17 << 3, 4, 1, c).identification().unwrap();
+        assert_eq!(id.callsign.as_str(), "?B");
     }
 
     #[test]

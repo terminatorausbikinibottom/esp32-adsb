@@ -61,6 +61,13 @@ fn keyframe_hashes_are_stable_and_distinct() {
         sim.seek(Kind::Overflight, 1, *at);
         assert_eq!(sim.frame_hash(), want, "{name} after tap");
     }
+    // Seeking to 0 repaints at once: no frame of the previous run (or live view) survives.
+    sim.seek(Kind::Overflight, 1, 0);
+    let h0 = sim.frame_hash();
+    sim.seek(Kind::Overflight, 1, 455_000);
+    assert_ne!(sim.frame_hash(), h0);
+    sim.seek(Kind::Overflight, 1, 0);
+    assert_eq!(sim.frame_hash(), h0, "stale frame after seek to 0");
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ui-snapshots");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("hashes.txt"), report).unwrap();

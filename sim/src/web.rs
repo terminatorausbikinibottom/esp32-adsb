@@ -29,7 +29,15 @@ struct Live {
     /// Identifies the current socket; events from older ones are ignored.
     epoch: u32,
     last_tick_ms: u64,
+    /// Kept alive while `ws` may call them; replaced (and so freed) on the next connect.
+    _handlers: Option<Handlers>,
 }
+
+type Handlers = (
+    Closure<dyn FnMut()>,
+    Closure<dyn FnMut(web_sys::MessageEvent)>,
+    Closure<dyn FnMut()>,
+);
 
 struct State {
     this: Weak<RefCell<State>>,
@@ -82,6 +90,13 @@ fn kind_of(name: &str) -> Kind {
     }
 }
 
+fn detach(ws: &WebSocket) {
+    ws.set_onopen(None);
+    ws.set_onmessage(None);
+    ws.set_onclose(None);
+    ws.set_onerror(None);
+}
+
 impl State {
     fn blit(&self) {
         let rgba = self.sim.rgba();
@@ -131,10 +146,7 @@ impl State {
         if let Some(l) = self.live.take()
             && let Some(ws) = l.ws
         {
-            ws.set_onopen(None);
-            ws.set_onmessage(None);
-            ws.set_onclose(None);
-            ws.set_onerror(None);
+            detach(&ws);
             let _ = ws.close();
         }
     }
@@ -153,6 +165,7 @@ impl State {
             ws: None,
             epoch: 0,
             last_tick_ms: now_ms(),
+            _handlers: None,
         });
         self.connect();
         self.sim.tick_live(now_ms(), false);
@@ -163,6 +176,10 @@ impl State {
     /// Open a socket to the bridge through the page's own origin (trunk proxy, same-origin).
     fn connect(&mut self) {
         let Some(l) = self.live.as_mut() else { return };
+        // Detach before freeing: a dropped closure must never be called.
+        if let Some(old) = l.ws.take() {
+            detach(&old);
+        }
         l.epoch += 1;
         let epoch = l.epoch;
         let loc = web_sys::window().unwrap().location();
@@ -185,27 +202,22 @@ impl State {
                 }
             }
         };
-        // shortcut: handlers are leaked (a few hundred bytes per reconnect, at most one per
-        // second to 30 s); dropping a closure from inside its own callback is not safe.
         let h = hook(&self.this);
-        let cb = Closure::<dyn FnMut()>::new(move || h(&|s| s.ws_open(epoch)));
-        ws.set_onopen(Some(cb.as_ref().unchecked_ref()));
-        cb.forget();
+        let open = Closure::<dyn FnMut()>::new(move || h(&|s| s.ws_open(epoch)));
+        ws.set_onopen(Some(open.as_ref().unchecked_ref()));
         let h = hook(&self.this);
-        let cb =
+        let msg =
             Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |e: web_sys::MessageEvent| {
                 let bytes = js_sys::Uint8Array::new(&e.data()).to_vec();
                 h(&|s| s.ws_data(epoch, &bytes));
             });
-        ws.set_onmessage(Some(cb.as_ref().unchecked_ref()));
-        cb.forget();
+        ws.set_onmessage(Some(msg.as_ref().unchecked_ref()));
         // `error` is always followed by `close`; either ends the attempt.
-        for set in [WebSocket::set_onclose, WebSocket::set_onerror] {
-            let h = hook(&self.this);
-            let cb = Closure::<dyn FnMut()>::new(move || h(&|s| s.ws_closed(epoch)));
-            set(&ws, Some(cb.as_ref().unchecked_ref()));
-            cb.forget();
-        }
+        let h = hook(&self.this);
+        let closed = Closure::<dyn FnMut()>::new(move || h(&|s| s.ws_closed(epoch)));
+        ws.set_onclose(Some(closed.as_ref().unchecked_ref()));
+        ws.set_onerror(Some(closed.as_ref().unchecked_ref()));
+        l._handlers = Some((open, msg, closed));
         l.ws = Some(ws);
     }
 
@@ -213,6 +225,7 @@ impl State {
         if let Some(l) = self.live.as_mut().filter(|l| l.epoch == epoch) {
             l.link.on_open();
             self.sim.reset_clock();
+            self.show();
         }
     }
 
@@ -365,8 +378,9 @@ fn fetch_config(st: &Rc<RefCell<State>>) {
     let (e, s) = (on_err.clone(), st.clone());
     let on_resp = Closure::<dyn FnMut(JsValue)>::new(move |v: JsValue| {
         let r: web_sys::Response = v.unchecked_into();
-        match r.json() {
-            Ok(p) if r.ok() => {
+        // Status first: `json()` on an empty 404 body rejects, and nobody would catch that.
+        match r.ok().then(|| r.json()) {
+            Some(Ok(p)) => {
                 let _ = p.then2(&on_json, &e);
             }
             _ => s.borrow_mut().set_live_config(None),

@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Semaphore;
 
 pub const DEFAULT_ADDR: &str = "127.0.0.1:8081";
@@ -22,6 +23,9 @@ pub struct Config {
     pub hosts: HashSet<String>,
     /// One permit per live WebSocket client (`ADSB_SIM_MAX_CLIENTS`).
     pub slots: Arc<Semaphore>,
+    /// How long the upstream feed may stay down before the client WebSocket is closed
+    /// (`ADSB_SIM_UPSTREAM_GRACE_S`).
+    pub upstream_grace: Duration,
 }
 
 /// `KEY=value` lines as `set -a; . ./.env` would see them: optional `export`, optional quotes.
@@ -138,7 +142,17 @@ impl Config {
             None => 4,
         };
 
+        let grace_s = match get("ADSB_SIM_UPSTREAM_GRACE_S") {
+            Some(n) => n
+                .parse::<u64>()
+                .ok()
+                .filter(|n| (1..=3600).contains(n))
+                .ok_or("ADSB_SIM_UPSTREAM_GRACE_S must be 1..=3600")?,
+            None => 10,
+        };
+
         Ok(Config {
+            upstream_grace: Duration::from_secs(grace_s),
             slots: Arc::new(Semaphore::new(max_clients)),
             listen,
             feed,
@@ -162,6 +176,19 @@ mod tests {
         for bad in ["0", "x", "-1", "99999"] {
             assert!(
                 cfg(None, &[("ADSB_SIM_MAX_CLIENTS", bad)]).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn upstream_grace_default_and_validation() {
+        assert_eq!(cfg(None, &[]).unwrap().upstream_grace.as_secs(), 10);
+        let c = cfg(Some("ADSB_SIM_UPSTREAM_GRACE_S=3"), &[]).unwrap();
+        assert_eq!(c.upstream_grace.as_secs(), 3);
+        for bad in ["0", "x", "-1", "99999"] {
+            assert!(
+                cfg(None, &[("ADSB_SIM_UPSTREAM_GRACE_S", bad)]).is_err(),
                 "{bad}"
             );
         }

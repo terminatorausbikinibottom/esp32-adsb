@@ -11,7 +11,7 @@ use axum::{
     body::Body,
     extract::{
         State, WebSocketUpgrade,
-        ws::{Message, WebSocket},
+        ws::{CloseFrame, Message, WebSocket},
     },
     http::{HeaderMap, Request, StatusCode, header},
     middleware::{self, Next},
@@ -20,7 +20,7 @@ use axum::{
 };
 use config::Config;
 use std::{sync::Arc, time::Duration};
-use tokio::{io::AsyncReadExt, net::TcpStream};
+use tokio::{io::AsyncReadExt, net::TcpStream, time::Instant};
 
 type Shared = Arc<Config>;
 
@@ -119,7 +119,7 @@ async fn ws_live(State(cfg): State<Shared>, ws: WebSocketUpgrade) -> Response {
         Some(feed) => match cfg.slots.clone().try_acquire_owned() {
             // permit lives as long as the relay; refused clients never reach the upstream
             Ok(permit) => ws.on_upgrade(move |s| async move {
-                relay(s, feed).await;
+                relay(s, feed, cfg.upstream_grace).await;
                 drop(permit);
             }),
             Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
@@ -137,19 +137,32 @@ async fn closed(ws: &mut WebSocket) {
     }
 }
 
+/// Resolves at `deadline`; never if there is none.
+async fn expired(deadline: Option<Instant>) {
+    match deadline {
+        Some(d) => tokio::time::sleep_until(d).await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Raw feed bytes -> binary WS messages, reconnecting upstream with backoff while the client stays.
-async fn relay(mut ws: WebSocket, feed: String) {
+/// If no data arrives for `grace` after the upstream was lost, the client gets a normal close so
+/// it can show the feed as down and reconnect on its own schedule.
+async fn relay(mut ws: WebSocket, feed: String, grace: Duration) {
     let mut backoff = Duration::from_millis(500);
     let mut buf = [0u8; 4096];
+    let mut deadline = Some(Instant::now() + grace); // also covers a first connect that never succeeds
     loop {
         let conn = tokio::select! {
             c = TcpStream::connect(&feed) => c,
             () = closed(&mut ws) => return,
+            () = expired(deadline) => return give_up(ws).await,
         };
         let Ok(mut tcp) = conn else {
             tokio::select! {
                 () = tokio::time::sleep(backoff) => {}
                 () = closed(&mut ws) => return,
+                () = expired(deadline) => return give_up(ws).await,
             }
             backoff = (backoff * 2).min(Duration::from_secs(8));
             continue;
@@ -159,16 +172,30 @@ async fn relay(mut ws: WebSocket, feed: String) {
             tokio::select! {
                 n = tcp.read(&mut buf) => match n {
                     Ok(n) if n > 0 => {
+                        deadline = None;
                         if ws.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
                             return;
                         }
                     }
-                    _ => break, // upstream gone: reconnect
+                    _ => {
+                        // upstream gone: reconnect, within the grace period
+                        deadline.get_or_insert_with(|| Instant::now() + grace);
+                        break;
+                    }
                 },
                 () = closed(&mut ws) => return,
+                () = expired(deadline) => return give_up(ws).await,
             }
         }
     }
+}
+
+async fn give_up(mut ws: WebSocket) {
+    let frame = CloseFrame {
+        code: 1000,
+        reason: "upstream feed lost".into(),
+    };
+    let _ = ws.send(Message::Close(Some(frame))).await;
 }
 
 #[cfg(test)]

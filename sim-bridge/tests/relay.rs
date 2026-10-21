@@ -163,3 +163,43 @@ async fn client_cap_refuses_with_503_and_no_upstream_connection() {
     }
     panic!("slot never freed");
 }
+
+#[tokio::test]
+async fn upstream_loss_closes_client_after_grace() {
+    let feed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = feed.local_addr().unwrap().port();
+    let addr = bridge(&format!(
+        "ADSB_FEED_HOST=127.0.0.1\nADSB_FEED_PORT={port}\nADSB_SIM_UPSTREAM_GRACE_S=1"
+    ))
+    .await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(ws_req(addr, Some("http://localhost:8080")))
+        .await
+        .unwrap();
+    let (mut up, _) = feed.accept().await.unwrap();
+    up.write_all(b"hello").await.unwrap();
+    assert!(matches!(
+        ws.next().await.unwrap().unwrap(),
+        tungstenite::Message::Binary(_)
+    ));
+    // kill the upstream for good: connection and listener
+    drop(up);
+    drop(feed);
+    let t = std::time::Instant::now();
+    let m = tokio::time::timeout(std::time::Duration::from_secs(4), ws.next())
+        .await
+        .expect("client was not closed");
+    match m {
+        Some(Ok(tungstenite::Message::Close(Some(f)))) => {
+            assert_eq!(
+                f.code,
+                tungstenite::protocol::frame::coding::CloseCode::Normal
+            );
+            assert!(!f.reason.is_empty());
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        t.elapsed() >= std::time::Duration::from_millis(900),
+        "closed before the grace period"
+    );
+}

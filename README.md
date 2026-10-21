@@ -62,6 +62,22 @@ into the app. Unplug the USB cable if you want logs on the UART port instead.
 On a Linux host you can pass the device instead, e.g. add
 `"--device=/dev/ttyUSB0"` (or `/dev/ttyACM0`) to `runArgs`, and `cargo run` works inside the container.
 
+## Simulator
+
+Browser simulator of the UI (`sim/`), driven by fictitious scenarios or, optionally, a live feed.
+
+```sh
+cd sim && trunk serve                                         # 127.0.0.1:8080, open http://127.0.0.1:8080
+cd sim-bridge && cp .env.example .env && cargo run       # only needed for live mode
+```
+
+The bridge has its own `sim-bridge/.env` (gitignored; see `.env.example` for the keys), read from
+the directory it is started in or from `ADSB_SIM_ENV_FILE`. It listens on loopback only and trunk
+proxies `/ws` and `/local` to it. Without a `.env` the simulator runs scenarios only.
+
+Privacy: live mode shows the real receiver area and traffic. Don't share live screenshots or
+the `.env`.
+
 ## Creating the firmware project
 
 Inside the container:

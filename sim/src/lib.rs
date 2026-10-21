@@ -49,6 +49,8 @@ impl Sim {
         self.feed_ok = true;
         self.radius_km = RADIUS_KM;
         self.app.reset().expect("slint window");
+        // Repaint now: the framebuffer still holds the previous scenario or live frame.
+        self.render();
     }
 
     /// Restart and replay in whole-second steps up to `ms`: the same sequence of states the

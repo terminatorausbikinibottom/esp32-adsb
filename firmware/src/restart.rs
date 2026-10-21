@@ -24,6 +24,7 @@ const CH: usize = 0;
 
 static RESTART_DESC: AtomicUsize = AtomicUsize::new(0);
 static READY: AtomicBool = AtomicBool::new(false);
+static FIRST_RESTART: AtomicBool = AtomicBool::new(false);
 // Written only by the handler; read and cleared by `take_stats` (a torn pair costs one sample).
 static RESTARTS: AtomicU32 = AtomicU32::new(0);
 static BUSY_US: AtomicU32 = AtomicU32::new(0);
@@ -55,6 +56,11 @@ pub(crate) fn set_desc(addr: usize) {
 
 pub fn handler_ready() -> bool {
     READY.load(Relaxed)
+}
+
+/// True once the handler has started the first restarted frame (the one after `Dpi::send`'s own).
+pub fn first_frame_started() -> bool {
+    FIRST_RESTART.load(Relaxed)
 }
 
 /// Binds the handler to the *calling* core's interrupt map; call from the core that should service it.
@@ -123,6 +129,7 @@ fn restart() {
         });
     }
 
+    FIRST_RESTART.store(true, Relaxed);
     let dt = now_us().wrapping_sub(t0);
     RESTARTS.fetch_add(1, Relaxed);
     BUSY_US.fetch_add(dt, Relaxed);

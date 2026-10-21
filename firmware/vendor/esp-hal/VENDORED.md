@@ -52,3 +52,10 @@ first, then starts GDMA, then starts the LCD; this patch uses that order.
 Issue: to be filed in esp-rs/esp-hal (text in the step 1.3 fix loop 2 report). Add the link here once filed.
 
 Drop this vendored copy and the `[patch.crates-io]` entry once a released esp-hal contains the fix.
+
+## Switching to stock esp-hal
+
+The default per-frame restart (`firmware/src/restart.rs`) resets the LCD and FIFO before every start, so
+the `Dpi::send` ordering may no longer matter. To test stock esp-hal 1.2.2: comment out `[patch.crates-io]`
+and its entry in `firmware/Cargo.toml` and rebuild. Only `Dpi::send`'s first frame, and the `no-resync`/`restart-vsync`
+variants (no reset before start), depend on the patch.

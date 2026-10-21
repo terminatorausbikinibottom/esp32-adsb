@@ -373,6 +373,18 @@ async fn main(_spawner: Spawner) -> ! {
             display::DESCRIPTORS,
             !cfg!(feature = "no-resync")
         );
+        // The first frame (sent by `Dpi::send`) can glitch; show the image from the first restarted one.
+        #[cfg(not(feature = "no-resync"))]
+        {
+            let mut waited_ms = 0;
+            while !restart::first_frame_started() && waited_ms < 200 {
+                Timer::after(Duration::from_millis(1)).await;
+                waited_ms += 1;
+            }
+            if !restart::first_frame_started() {
+                log::warn!("lcd: no restarted frame after 200 ms, backlight on anyway");
+            }
+        }
         expander
             .set_pin(ch422g::BACKLIGHT, true)
             .await

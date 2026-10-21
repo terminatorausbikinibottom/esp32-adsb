@@ -96,6 +96,9 @@ static_cell      = "2.1.1"
 
 
 # Patched esp-hal (Dpi::send ordering), see vendor/esp-hal/VENDORED.md. Drop once fixed upstream.
+# The per-frame restart in src/restart.rs resets before every start, so stock esp-hal may suffice:
+# to try it, comment out the two lines below and rebuild (Cargo.lock switches to the registry source
+# by itself); to go back, uncomment them.
 [patch.crates-io]
 esp-hal = { path = "vendor/esp-hal" }
 

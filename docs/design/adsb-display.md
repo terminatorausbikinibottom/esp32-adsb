@@ -1,6 +1,6 @@
 # ADS-B display on Waveshare ESP32-S3-Touch-LCD-7
 
-Status: **revision 3, awaiting review.** Revision 2 was approved by the user on 2026-10-21
+Status: **revision 3, approved by the user 2026-10-21.** Revision 2 was approved by the user on 2026-10-21
 (D1–D8 resolved) and implementation is in progress on this branch. Revision 3 adds the
 approved-scope browser simulator (D9), records the step 0.1 results, and re-sequences the plan so
 UI work can start without the board. Step numbers from revision 2 are kept as stable IDs; new
@@ -1644,3 +1644,4 @@ Unverified (summary): every [VERIFY] item above, especially:
   - **Unverified summary:** added the revision 3 items.
   - **Not changed:** hardware, bandwidth, metadata/TLS, vicinity, UI layout, steps 1.x, 2.2–2.11,
     3.1–3.3, 3.5, 4.6 and 5.1–5.3. Step IDs are preserved.
+- 2026-10-21, **approval of revision 3**: user approved. Status line updated; no other changes.

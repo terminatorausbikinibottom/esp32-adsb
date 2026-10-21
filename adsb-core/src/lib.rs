@@ -6,6 +6,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod geo;
+pub mod kinematics;
 
 #[cfg(test)]
 mod tests {

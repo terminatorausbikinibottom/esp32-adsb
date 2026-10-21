@@ -41,10 +41,11 @@ impl FrameData {
 
     /// True for DF17/18 (long) and DF11 (short) frames whose remainder is 0.
     pub fn crc_ok(&self) -> bool {
-        self.length_matches_df() && self.crc_remainder() == 0
+        matches!(self.df(), 11 | 17 | 18) && self.length_matches_df() && self.crc_remainder() == 0
     }
 
     /// Explicit AA field of DF11/17/18. Unvalidated: check `crc_ok` before trusting it.
+    /// The decoder (2.7+) should only expose validated addresses.
     pub fn icao(&self) -> Option<u32> {
         match self.df() {
             11 | 17 | 18 if self.length_matches_df() => {
@@ -58,6 +59,7 @@ impl FrameData {
     /// Address recovered from the parity overlay of DF0/4/5/16/20/21.
     ///
     /// Cannot be validated here: the caller must apply a known-ICAO filter (R15).
+    /// The decoder (2.7+) should only expose validated addresses.
     pub fn recovered_address(&self) -> Option<u32> {
         match self.df() {
             0 | 4 | 5 | 16 | 20 | 21 if self.length_matches_df() => Some(self.crc_remainder()),
@@ -190,6 +192,17 @@ mod tests {
 
         // remainder above 7 bits is not an IID
         assert_eq!(frame(11 << 3, &aa, 0x80).df11_iid(), None);
+    }
+
+    #[test]
+    fn crc_ok_requires_df_11_17_18() {
+        let f = frame(0, &[0, 0, 0], 0); // DF0, remainder 0
+        assert_eq!(f.crc_remainder(), 0);
+        assert!(!f.crc_ok());
+        let f = frame(19 << 3, &[0; 10], 0); // DF19, remainder 0
+        assert_eq!(f.crc_remainder(), 0);
+        assert!(!f.crc_ok());
+        assert!(frame(18 << 3, &[0; 10], 0).crc_ok());
     }
 
     #[test]

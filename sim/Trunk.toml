@@ -2,7 +2,9 @@
 dist = "dist"
 
 [serve]
-addresses = ["0.0.0.0"]
+# Loopback: enough for VS Code port forwarding. Devcontainer CLI `-p 127.0.0.1:8080:8080` needs
+# `trunk serve --address 0.0.0.0` on the command line.
+addresses = ["127.0.0.1"]
 port = 8080
 open = false
 

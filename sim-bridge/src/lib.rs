@@ -40,13 +40,28 @@ pub fn router(cfg: Shared) -> Router {
 /// moves the browser's value to `X-Forwarded-Host`. When that header is present, it is the one
 /// that must be allowed, and `Host` must then be this loopback backend (never a foreign name).
 fn forbidden(cfg: &Config, h: &HeaderMap, is_ws: bool) -> Option<&'static str> {
-    let get = |n: header::HeaderName| {
-        h.get(n)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_ascii_lowercase)
+    // Cross-site browser requests are refused outright; non-browser clients send no header.
+    if h.get_all("sec-fetch-site")
+        .iter()
+        .any(|v| !matches!(v.as_bytes(), b"same-origin" | b"none"))
+    {
+        return Some("cross-site request");
+    }
+    let host = h
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_ascii_lowercase);
+    // trunk appends to a client-supplied X-Forwarded-Host, so only exactly one plain value is trusted.
+    let mut fwds = h.get_all("x-forwarded-host").iter();
+    let fwd = match (fwds.next(), fwds.next()) {
+        (None, _) => None,
+        (Some(v), None) => match v.to_str() {
+            Ok(v) if !v.contains(',') => Some(v.to_ascii_lowercase()),
+            _ => return Some("host not allowed"),
+        },
+        _ => return Some("host not allowed"),
     };
-    let host = get(header::HOST);
-    let ok = match get(header::HeaderName::from_static("x-forwarded-host")) {
+    let ok = match fwd {
         Some(fwd) => {
             cfg.hosts.contains(&fwd)
                 && host
@@ -101,7 +116,14 @@ async fn local_capture(State(cfg): State<Shared>) -> Response {
 
 async fn ws_live(State(cfg): State<Shared>, ws: WebSocketUpgrade) -> Response {
     match cfg.feed.clone() {
-        Some(feed) => ws.on_upgrade(move |s| relay(s, feed)),
+        Some(feed) => match cfg.slots.clone().try_acquire_owned() {
+            // permit lives as long as the relay; refused clients never reach the upstream
+            Ok(permit) => ws.on_upgrade(move |s| async move {
+                relay(s, feed).await;
+                drop(permit);
+            }),
+            Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        },
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -218,6 +240,54 @@ mod tests {
             )
             .await,
             StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn forwarded_host_and_fetch_site_matrix() {
+        let p = "/local/config.json";
+        let h = Some("127.0.0.1");
+        let ok = StatusCode::OK;
+        let no = StatusCode::FORBIDDEN;
+        let fwd = ("x-forwarded-host", "localhost:8080");
+        // duplicate / list forms, in either order
+        for extra in [
+            vec![fwd, ("x-forwarded-host", "evil.example")],
+            vec![("x-forwarded-host", "evil.example"), fwd],
+            vec![fwd, fwd],
+            vec![("x-forwarded-host", "localhost:8080, evil.example")],
+            vec![("x-forwarded-host", "localhost:8080,")],
+        ] {
+            assert_eq!(status_h(h, None, &extra, p).await, no, "{extra:?}");
+        }
+        for (site, want) in [
+            ("same-origin", ok),
+            ("none", ok),
+            ("cross-site", no),
+            ("same-site", no),
+            ("bogus", no),
+        ] {
+            assert_eq!(
+                status_h(h, None, &[fwd, ("sec-fetch-site", site)], p).await,
+                want,
+                "{site}"
+            );
+        }
+        assert_eq!(status_h(h, None, &[fwd], p).await, ok); // header absent
+        // either value cross-site is enough
+        assert_eq!(
+            status_h(
+                h,
+                None,
+                &[
+                    fwd,
+                    ("sec-fetch-site", "none"),
+                    ("sec-fetch-site", "cross-site")
+                ],
+                p
+            )
+            .await,
+            no
         );
     }
 

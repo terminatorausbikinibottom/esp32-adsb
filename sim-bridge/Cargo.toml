@@ -7,7 +7,7 @@ description = "Loopback-only bridge for the browser simulator: ws<->tcp feed rel
 
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "fs", "sync"] }
 
 [dev-dependencies]
 adsb-core = { path = "../adsb-core", features = ["scenario"] }

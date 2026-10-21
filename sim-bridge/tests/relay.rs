@@ -127,3 +127,39 @@ async fn local_capture_served_from_configured_path() {
     assert!(body.ends_with("@000000000000;\n"));
     assert_eq!(http_get(addr, "/local/capture", "").await.0, 404); // file gone
 }
+
+#[tokio::test]
+async fn client_cap_refuses_with_503_and_no_upstream_connection() {
+    let feed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = feed.local_addr().unwrap().port();
+    let addr = bridge(&format!(
+        "ADSB_FEED_HOST=127.0.0.1\nADSB_FEED_PORT={port}\nADSB_SIM_MAX_CLIENTS=1"
+    ))
+    .await;
+    let o = Some("http://localhost:8080");
+    let (first, _) = tokio_tungstenite::connect_async(ws_req(addr, o))
+        .await
+        .unwrap();
+    let (_up, _) = feed.accept().await.unwrap(); // first client's upstream
+    match tokio_tungstenite::connect_async(ws_req(addr, o)).await {
+        Err(tungstenite::Error::Http(r)) => assert_eq!(r.status(), 503),
+        other => panic!("{other:?}"),
+    }
+    let second = tokio::time::timeout(std::time::Duration::from_millis(300), feed.accept()).await;
+    assert!(
+        second.is_err(),
+        "refused client opened an upstream connection"
+    );
+    // closing the first client frees the slot
+    drop(first);
+    for _ in 0..50 {
+        if tokio_tungstenite::connect_async(ws_req(addr, o))
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("slot never freed");
+}

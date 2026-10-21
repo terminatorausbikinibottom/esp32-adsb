@@ -4,6 +4,8 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 pub const DEFAULT_ADDR: &str = "127.0.0.1:8081";
 const DEFAULT_ORIGINS: &str = "http://localhost:8080,http://127.0.0.1:8080";
@@ -18,6 +20,8 @@ pub struct Config {
     pub capture: Option<PathBuf>,
     pub origins: HashSet<String>,
     pub hosts: HashSet<String>,
+    /// One permit per live WebSocket client (`ADSB_SIM_MAX_CLIENTS`).
+    pub slots: Arc<Semaphore>,
 }
 
 /// `KEY=value` lines as `set -a; . ./.env` would see them: optional `export`, optional quotes.
@@ -125,7 +129,17 @@ impl Config {
             hosts.insert(format!("{name}:{}", listen.port()));
         }
 
+        let max_clients = match get("ADSB_SIM_MAX_CLIENTS") {
+            Some(n) => n
+                .parse::<usize>()
+                .ok()
+                .filter(|n| (1..=1024).contains(n))
+                .ok_or("ADSB_SIM_MAX_CLIENTS must be 1..=1024")?,
+            None => 4,
+        };
+
         Ok(Config {
+            slots: Arc::new(Semaphore::new(max_clients)),
             listen,
             feed,
             config_json,
@@ -139,6 +153,19 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn max_clients_default_and_validation() {
+        assert_eq!(cfg(None, &[]).unwrap().slots.available_permits(), 4);
+        let c = cfg(Some("ADSB_SIM_MAX_CLIENTS=2"), &[]).unwrap();
+        assert_eq!(c.slots.available_permits(), 2);
+        for bad in ["0", "x", "-1", "99999"] {
+            assert!(
+                cfg(None, &[("ADSB_SIM_MAX_CLIENTS", bad)]).is_err(),
+                "{bad}"
+            );
+        }
+    }
 
     fn cfg(file: Option<&str>, env: &[(&str, &str)]) -> Result<Config, String> {
         Config::from_sources(file, |k| {

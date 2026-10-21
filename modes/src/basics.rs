@@ -76,41 +76,10 @@ impl FrameData {
     }
 }
 
-/// Test helper: synthetic frames with correct parity. Superseded by the `encode` feature (S.1).
+/// Test helper: synthetic frames with correct parity; now the `encode` module's `frame`.
 #[cfg(test)]
 pub(crate) mod synth {
-    use crate::FrameData;
-
-    /// CRC-24 of the data bits only (frame with zeroed parity field).
-    fn parity_of(data: &[u8]) -> u32 {
-        let mut padded = [0u8; 14];
-        padded[..data.len()].copy_from_slice(data);
-        let n = data.len() + 3;
-        let f = if n == 7 {
-            FrameData::Short(padded[..7].try_into().unwrap())
-        } else {
-            FrameData::Long(padded)
-        };
-        f.crc_remainder()
-    }
-
-    /// `head` is the first byte (DF + 3 low bits), `body` the rest of the data bits
-    /// (4 bytes short, 11 bytes long). `overlay` is XORed into the parity (address for AP).
-    pub fn frame(head: u8, body: &[u8], overlay: u32) -> FrameData {
-        let mut data = [0u8; 11];
-        data[0] = head;
-        data[1..=body.len()].copy_from_slice(body);
-        let data = &data[..=body.len()];
-        let p = (parity_of(data) ^ overlay).to_be_bytes();
-        let mut out = [0u8; 14];
-        out[..data.len()].copy_from_slice(data);
-        out[data.len()..data.len() + 3].copy_from_slice(&p[1..]);
-        if data.len() == 4 {
-            FrameData::Short(out[..7].try_into().unwrap())
-        } else {
-            FrameData::Long(out)
-        }
-    }
+    pub use crate::encode::frame;
 }
 
 #[cfg(test)]

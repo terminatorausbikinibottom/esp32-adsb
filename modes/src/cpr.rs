@@ -121,19 +121,8 @@ mod tests {
         FrameData::Long(b)
     }
 
-    /// Test-only encoder (spec 5.3.x); S.1 will add a real one.
     fn encode(lat: f64, lon: f64, odd: bool) -> CprPosition {
-        let i = odd as i32;
-        let dlat = 360.0 / (60 - i) as f64;
-        let yz = floor(SCALE * modulo(lat, dlat) / dlat + 0.5);
-        let rlat = dlat * (yz / SCALE + floor(lat / dlat));
-        let dlon = 360.0 / (nl(rlat) as i32 - i).max(1) as f64;
-        let xz = floor(SCALE * modulo(lon, dlon) / dlon + 0.5);
-        CprPosition {
-            odd,
-            lat_cpr: yz as u32 & 0x1FFFF,
-            lon_cpr: xz as u32 & 0x1FFFF,
-        }
+        crate::encode::cpr_encode(lat, lon, odd)
     }
 
     fn close(a: (f64, f64), lat: f64, lon: f64, tol: f64) -> bool {

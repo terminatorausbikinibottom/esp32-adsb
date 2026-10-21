@@ -8,6 +8,8 @@ mod altitude;
 mod basics;
 mod cpr;
 mod decode;
+#[cfg(any(test, feature = "encode"))]
+pub mod encode;
 mod frame;
 mod source;
 mod velocity;

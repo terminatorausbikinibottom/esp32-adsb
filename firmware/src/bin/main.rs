@@ -7,12 +7,14 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+use adsb_core as _; // linked for now; used from Phase 3
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use log::info;
+use modes as _;
 
 extern crate alloc;
 

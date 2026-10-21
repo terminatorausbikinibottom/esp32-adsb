@@ -63,6 +63,8 @@ smoltcp = { version = "0.14.0", default-features = false, features = [
   "socket-udp",
 ] }
 
+adsb-core        = { path = "../adsb-core" }
+modes             = { path = "../modes" }
 critical-section = "1.2.0"
 static_cell      = "2.1.1"
 

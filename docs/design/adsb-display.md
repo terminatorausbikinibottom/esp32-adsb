@@ -1679,3 +1679,8 @@ Unverified (summary): every [VERIFY] item above, especially:
   timing in the `overflight` scenario is 30 s after the outage starts; sim-bridge Origin rule
   narrowed to the WebSocket upgrade for *missing* Origin, with Sec-Fetch-Site and single
   X-Forwarded-Host checks added (trunk 0.22 rewrites Host). No other changes.
+- 2026-10-21, **step 1.1 result (board)**: PASS. AP Memory octal PSRAM, 64 Mbit, 8388608 bytes, mapped at
+  0x3c070000; 768,000-byte PSRAM alloc in range; pattern test 0 mismatches; internal heap unchanged
+  (73744 free). CPU-side sequential timings: write 21 ms (~36 MB/s), read 27 ms (~28 MB/s) for
+  768 KB at 80 MHz octal. Scanout needs ~32 MB/s continuous, so R2 contention is expected;
+  the 1.4 drift gate and 1.5 bounce buffers stay as planned. Flash: DIO 40 MHz (bootloader).

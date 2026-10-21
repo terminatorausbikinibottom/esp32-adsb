@@ -8,9 +8,11 @@
 mod adsb;
 mod altitude;
 mod basics;
+mod cpr;
 mod frame;
 mod source;
 
 pub use adsb::{CategorySet, EmitterCategory, Identification};
+pub use cpr::{CprPosition, cpr_global, cpr_local, nl};
 pub use frame::{ClockKind, FrameData, RawFrame, SignalLevel, Timestamp};
 pub use source::{AvrSource, Counters, FrameSource};

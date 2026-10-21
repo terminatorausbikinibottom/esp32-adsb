@@ -1,5 +1,6 @@
 //! Simulator platform layer: runs a synthetic scenario through the same pipeline and `App` as the
 //! firmware and keeps the rendered 800x480 RGB565 framebuffer. The browser glue is in `web`.
+pub mod live;
 #[cfg(target_arch = "wasm32")]
 mod web;
 
@@ -13,6 +14,7 @@ pub struct Sim {
     scenario: Scenario,
     pipeline: FeedPipeline,
     feed_ok: bool,
+    radius_km: f64,
     /// Persistent framebuffer: the renderer only delivers dirty spans.
     fb: Vec<Rgb565Pixel>,
     line: Vec<Rgb565Pixel>,
@@ -34,6 +36,7 @@ impl Sim {
             scenario,
             pipeline,
             feed_ok: true,
+            radius_km: RADIUS_KM,
             fb: vec![Rgb565Pixel(0); WIDTH * HEIGHT],
             line: vec![Rgb565Pixel(0); WIDTH],
         }
@@ -44,6 +47,7 @@ impl Sim {
         self.scenario = Scenario::new(kind, seed);
         self.pipeline = FeedPipeline::new(self.scenario.receiver());
         self.feed_ok = true;
+        self.radius_km = RADIUS_KM;
         self.app.reset().expect("slint window");
     }
 
@@ -68,11 +72,46 @@ impl Sim {
             now_ms,
             wifi_ok: true,
             feed_ok: self.feed_ok,
-            radius_km: RADIUS_KM,
+            radius_km: self.radius_km,
         };
-        let snap = self.pipeline.snapshot(now_ms, st.radius_km);
-        self.app.update(&snap, &st);
+        self.refresh(&st);
+    }
+
+    fn refresh(&mut self, st: &Status) {
+        let snap = self.pipeline.snapshot(st.now_ms, st.radius_km);
+        self.app.update(&snap, st);
         self.render();
+    }
+
+    /// Switch to live input for the given receiver (fresh pipeline and `App`, like `reset`).
+    /// The scenario is not polled until the next `reset`.
+    pub fn start_live(&mut self, rx: adsb_core::tracker::Config, radius_km: f64) {
+        self.pipeline = FeedPipeline::new(rx);
+        self.feed_ok = false;
+        self.radius_km = radius_km;
+        self.app.reset().expect("slint window");
+    }
+
+    /// Live bytes from the transport; `now_ms` must not go backwards.
+    pub fn feed(&mut self, bytes: &[u8], now_ms: u64) {
+        self.pipeline.feed(bytes, now_ms);
+    }
+
+    /// A transport (re)connected: see `FeedPipeline::reset_clock`.
+    pub fn reset_clock(&mut self) {
+        self.pipeline.reset_clock();
+    }
+
+    /// Live 1 Hz tick.
+    pub fn tick_live(&mut self, now_ms: u64, feed_ok: bool) {
+        self.feed_ok = feed_ok;
+        let st = Status {
+            now_ms,
+            wifi_ok: true,
+            feed_ok,
+            radius_km: self.radius_km,
+        };
+        self.refresh(&st);
     }
 
     /// Returns whether the framebuffer changed.

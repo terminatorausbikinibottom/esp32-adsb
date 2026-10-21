@@ -97,6 +97,16 @@ impl FeedPipeline {
         });
     }
 
+    /// Call on every transport (re)connect: the source's counter may have restarted or jumped,
+    /// so the next stamped frame is re-anchored to its `now_ms` instead of continuing the old
+    /// timeline (which would clamp every later frame to `now_ms` and collapse their spacing).
+    /// Residual: frames of one `feed` call that are >10 s apart in source time are still
+    /// stamped identically when the call's `now_ms` is earlier than their spacing implies
+    /// (the clamp to `now_ms`); a live socket delivers at most a few ms of backlog.
+    pub fn reset_clock(&mut self) {
+        self.clock.last_ticks = None;
+    }
+
     /// Age out stale entries, then build the vicinity snapshot.
     pub fn snapshot(&mut self, now_ms: u64, radius_km: f64) -> Snapshot {
         self.table.age(now_ms);
@@ -163,6 +173,43 @@ mod tests {
         let mut f = raw(0);
         f.timestamp = None;
         assert_eq!(c.stamp(&f, 9600), 9600);
+    }
+
+    #[test]
+    fn reset_clock_reanchors_after_a_counter_jump() {
+        let ms = |c: &mut Clock, t: u64, now| c.stamp(&raw(t), now);
+        let mut c = Clock::default();
+        ms(&mut c, 1_000, 10_000);
+        // Reconnect to a source whose counter is an hour ahead, no reset: the new timeline is
+        // far in the future, so frames 30 s apart both clamp to `now`.
+        let far = 12_000 * 3_600_000;
+        assert_eq!(ms(&mut c, far, 20_000), 20_000);
+        assert_eq!(ms(&mut c, far + 12_000 * 30_000, 50_000), 50_000);
+        assert_eq!(ms(&mut c, far + 12_000 * 60_000, 50_001), 50_001);
+        // With a reset the first frame anchors at `now` and the 30 s spacing survives.
+        let mut c = Clock::default();
+        ms(&mut c, 1_000, 10_000);
+        c.last_ticks = None; // what FeedPipeline::reset_clock does
+        assert_eq!(ms(&mut c, far, 20_000), 20_000);
+        assert_eq!(ms(&mut c, far + 12_000 * 30_000, 50_000), 50_000);
+        assert_eq!(ms(&mut c, far + 12_000 * 40_000, 60_000), 60_000);
+        assert_eq!(c.resets, 0);
+    }
+
+    #[test]
+    fn reset_clock_on_pipeline_does_not_count_as_backwards_jump() {
+        let mut p = FeedPipeline::new(CFG);
+        p.feed(
+            line(encode::identification(0xABCDEF, "A", None), 900).as_bytes(),
+            5,
+        );
+        p.reset_clock();
+        p.feed(
+            line(encode::identification(0xABCDEF, "A", None), 5).as_bytes(),
+            10,
+        );
+        assert_eq!(p.counters().clock_resets, 0);
+        assert_eq!(p.counters().tracker.messages, 2);
     }
 
     #[test]

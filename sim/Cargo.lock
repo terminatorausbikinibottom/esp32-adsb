@@ -3463,6 +3463,7 @@ dependencies = [
  "adsb-app",
  "adsb-core",
  "console_error_panic_hook",
+ "js-sys",
  "png",
  "wasm-bindgen",
  "web-sys",

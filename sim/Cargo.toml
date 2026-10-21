@@ -16,8 +16,10 @@ wasm-bindgen = "=0.2.129"
 web-sys = { version = "0.3", features = [
   "Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "HtmlInputElement",
   "HtmlSelectElement", "CanvasRenderingContext2d", "ImageData", "MouseEvent", "Performance",
-  "DomRect", "EventTarget", "Event", "console",
+  "DomRect", "EventTarget", "Event", "console", "WebSocket", "MessageEvent", "BinaryType",
+  "Response", "Location",
 ] }
+js-sys = "0.3"
 console_error_panic_hook = "0.1"
 
 [lib]

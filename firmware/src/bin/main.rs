@@ -138,11 +138,13 @@ async fn main(_spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     info!("Embassy initialized!");
+    log_heap("rtos started");
 
     let _wifi_controller =
         esp_radio::wifi::WifiController::new(peripherals.WIFI, Default::default())
             .expect("Failed to initialize Wi-Fi controller");
     let _wifi_interface = esp_radio::wifi::Interface::station();
+    log_heap("wifi init");
 
     // Async I2C0; touch_task will take over the bus (and the expander) in step 1.6.
     let mut i2c = I2c::new(

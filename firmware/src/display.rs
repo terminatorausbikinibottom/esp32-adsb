@@ -13,35 +13,56 @@ pub const FB_ALIGN: usize = 64;
 pub const BURST: ExternalBurstConfig = ExternalBurstConfig::Size64;
 /// Bytes per descriptor: 4095 rounded down to a burst multiple so every chunk starts burst-aligned.
 const CHUNK: usize = 4032;
-/// `FB_BYTES.div_ceil(CHUNK)`; the descriptors must live in internal RAM.
-pub const DESCRIPTORS: usize = FB_BYTES.div_ceil(CHUNK);
+/// `FB_BYTES.div_ceil(CHUNK)` plus one for the split at the ring's start; the descriptors must
+/// live in internal RAM.
+pub const DESCRIPTORS: usize = FB_BYTES.div_ceil(CHUNK) + 1;
+/// Where in the framebuffer the ring starts, in bytes (multiple of `BURST`, below `FB_BYTES`).
+///
+/// CALIBRATED WORKAROUND: esp-hal `Dpi::send` starts the DMA, then resets the LCD afifo and starts
+/// the LCD, so the stream is offset by a fixed amount when the first pixel is clocked out. Measured
+/// on the board with the 64 B-granular ring start; the photo of the first pattern showed the stream
+/// 564 B early, so start 9 * 64 B later. Re-measure with the ruler (a ring start S shifts the image
+/// by S bytes = S / 2 px). TODO: replace once the upstream cause is fixed (esp-rs/esp-hal DPI
+/// `send` ordering, no issue filed yet).
+pub const START_OFFSET: usize = 9 * 64;
 
 const R: u16 = 0xF800;
 const G: u16 = 0x07E0;
 const B: u16 = 0x001F;
-const BARS_H: usize = 224;
-const STRIPE_H: usize = 16;
-/// Bar order, left to right.
-const BARS: [u16; 8] = [R, G, B, G | B, R | B, R | G, R | G | B, 0];
+const Y: u16 = R | G;
+const COLS_H: usize = 80;
+/// Colour per hundred (0..=7); yellow is reserved for the 50 px ticks.
+const HUNDREDS: [u16; 8] = [R, G, B, G | B, R | B, 0xFD20, 0x8010, 0x8410];
 
-/// Pixel of the test pattern (RGB565: R = bits 15..11, G = 10..5, B = 4..0).
+/// Calibration ruler (temporary diagnostic for the scanout offset, step 1.3).
 ///
-/// * y < 224: eight 100 px bars: red, green, blue, cyan, magenta, yellow, white, black.
-/// * y >= 224: sixteen 16 px stripes, top to bottom R0..R4, G0..G5, B0..B4, each with only that one
-///   bit set across the full width. Brightness doubles per bit within a colour, so each colour's
-///   stripes must ramp up monotonically (R0/G0/B0 are near black, R4/G5/B4 are half-bright).
-/// * 1 px white border on all four edges (overrides the above).
+/// * 1 px white border on all four edges.
+/// * y 1..80: column ruler, alternating 10 px black/white blocks; 2 px full-height ticks at every
+///   50 px (yellow) and every 100 px (red, green, blue, cyan, magenta, orange, purple, grey for
+///   x = 0, 100 .. 700).
+/// * y >= 80: row ruler, 10 row bands alternating black/dark grey; 2 row ticks every 50 rows
+///   (yellow) and 100 rows (same colour table by y / 100), full width.
 pub fn pattern_pixel(x: usize, y: usize) -> u16 {
     if x == 0 || y == 0 || x == WIDTH - 1 || y == HEIGHT - 1 {
         return 0xFFFF;
     }
-    if y < BARS_H {
-        return BARS[x / (WIDTH / 8)];
-    }
-    match (y - BARS_H) / STRIPE_H {
-        k @ 0..=4 => 1 << (11 + k),
-        k @ 5..=10 => 1 << k, // G0 is bit 5
-        k => 1 << (k - 11),
+    let tick = |v: usize| match (v % 100, v % 50) {
+        (0..=1, _) => Some(HUNDREDS[v / 100 % 8]),
+        (_, 0..=1) => Some(Y),
+        _ => None,
+    };
+    if y < COLS_H {
+        tick(x).unwrap_or(if (x / 10).is_multiple_of(2) {
+            0xFFFF
+        } else {
+            0
+        })
+    } else {
+        tick(y).unwrap_or(if (y / 10).is_multiple_of(2) {
+            0x4208
+        } else {
+            0
+        })
     }
 }
 
@@ -68,24 +89,30 @@ impl LoopedFb {
     ) -> Self {
         assert_eq!(fb.len(), FB_BYTES);
         assert!(descriptors.len() >= DESCRIPTORS);
+        const { assert!(START_OFFSET < FB_BYTES && START_OFFSET.is_multiple_of(64)) };
         let base = fb.as_mut_ptr();
         let head = descriptors.as_mut_ptr();
-        for i in 0..DESCRIPTORS {
-            let off = i * CHUNK;
-            let len = CHUNK.min(FB_BYTES - off);
-            let next = if i + 1 == DESCRIPTORS {
+        // Walk the framebuffer circularly from START_OFFSET; chunks also break at the wrap point.
+        let (mut off, mut left, mut n) = (START_OFFSET, FB_BYTES, 0);
+        while left > 0 {
+            let len = CHUNK.min(left).min(FB_BYTES - off);
+            let next = if left == len {
                 head
             } else {
-                unsafe { head.add(i + 1) }
+                unsafe { head.add(n + 1) }
             };
-            let d = &mut descriptors[i];
+            let d = &mut descriptors[n];
             d.buffer = unsafe { base.add(off) };
             d.next = next;
             d.set_size(len);
             d.set_length(len);
             d.set_suc_eof(false);
             d.set_owner(Owner::Dma);
+            off = (off + len) % FB_BYTES;
+            left -= len;
+            n += 1;
         }
+        assert!(n <= DESCRIPTORS);
         Self { descriptors, fb }
     }
 }

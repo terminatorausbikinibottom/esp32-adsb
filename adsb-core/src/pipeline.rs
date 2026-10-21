@@ -175,6 +175,26 @@ mod tests {
         assert_eq!(c.stamp(&f, 9600), 9600);
     }
 
+    /// 32-bit targets (wasm32, riscv32) must not narrow ticks or ms: 2^32 ticks is only 358 s of
+    /// counter, and `performance.now()` passes 2^32 ms after 50 days of uptime.
+    #[test]
+    fn clock_is_64_bit_across_2_pow_32_ticks_and_ms() {
+        let mut c = Clock::default();
+        let (t0, now0) = ((1u64 << 32) - 6_000, (1u64 << 32) + 1000);
+        assert_eq!(c.stamp(&raw(t0), now0), now0);
+        // 10 s of ticks later (counter now past 2^32), caller 12 s later
+        assert_eq!(
+            c.stamp(&raw(t0 + 12_000 * 10_000), now0 + 12_000),
+            now0 + 10_000
+        );
+        // and 3 more s, spanning 2^33 ticks
+        let t = (1u64 << 33) + 12_000 * 3_000;
+        let mut c = Clock::default();
+        c.stamp(&raw(1u64 << 33), now0);
+        assert_eq!(c.stamp(&raw(t), now0 + 5_000), now0 + 3_000);
+        assert_eq!(c.resets, 0);
+    }
+
     #[test]
     fn reset_clock_reanchors_after_a_counter_jump() {
         let ms = |c: &mut Clock, t: u64, now| c.stamp(&raw(t), now);

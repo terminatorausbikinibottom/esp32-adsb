@@ -1,7 +1,7 @@
 # ADS-B display on Waveshare ESP32-S3-Touch-LCD-7
 
-Status: **revision 2, user decisions D1–D6 incorporated; D7/D8 open with defaults; awaiting
-review of the revised plan**. Nothing below is implemented yet.
+Status: **revision 2, approved by the user 2026-10-21 (D1–D8 resolved)**. Implementation in
+progress on this branch.
 Date: 2026-10-21. Branch: `feature/adsb-display`.
 
 Conventions used in this doc:
@@ -30,8 +30,8 @@ recommendation that the plan follows unless the user overrides it.
 | D4 | **Exact board revision, receiver position, vicinity radius.** | Confirm the board is the 800×480 "ESP32-S3-Touch-LCD-7" and not the 1024×600 "-7B" (different expander and timings). Give the receiver lat/lon (build-time config, not committed) and a default radius. | **Resolved:** board is the ESP32-S3-Touch-LCD-7 (800×480), module **ESP32-S3N16R8**. Radius of interest is **1–5 km** ("when I hear an airplane flying over"): default **5 km**, configurable. The receiver location is sensitive, so it's build-time only and never committed. This changes the UX: an "overhead" card is now the main screen (see [UI layout](#ui-layout-800480-landscape)). | Phase 1, step 2.10 |
 | D5 | **CI host.** | GitHub Actions / Gitea / GitLab / none. | **Resolved: GitHub Actions.** The remote is on GitHub. | Step 0.5 |
 | D6 | **Confirm fr24feed output.** | Port 30002 must be enabled and reachable from the LAN (fr24feed `raw="yes"`; check the bind address). Same check for 30003 if D2 changes. | **Resolved:** 30002 is enabled and reachable. Additional requirement: **design a general ADS-B/Mode S client** that might later be connected directly to an SDR. Result: a transport-agnostic frame-source boundary (see [Frame-source boundary](#frame-source-boundary-general-mode-s-client)). Also: **don't commit local data** (captures, receiver location). | Phase 2 |
-| D7 | **Licence files** (follows from D3). | Whole repo GPL-3.0-or-later; or `firmware/` + `ui-sim/` GPL-3.0-or-later and the libraries (`modes`, `adsb-core`, which don't use Slint) MIT/Apache-2.0. | **Open; default is GPL-3.0-or-later for the whole repo** (one licence, simplest). Pick the split instead if you want the Mode S library to be reusable under permissive terms. | Step 0.2 (LICENSE file) |
-| D8 | **"Overhead" UX choices.** | Empty state when nothing is within the radius: blank "nothing overhead" vs. nearest aircraft beyond the radius, greyed out. Distance metric: ground distance vs slant range. | **Open; defaults:** show the nearest aircraft beyond the radius, greyed out, with an "approaching" hint. Filter and rank by **ground distance**, using dead-reckoned position; show altitude and elevation angle separately. Reasoning in ["Vicinity"](#vicinity). | Steps 2.10, 4.3 |
+| D7 | **Licence files** (follows from D3). | Whole repo GPL-3.0-or-later; or `firmware/` + `ui-sim/` GPL-3.0-or-later and the libraries (`modes`, `adsb-core`, which don't use Slint) MIT/Apache-2.0. | **Resolved:** user doesn't mind (personal use, maybe published later) → **GPL-3.0-or-later for the whole repo** (default; one licence, simplest). Pick the split instead if you want the Mode S library to be reusable under permissive terms. | Step 0.2 (LICENSE file) |
+| D8 | **"Overhead" UX choices.** | Empty state when nothing is within the radius: blank "nothing overhead" vs. nearest aircraft beyond the radius, greyed out. Distance metric: ground distance vs slant range. | **Resolved: defaults accepted by user** — show the nearest aircraft beyond the radius, greyed out, with an "approaching" hint. Filter and rank by **ground distance**, using dead-reckoned position; show altitude and elevation angle separately. Reasoning in ["Vicinity"](#vicinity). | Steps 2.10, 4.3 |
 
 ---
 
@@ -1198,3 +1198,6 @@ Unverified (summary): every [VERIFY] item above, especially:
     crate names/versions, and the adsbdb callsign endpoint (all verified). Added the remaining
     open items (custom DmaTxBuffer/EOF hook, second-core API, action versions, TLS capabilities,
     adsbdb aircraft schema/status/CA, gt911 async).
+- 2026-10-21, **approval**: user approved the revision-2 plan. D7 resolved (user indifferent →
+  default GPL-3.0-or-later, whole repo). D8 resolved (defaults accepted). Status line updated.
+  No other changes.

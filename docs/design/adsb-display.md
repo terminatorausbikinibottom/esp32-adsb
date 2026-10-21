@@ -1688,3 +1688,12 @@ Unverified (summary): every [VERIFY] item above, especially:
   (address-only probes; includes 0x23/0x24/0x26/0x38), GT911 at 0x5D. Outputs 0x1E: backlight
   (EXIO2) blinks at 1 Hz; USB-Serial-JTAG stays connected after the write, so EXIO5 low = USB is
   confirmed. Bit mapping EXIOn = WR_IO bit n confirmed.
+- 2026-10-21, **step 1.3 escalation and re-sequencing (user-approved)**: looped Dpi scanout from PSRAM works
+  (R1 cleared; colours, pins, timings, polarity verified on the board), but the stream phase at
+  start-up is wrong. b64805b: constant shift per build (stock esp-hal `Dpi::send` starts DMA before
+  the LCD/afifo reset). Fix 1 (calibrated ring start) failed: the shift changes between builds.
+  Fix 2 (9f7177c, esp-hal 1.2.2 vendored with the reset-before-DMA order) still shifts, now varying
+  between resets: a start-up PSRAM latency race. Decision: keep the reorder patch (correct order,
+  as in ESP-IDF; to be upstreamed, possibly carried as a git fork instead of vendoring), and bring
+  **step 1.5 (bounce buffers) forward to before 1.4**. Bounce buffers prefilled in SRAM before
+  `lcd_start` remove the latency race and address R2. Step 1.3 is closed by 1.5s board result.

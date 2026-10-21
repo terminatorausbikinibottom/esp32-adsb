@@ -21,6 +21,9 @@
     "ghcr.io/devcontainers/features/python:1": {
       "version": "os-provided"
     },
+    "ghcr.io/devcontainers/features/github-cli:1": {
+      "version": "2.102.1"
+    },
     "ghcr.io/anthropics/devcontainer-features/claude-code:1": {},
     "ghcr.io/rio/features/chezmoi:1": {},
     "./features/esp-rs": {

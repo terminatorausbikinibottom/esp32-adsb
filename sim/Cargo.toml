@@ -10,3 +10,21 @@ adsb-core = { path = "../adsb-core", features = ["scenario"] }
 
 [dev-dependencies]
 png = "0.18"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.129"
+web-sys = { version = "0.3", features = [
+  "Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "HtmlInputElement",
+  "HtmlSelectElement", "CanvasRenderingContext2d", "ImageData", "MouseEvent", "Performance",
+  "DomRect", "EventTarget", "Event", "console",
+] }
+console_error_panic_hook = "0.1"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

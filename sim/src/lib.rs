@@ -1,5 +1,8 @@
 //! Simulator platform layer: runs a synthetic scenario through the same pipeline and `App` as the
-//! firmware and keeps the rendered 800x480 RGB565 framebuffer. Web glue (S.3) builds on this.
+//! firmware and keeps the rendered 800x480 RGB565 framebuffer. The browser glue is in `web`.
+#[cfg(target_arch = "wasm32")]
+mod web;
+
 use adsb_app::{App, HEIGHT, PointerEvent, Rgb565Pixel, Status, WIDTH};
 use adsb_core::pipeline::FeedPipeline;
 use adsb_core::scenario::{Event, Kind, RADIUS_KM, Scenario};
@@ -16,17 +19,39 @@ pub struct Sim {
 }
 
 impl Sim {
-    /// One `Sim` per process (the Slint platform is installed once).
+    /// One `Sim` per process (the Slint platform is installed once). Frozen animation clock, so
+    /// output depends on scenario time only.
     pub fn new(kind: Kind, seed: u64) -> Self {
+        Self::with_clock(kind, seed, || Duration::ZERO)
+    }
+
+    /// `now` is the monotonic clock Slint animations run on (wall clock in the browser).
+    pub fn with_clock(kind: Kind, seed: u64, now: fn() -> Duration) -> Self {
         let scenario = Scenario::new(kind, seed);
         let pipeline = FeedPipeline::new(scenario.receiver());
         Self {
-            app: App::new(|| Duration::ZERO).expect("slint platform"),
+            app: App::new(now).expect("slint platform"),
             scenario,
             pipeline,
             feed_ok: true,
             fb: vec![Rgb565Pixel(0); WIDTH * HEIGHT],
             line: vec![Rgb565Pixel(0); WIDTH],
+        }
+    }
+
+    /// Restart at t=0 with a new scenario, keeping the window (and so the Slint platform).
+    pub fn reset(&mut self, kind: Kind, seed: u64) {
+        self.scenario = Scenario::new(kind, seed);
+        self.pipeline = FeedPipeline::new(self.scenario.receiver());
+        self.feed_ok = true;
+    }
+
+    /// Restart and replay in whole-second steps up to `ms`: the same sequence of states the
+    /// browser (which ticks once per scenario second) and the PNG test go through.
+    pub fn seek(&mut self, kind: Kind, seed: u64, ms: u64) {
+        self.reset(kind, seed);
+        for t in (1000..=ms).step_by(1000) {
+            self.advance_to(t);
         }
     }
 
@@ -54,11 +79,23 @@ impl Sim {
         self.render();
     }
 
-    fn render(&mut self) {
+    /// Repaint whatever is dirty (timers, animations); returns whether the framebuffer changed.
+    pub fn render(&mut self) -> bool {
         let fb = &mut self.fb;
         self.app.render(&mut self.line, |y, x, px| {
             fb[y * WIDTH + x.start..][..px.len()].copy_from_slice(px);
-        });
+        })
+    }
+
+    /// FNV-1a 64 over the framebuffer as little-endian RGB565 words, row-major. The browser's
+    /// "Dump frame" shows this value; `tests/hash.rs` prints the same for each keyframe.
+    pub fn frame_hash(&self) -> u64 {
+        self.fb
+            .iter()
+            .flat_map(|p| p.0.to_le_bytes())
+            .fold(0xcbf2_9ce4_8422_2325, |h, b| {
+                (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+            })
     }
 
     pub fn framebuffer(&self) -> &[Rgb565Pixel] {

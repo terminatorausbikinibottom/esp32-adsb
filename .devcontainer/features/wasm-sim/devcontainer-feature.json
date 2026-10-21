@@ -1,0 +1,23 @@
+{
+  "id": "wasm-sim",
+  "version": "1.0.0",
+  "name": "wasm simulator tooling",
+  "description": "Installs the wasm32-unknown-unknown target, trunk and wasm-bindgen-cli for the browser simulator.",
+  "options": {
+    "trunkVersion": {
+      "type": "string",
+      "default": "0.22.0",
+      "description": "trunk version (empty = latest)."
+    },
+    "wasmBindgenVersion": {
+      "type": "string",
+      "default": "0.2.129",
+      "description": "wasm-bindgen-cli version, pre-installed. Keep equal to the `wasm-bindgen` crate version in Cargo.lock (empty = skip; trunk then downloads the matching one itself)."
+    }
+  },
+  "installsAfter": [
+    "ghcr.io/devcontainers/features/common-utils",
+    "ghcr.io/devcontainers/features/rust",
+    "./features/esp-rs"
+  ]
+}

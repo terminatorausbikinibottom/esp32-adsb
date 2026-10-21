@@ -28,14 +28,21 @@
     },
     "./features/neovim": {
       "version": "stable"
-    }
+    },
+    "./features/wasm-sim": {}
   },
   "overrideFeatureInstallOrder": [
     "ghcr.io/devcontainers/features/common-utils",
     "ghcr.io/devcontainers/features/rust",
     "./features/esp-rs",
+    "./features/wasm-sim",
     "./features/neovim"
   ],
+
+  // Simulator (trunk serve) port; VS Code forwards it to the host's localhost.
+  // Devcontainer CLI without VS Code: add runArgs "-p", "127.0.0.1:8080:8080" (keep the
+  // 127.0.0.1 prefix) and run `trunk serve --address 0.0.0.0` inside the container.
+  "forwardPorts": [8080],
 
   "remoteUser": "vscode",
   "containerUser": "vscode",

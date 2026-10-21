@@ -13,6 +13,7 @@ ADS-B receiver/decoder on the ESP32, written in Rust (`no_std`, [esp-hal](https:
 | `devcontainers/features/node` | Node LTS (needed by Mason-installed LSPs in Neovim) |
 | `rio/features/chezmoi` | chezmoi |
 | `./features/esp-rs` (local) | `espup` (Xtensa `esp` toolchain + RISC-V targets, all chips), `espflash`, `cargo-espflash`, `esp-generate` |
+| `./features/wasm-sim` (local) | `wasm32-unknown-unknown` target, `trunk`, `wasm-bindgen-cli` (versions are feature options; trunk downloads a matching wasm-bindgen/wasm-opt itself if the pinned one differs from `Cargo.lock`) |
 | `./features/neovim` (local) | Neovim (official release binary) |
 
 On first create, `post-create.sh` applies the dotfiles from
@@ -20,6 +21,10 @@ On first create, `post-create.sh` applies the dotfiles from
 with chezmoi and runs their `zsh-install-plugins.sh`.
 The espup environment (`export-esp.sh`) is sourced system-wide from
 `/etc/zsh/zshenv` and `/etc/bash.bashrc`, so the dotfiles don't need to know about it.
+
+Port 8080 (simulator, `trunk serve`) is in `forwardPorts`, so VS Code forwards it to the host's
+`localhost`. Without VS Code (devcontainer CLI), add `"-p", "127.0.0.1:8080:8080"` to `runArgs`
+(always with the `127.0.0.1:` prefix) and run `trunk serve --address 0.0.0.0` in the container.
 
 ### Podman
 

@@ -789,3 +789,12 @@ app partition size.
   - Sim: scenario callsigns `ZQJ*` (jet, full metadata and synthetic photo), `ZQB*` (aircraft
     only, no photo), `ZQLONG99` (very long names) have fixtures; everything else shows dashes.
     `frame_hash` reference values changed for keyframes 1-5 (the panel has metadata now).
+
+- 2026-10-23, **RD.7 QA PASS** (b92a66e, 110eaab, fix 525f343 after QA FAIL F1: 1-px-wide JPEG
+  panicked in the scaler; fix loop 1/2). Beads entry pending (as RD.4). Open for the user:
+  planespotters needs a User-Agent with a contact URL/e-mail (not committed; RD.9/RD.10 need it);
+  credit wording still [VERIFY]; firmware .text 697 KB / .rodata 886 KB (K12, partition headroom
+  unchecked).
+- 2026-10-23, **orchestrator decision:** RD.3 (WiFi, feed) starts while RD.2's display gate waits on
+  the user. The networking code does not depend on the K4 fix; RD.3's drift check is recorded as
+  pending K4.

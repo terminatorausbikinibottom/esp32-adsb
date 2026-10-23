@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import bench_host as bh
 
@@ -90,14 +91,18 @@ class ArgvTest(unittest.TestCase):
              "--monitor", "--non-interactive", "/tmp/x.elf"],
         )
 
-    def test_ffmpeg_default_has_no_framerate(self):
-        argv = bh.ffmpeg_argv("ffmpeg", "1", "1280x720", 20)
-        self.assertNotIn("-framerate", argv)
+    def test_ffmpeg_default_has_framerate_30(self):
+        argv = bh.ffmpeg_argv("ffmpeg", "1", "1280x720", 20, framerate=bh.parse_args([]).framerate)
         self.assertEqual(
             argv,
-            ["ffmpeg", "-f", "avfoundation", "-video_size", "1280x720", "-i", "1:none",
+            ["ffmpeg", "-f", "avfoundation", "-framerate", "30", "-video_size", "1280x720", "-i", "1:none",
              "-vf", "select=gte(n\\,20)", "-frames:v", "1", "-f", "image2pipe", "-c:v", "mjpeg", "pipe:1"],
         )
+
+    def test_ffmpeg_framerate_disabled(self):
+        for off in (None, "", "0"):
+            self.assertNotIn("-framerate", bh.ffmpeg_argv("ffmpeg", "1", "1280x720", 20, framerate=off))
+        self.assertNotIn("-framerate", bh.ffmpeg_argv("ffmpeg", "1", "1280x720", 20))
 
     def test_ffmpeg_framerate_when_configured(self):
         argv = bh.ffmpeg_argv("ffmpeg", "Cam", "640x480", 5, framerate="30")
@@ -203,6 +208,28 @@ class ScriptTest(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("loopback", r.stderr)
 
+
+
+class SaveTermiosTest(unittest.TestCase):
+    def test_no_tty_is_noop(self):
+        with mock.patch.object(bh.sys, "stdin", io.StringIO()):
+            bh._save_termios()()  # must not raise
+
+    def test_restores_saved_attrs(self):
+        import termios
+        m, s = os.openpty()
+        self.addCleanup(os.close, m)
+        self.addCleanup(os.close, s)
+        before = termios.tcgetattr(s)
+        stdin = os.fdopen(os.dup(s))
+        self.addCleanup(stdin.close)
+        with mock.patch.object(bh.sys, "stdin", stdin):
+            restore = bh._save_termios()
+        raw = termios.tcgetattr(s)
+        raw[1] &= ~termios.OPOST
+        termios.tcsetattr(s, termios.TCSANOW, raw)
+        restore()
+        self.assertEqual(termios.tcgetattr(s), before)
 
 if __name__ == "__main__":
     unittest.main()

@@ -107,6 +107,24 @@ class FlashTest(FlashBase):
         self.assertEqual(argv[-1], self.bench.last_elf)
         self.assertEqual(argv[argv.index("--port") + 1], "/dev/cu.usbmodemA")
 
+    def test_child_in_own_session_without_tty(self):
+        self.flash()
+        inv = json.loads(self.fakelog.read_text().splitlines()[0])
+        self.assertNotEqual(inv["sid"], os.getsid(0))
+        self.assertEqual(inv["pgid"], inv["pid"])
+        self.assertFalse(inv["tty"])  # crossterm would otherwise open /dev/tty and go raw
+
+    def test_log_requests_not_logged_when_ok(self):
+        import contextlib, io
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.req("GET", "/log?since=0&wait=0")[0], 200)
+            self.req("GET", "/health")
+            self.req("GET", "/log?since=x")  # non-2xx stays visible
+        out = err.getvalue()
+        self.assertIn("GET /health -> 200", out)
+        self.assertNotIn("/log?since=0", out)
+        self.assertIn("/log?since=x -> 4", out)
+
     def test_fake_pins_argv(self):
         p = subprocess.run([sys.executable, FAKE, "flash", "--monitor"], capture_output=True, timeout=10)
         self.assertEqual(p.returncode, 2)

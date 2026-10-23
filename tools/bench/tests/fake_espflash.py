@@ -51,12 +51,20 @@ def forever(n=1):
         n += 1
 
 
+def _has_tty():
+    try:
+        open("/dev/tty").close()
+        return True
+    except OSError:
+        return False
+
+
 def main():
     argv = sys.argv[1:]
     log = os.environ.get("FAKE_ESPFLASH_LOG")
     if log and "flash" in argv:  # not the --version probe
         with open(log, "a") as f:
-            f.write(json.dumps({"pid": os.getpid(), "argv": argv}) + "\n")
+            f.write(json.dumps({"pid": os.getpid(), "argv": argv, "sid": os.getsid(0), "pgid": os.getpgid(0), "tty": _has_tty()}) + "\n")
     if not {"flash", "--monitor", "--non-interactive"} <= set(argv):
         print("fake_espflash: argv lacks flash/--monitor/--non-interactive", file=sys.stderr)
         return 2

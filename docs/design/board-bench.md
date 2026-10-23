@@ -1,6 +1,8 @@
 # Board bench: automated flash, serial log and webcam check from the container
 
-Status: **approved; step 1 (spike) done, revised with its results; rev 3: tools run via uv.**
+Status: **approved; step 1 (spike) done, revised with its results; rev 3: tools run via uv;
+rev 4: step-6 acceptance run 1 findings (snapshot framerate, controlling-terminal defect); step 6
+in fix loop 1 of 2, acceptance run 2 pending.**
 Date: 2026-10-23.
 Branch: `feature/adsb-display`.
 
@@ -140,10 +142,16 @@ where its cache and managed pythons live.
      `flash --monitor` takes the ELF positionally and is expected to use it for symbolisation
      [VERIFY on the first real panic]. The chip boots twice after a flash; this is benign and the
      CLI handles it (see Container CLI). S2 stays the unused last resort.
-  3. **C1, one-shot ffmpeg** with configurable warm-up frames. *Spike 1c:* the webcam ignores
+  3. **C1, one-shot ffmpeg** with configurable warm-up frames. ~~*Spike 1c:* the webcam ignores
      `-framerate 30` (ffmpeg logs "Configuration of video device failed, falling back to default"
      and captures at the device default ~10 fps), so the default argv **does not pass
-     `-framerate`**; `-video_size 1280x720` is passed (it worked). Default warm-up is **20 frames**
+     `-framerate`**~~ *Rev 4 (acceptance run 1):* that reading of spike 1c was wrong. With
+     `-framerate 30` the device logged a fallback warning **but captured**; **without**
+     `-framerate`, avfoundation requests 29.97 fps, which the webcam rejects ("Selected framerate
+     (29.970030) is not supported by the device", supported: 15 and 30 fps at every listed size),
+     and ffmpeg exits 251 ("Input/output error"). So the default argv **passes `-framerate 30`**
+     (before `-video_size`; host config `--framerate`/`BENCH_FRAMERATE`, `0` or empty omits it);
+     `-video_size 1280x720` is passed (it worked). Default warm-up is **20 frames**
      (~2 s at ~10 fps). The single frame goes to stdout via `-f image2pipe -c:v mjpeg pipe:1` (no
      `-update 1` temp file needed). ffmpeg's stderr is always logged on the host, because
      unsupported settings fall back silently. A `GET /stream.mjpg` for a human in
@@ -174,7 +182,8 @@ where its cache and managed pythons live.
      (fallback). Adding a dependency needs a revision of this doc.
      - Host start: `uv run tools/bench/bench_host.py ...` from the repo root. This decouples the
        service from the Mac's system/Homebrew python: uv picks an installed interpreter that
-       satisfies `>=3.11` (3.15.0 on the bench Mac) or downloads a managed one. Host prerequisite:
+       satisfies `>=3.11` (3.15.0 on the bench Mac was expected; rev 4: uv actually picked
+       3.12.12 in acceptance run 1, see R15) or downloads a managed one. Host prerequisite:
        uv (`brew install uv`). The startup check that refuses python < 3.11 stays, for the
        `python3 tools/bench/bench_host.py` fallback.
      - Container: invocation stays `tools/bench/bench ...`; the shebang hands it to uv. So the
@@ -246,8 +255,8 @@ All requests need `Authorization: Bearer <token>`. The token is compared with
 | `POST /flash` `{"elf": "<repo-relative path>"}` | Validate (see Security) → copy to a host temp file → resolve the serial port (auto mode: exactly one candidate, else **503** with the candidate list) → stop any running espflash process → start `espflash flash --monitor --non-interactive` (S3) as a new `session`. The request waits until `Flashing has completed!` appears (→ **200**), the process exits first (→ **502**), or 300 s pass (→ process killed, **504**). Returns `{ok, exit_code, output_tail, session, log_seq, app_seq}`. `log_seq` = first sequence number of this session (espflash's own output included); `app_seq` = seq of the `Flashing has completed!` line (absent on failure); `exit_code` is `null` on success (process still running as monitor). **409** if another flash or reset is running (one global lock), **400** on bad path. |
 | `POST /reset` | Re-run the S3 command with the **last flashed ELF copy** (re-flash of an identical image, ~1 s; full boot log). Same response and status codes as `/flash`. 409 if busy, 409 if nothing has been flashed since startup. |
 | `POST /monitor/stop` | Kill the espflash process and release the serial port (for manual use by the user). **409** while the session is still in the `flashing` phase (killing mid-write leaves a half-written image). |
-| `GET /log?since=N&wait=S&max=M` | Lines with `seq > N`, long-polled up to `S` seconds (cap 30). Returns `{session, app_seq, lines:[{seq, t, text}], next, dropped, monitor:{running, phase, exit_code}}`. `phase` = `flashing` (before `Flashing has completed!`), `running` (after it, process alive), `exited`. `dropped=true` if `N` is older than the oldest buffered line. Ring buffer: 20 000 lines. Lines are UTF-8 decoded with `errors="replace"`, with ANSI escapes and trailing `\r` stripped. The host does no other parsing; boot counting and marker matching happen in the CLI. |
-| `GET /snapshot.jpg?warmup=N` | One-shot ffmpeg (timeout 20 s), returns `image/jpeg`. The output is checked for JPEG magic (`FF D8`). **503** if ffmpeg fails (the body has the stderr tail, which is where TCC denials show up). ffmpeg's stderr is also logged on the host for **every** snapshot, because unsupported framerate/size settings fall back to the device default with only a log line (spike 1c). The camera lock is separate from the flash lock, so a snapshot can run during a flash. |
+| `GET /log?since=N&wait=S&max=M` | Lines with `seq > N`, long-polled up to `S` seconds (cap 30). Returns `{session, app_seq, lines:[{seq, t, text}], next, dropped, monitor:{running, phase, exit_code}}`. `phase` = `flashing` (before `Flashing has completed!`), `running` (after it, process alive), `exited`. `dropped=true` if `N` is older than the oldest buffered line. Ring buffer: 20 000 lines. Lines are UTF-8 decoded with `errors="replace"`, with ANSI escapes and trailing `\r` stripped. The host does no other parsing; boot counting and marker matching happen in the CLI. Rev 4: successful (2xx) `/log` long-polls are **not** written to the host's access log (log noise seen in acceptance run 1); non-2xx responses still are. |
+| `GET /snapshot.jpg?warmup=N` | One-shot ffmpeg (timeout 20 s), returns `image/jpeg`. The output is checked for JPEG magic (`FF D8`). **503** if ffmpeg fails (the body has the stderr tail, which is where TCC denials show up). ffmpeg's stderr is also logged on the host for **every** snapshot, because unsupported framerate/size settings fall back to the device default with only a log line (spike 1c), or are rejected outright with the supported modes listed in stderr (rev 4, acceptance run 1: 29.97 fps). The camera lock is separate from the flash lock, so a snapshot can run during a flash. |
 | `GET /stream.mjpg` | Step 8, optional. |
 
 Host config (CLI flags of `bench_host.py`, with env var equivalents): `--port` (serial device;
@@ -256,7 +265,10 @@ errors and lists them. Auto mode is checked at startup (fail fast with the list)
 on every flash/reset**, because the `usbmodem…` name depends on the USB port/hub — spike 1b saw
 `usbmodem11401`, not the README's `usbmodem101`. A given `--port` is used as is.),
 `--camera` (avfoundation name or index, default `1` per B1), `--video-size` (default `1280x720`),
-`--framerate` (default: **not passed**; the webcam ignores 30 and uses ~10 fps anyway, spike 1c),
+`--framerate` (env `BENCH_FRAMERATE`; default **`30`**, passed as `-framerate 30` before
+`-video_size`; `0` or empty omits the flag. ~~default: not passed; the webcam ignores 30 and uses
+~10 fps anyway, spike 1c~~ — rev 4: without it avfoundation asks for 29.97 fps, which the webcam
+rejects, acceptance run 1),
 `--warmup` (default warm-up frames, `20`), `--listen` (service address, default `127.0.0.1:7777`;
 this is the "configurable port" of B5, distinct from the serial `--port`), `--elf-prefix` (default
 `firmware/target/`), `--espflash`/`--ffmpeg` (binary paths, which is also how the tests inject
@@ -320,6 +332,14 @@ Rules:
   browser-based CSRF/DNS-rebinding attempts against the loopback port even before the token check.
 - Request bodies are capped at 4 KiB, and unknown JSON keys are rejected. Every subprocess has a
   timeout. Child processes are killed on shutdown (SIGINT/SIGTERM handler, `atexit`).
+- **Children never get the host's terminal** (rev 4, R16). Acceptance run 1 showed espflash's
+  monitor opening `/dev/tty` and switching the user's terminal to raw mode even with
+  `stdin=DEVNULL`. All children are therefore started with `start_new_session=True` (new session,
+  no controlling tty); stop/kill/shutdown signal the whole process group (`os.killpg`, fallback to
+  the pid if the group is already gone), which also catches any grandchildren; and `main()`
+  snapshots the termios settings of stdin if it is a tty and restores them on exit. This is a
+  robustness fix (the service stays stoppable with Ctrl-C) and keeps a child from reading
+  keystrokes typed into the service's terminal.
 - The serial port is either the user-given `--port` or the single auto-detected
   `/dev/cu.usbmodem*` glob match; it is never taken from a request.
 - **uv may fetch a python interpreter from the network** (rev 3). `uv run` / `uv run --script`
@@ -412,7 +432,8 @@ Each step is one commit, and its verification runs green before the next starts.
      - 1c **C1 confirmed**: ffmpeg 9.0.2, device `1` = Logitech HD USB webcam, Camera permission
        already granted. `-list_options true` is not supported by this avfoundation build (use
        `-list_devices true -i ""`). `-framerate 30` was not honoured (fallback to the device
-       default ~9.92 fps); 1280x720 honoured; pixel format auto-overridden to `uyvy422`; the
+       default ~9.92 fps) — but it still captured, and rev 4 found that omitting it fails
+       outright (29.97 fps rejected), so it is now the default; 1280x720 honoured; pixel format auto-overridden to `uyvy422`; the
        single-file image2 output warned about needing `-update 1`. 30 warm-up frames ≈ 2.9 s, JPEG
        33 KiB, sharp and well exposed, colour-bar test image clearly judgeable; mild glare and
        room reflections on the panel (R5).
@@ -425,8 +446,9 @@ Each step is one commit, and its verification runs green before the next starts.
    temp copy as a pure function, argv builders as pure functions. Add `.bench/` to `.gitignore`.
    - Post-spike changes to this step: the espflash argv builder is the single S3 command
      `espflash flash --chip esp32s3 --port <port> --monitor --non-interactive <elf>` (no
-     `--after no-reset` builder, no `espflash monitor` builder); the ffmpeg argv builder omits
-     `-framerate` unless configured and pipes via `-f image2pipe -c:v mjpeg pipe:1`; serial-port
+     `--after no-reset` builder, no `espflash monitor` builder); the ffmpeg argv builder ~~omits
+     `-framerate` unless configured~~ (rev 4: passes `-framerate 30` by default, omitted for `0`/
+     empty; see step 4) and pipes via `-f image2pipe -c:v mjpeg pipe:1`; serial-port
      resolution is a pure function (`resolve_port(configured, candidates)` → chosen port or an
      error listing candidates) plus a thin glob wrapper; `/health` reports the `serial` object and
      `python_version`; target python >= 3.11. **If step 2 already landed with the S1 builders**
@@ -497,7 +519,8 @@ Each step is one commit, and its verification runs green before the next starts.
    - *Verify (container):* unit tests for path validation (accepts a fake ELF under
      `firmware/target/`; rejects `../`, absolute, symlink escaping the prefix, non-ELF, oversize,
      directory, NUL), argv builders (exact lists, no shell; S3 list contains `--monitor` and
-     `--non-interactive` and the ELF last; ffmpeg list has no `-framerate` by default),
+     `--non-interactive` and the ELF last; ffmpeg list ~~has no `-framerate` by default~~ has
+     `-framerate 30` by default since rev 4, see step 4),
      `resolve_port` (fixed port returned as is; auto with one candidate → it; zero or two
      candidates → error naming them), non-loopback `--listen` refused. HTTP
      test: 401 without/with wrong token, 403 with `Origin`, 200 `/health` with token and the
@@ -551,11 +574,20 @@ Each step is one commit, and its verification runs green before the next starts.
    image2 `-update 1` warning seen with a single output file [VERIFY on the Mac in step 6;
    fallback: temp file with `-update 1`]. Camera lock, timeout, JPEG magic check, ffmpeg stderr
    logged on the host for every call.
+   - **Rev 4 (acceptance run 1):** the "`-framerate` only if configured / not by default" argv
+     above made the real webcam fail (503, ffmpeg exit 251, 29.97 fps rejected; see Decision 3).
+     Current argv: `-f avfoundation -framerate 30 -video_size 1280x720 -i "1:none" -vf
+     select=gte(n\,W) -frames:v 1 -f image2pipe -c:v mjpeg pipe:1`; `-framerate` comes **before**
+     `-video_size`; `--framerate 0` / `BENCH_FRAMERATE=0` or empty omits it. Whether the device
+     then really runs at 30 fps or still falls back to ~10 fps (spike 1c warning) is recorded in
+     acceptance run 2; the warm-up default stays 20 frames until then.
    - *Verify (container), with `--ffmpeg tests/fake_ffmpeg.py`:* 200 + `image/jpeg` + bytes start
      with `FF D8`; fake failure → 503 with the stderr tail; timeout → 503 and the fake is killed;
-     the argv builder test checks the camera/warm-up values and that `-framerate` is absent by
-     default and present when configured; a fake that writes a "falling back to default" stderr
-     line still returns 200, and the line appears in the host log.
+     the argv builder test checks the camera/warm-up values and that ~~`-framerate` is absent by
+     default and present when configured~~ (rev 4) `-framerate 30` is present by default and
+     precedes `-video_size`, a configured value replaces it, and `0`/empty omits it; a fake that
+     writes a "falling back to default" stderr line still returns 200, and the line appears in
+     the host log.
 
 5. **[devops] Container CLI.** `tools/bench/bench` with `health`, `flash`, `log`, `reset`, `snap`,
    the exit-code contract, and repo-root/token discovery. Rev 3: the CLI starts with the shebang
@@ -582,7 +614,8 @@ Each step is one commit, and its verification runs green before the next starts.
    agent (or user) runs in the container:
    - `tools/bench/bench health` → exit 0, and `serial.chosen` is the board's port
      (`/dev/cu.usbmodem11401` on the spike's USB port); record `python_version` (which
-     interpreter uv picked on the host, expected 3.15.0, and that uv downloaded nothing);
+     interpreter uv picked on the host, expected 3.15.0 — run 1: 3.12.12, see R15 — and that uv
+     downloaded nothing);
    - `tools/bench/bench flash firmware/target/xtensa-esp32s3-none-elf/release/firmware --until
      'alive 0s' --timeout 60` → exit 0, and the log shows the boot from the first line
      (ROM banner, bootloader, `Embassy initialized!`), including the double boot without a
@@ -604,6 +637,36 @@ Each step is one commit, and its verification runs green before the next starts.
      whether the S3 output shows a symbolised backtrace (Decision 2 VERIFY).
    - *Verify:* all of the above pass, and the times for flash→marker, reset→marker and snapshot
      are recorded.
+   - **Acceptance run 1 (2026-10-23): partial pass; fix loop 1 of 2.**
+     - Host start `uv run tools/bench/bench_host.py`: uv picked **python 3.12.12** (Mac `python3`
+       is 3.15.0) → R15 materialised, harmless (>= 3.11).
+     - `bench health` → exit 0; serial auto → `/dev/cu.usbmodem11401`; espflash 4.6.0. The token
+       landed in the shared repo `.bench/token` and the container CLI read it: token distribution
+       over the bind mount works.
+     - `bench flash firmware/target/xtensa-esp32s3-none-elf/release/firmware --until 'alive 0s'
+       --timeout 60` → exit 0. Full log from `Flashing has completed!`; `--- boot 1 ---` (cut off
+       after `psram: fb ptr`), `--- boot 2 ---` through `Embassy initialized!`,
+       `ch422g: backlight on`, `alive 0s`; summary "--until matched in boot 2 at seq 142".
+       **Double-boot handling confirmed on hardware.**
+     - `bench reset --until 'ch422g: backlight on'` → exit 0 in **3.94 s** (re-flash of the same
+       image).
+     - `bench snap` → **FAILED**: 503, ffmpeg exit 251, "Selected framerate (29.970030) is not
+       supported by the device" (supported: 640x480, 1280x720, 1760x1328, 1328x1760, 1552x1552,
+       1920x1080, 1080x1920, each at 15 and 30 fps) → "Error opening input: Input/output error".
+       Fix: `-framerate 30` by default (Decision 3, step 4, R12).
+     - **New defect:** after the first `/flash` the Mac terminal running the service was left in
+       raw mode (staircase output, Ctrl-C dead); recovered with `pkill -f bench_host.py` and
+       `reset`. Fix: children in their own session, process-group kill, termios restore (R16,
+       Security).
+     - Log noise: successful `GET /log` long-polls are no longer access-logged (API table).
+     - Not yet run: bad-path rejection, stop-service → exit 4, camera tuning, flash→marker timing.
+   - **Acceptance run 2 (pending, after the fixes land):** re-run **everything** above, including
+     `bench snap`, plus: snapshot timing; `image2pipe` form (step 4 [VERIFY]); Camera permission
+     under `uv run` (rev 3 [VERIFY]); ffmpeg stderr visible in the host log (incl. whether
+     `-framerate 30` is honoured or falls back to ~10 fps); espflash's monitor still runs and
+     streams the log without a controlling tty, and the host terminal stays cooked and Ctrl-C
+     stops the service cleanly with no orphaned espflash/ffmpeg (R16 [VERIFY]). If run 2 fails,
+     that is fix loop 2 of 2.
 
 7. **[devops] Skill and docs.**
    - `.claude/skills/board-verify/SKILL.md` covers:
@@ -634,6 +697,11 @@ Each step is one commit, and its verification runs green before the next starts.
      uv may download a python on first use if none >= 3.11 is installed, and
      `UV_PYTHON_DOWNLOADS=never` to forbid it; the container side is unchanged
      (`tools/bench/bench ...`, uv comes with the devcontainer) and the test commands from Layout.
+     Rev 4 additions: a "terminal broken" troubleshooting note — if the service's terminal ever
+     ends up in raw mode (staircase output, Ctrl-C ignored; R16), run `pkill -f bench_host.py`
+     from another terminal tab, then `reset` in the broken one; the `--framerate` /
+     `BENCH_FRAMERATE` setting (default 30, `0` omits it) next to `--camera`, with the hint that
+     ffmpeg's 503 stderr lists the camera's supported modes.
    - *Verify:* a fresh agent session that is only given the skill completes step 6's flash→snap
      sequence unaided; the README commands match what was run in step 6.
 
@@ -657,17 +725,20 @@ Each step is one commit, and its verification runs green before the next starts.
 | R8 | The capability itself: anything that can read `.bench/token` can flash the board and photograph the room | Certain (by design) / medium | Loopback only, token, Origin rejection, ELF prefix allowlist, temp copy, no shell, the service runs only while started by hand. Images and logs live in gitignored `.bench/`. B4 keeps the user in control of unattended use. |
 | R9 | Host and container espflash versions differ (flag names, output format) | Medium / ~~low~~ **medium** (S3 depends on output wording) | `/health` reports the host espflash version (4.6.0 at spike 1b). The argv builders sit in one place. Flash success depends on the literal line `Flashing has completed!`; if an upgrade rewords it, flashes end in 504 (timeout) rather than a false success, and the string is one constant. Observed flag values on 4.6.0: `monitor --before` = `default-reset`, `no-reset`, `no-reset-no-sync`; `flash --after` = `hard-reset`, `no-reset` (list possibly truncated). `flash --after no-reset` without `--monitor` printed a harmless WARN about monitor options being ignored; not used under S3. |
 | R11 | Serial port auto-detect picks the wrong device or none: the name changes with the USB port/hub, or a second `usbmodem` device (e.g. the board's CH343 UART port, if also cabled, or another dev board) is present | Medium / low | Auto mode accepts exactly one `/dev/cu.usbmodem*` match and otherwise errors with the candidate list (startup, `/health`, flash/reset 503). `--port` overrides. Filtering by VID 303A would need `ioreg`/`system_profiler` parsing; deferred until ambiguity actually happens. |
-| R12 | Camera settings silently ignored (spike 1c: `-framerate 30` fell back to the device default ~10 fps; pixel format overridden to `uyvy422`) | Certain / low | Don't pass `-framerate` by default; warm-up expressed in frames sized for ~10 fps (default 20 ≈ 2 s); ffmpeg stderr logged on every snapshot so fallbacks are visible; JPEG magic check catches outright failure. |
+| R12 | Camera settings silently ignored (spike 1c: `-framerate 30` fell back to the device default ~10 fps; pixel format overridden to `uyvy422`) — or, **rev 4**, hard-rejected: without `-framerate` avfoundation requests 29.97 fps and the webcam refuses it (acceptance run 1: 503, ffmpeg exit 251) | Certain / ~~low~~ **medium** (materialised as a hard failure) | ~~Don't pass `-framerate` by default~~ (rev 4: that was the cause of the failure). Pass `-framerate 30` by default (a rate the device lists as supported), configurable via `--framerate`/`BENCH_FRAMERATE`, `0`/empty omits it; warm-up expressed in frames sized for ~10 fps (default 20 ≈ 2 s; revisit if run 2 shows a true 30 fps); ffmpeg stderr logged on every snapshot so fallbacks are visible, and the 503 body carries the stderr tail (which named the supported modes in run 1); JPEG magic check catches outright failure. |
 | R10 | Privacy: snapshots/logs show live traffic and the room | Medium / medium | `.bench/` is gitignored. The skill forbids sharing or committing them. Same rule as the README simulator note. |
 | R13 | uv missing (rev 3): not installed on the Mac, or the container not yet rebuilt with `./features/uv`, so `uv run ...` and the CLI shebang fail (`env: 'uv': No such file or directory`) | Medium until step 2a/6 / low | Both tools stay runnable with a plain `python3 >= 3.11` (`python3 tools/bench/bench_host.py`, `python3 tools/bench/bench ...`, `python3 -m unittest ...`); README and skill name the fallback; the shebang smoke test is skipped, not failed, without uv. Note: the B4 allow-list entry matches `tools/bench/bench`, not `python3 tools/bench/bench`, so the fallback is prompted. |
 | R14 | Managed-python download (rev 3): `uv run --python 3.11` (or a host without python >= 3.11) needs network on first use; offline, or GitHub unreachable, it fails | Low / low | Only the canonical test command needs it in the container; the V1 volume keeps the managed 3.11 across rebuilds, so it is a one-time download. The 3.13 test command and the CLI need no download. On the host, 3.15.0 satisfies `>=3.11`, so nothing is fetched. `UV_PYTHON_DOWNLOADS=never` turns a silent fetch into a clear error where that is preferred. |
-| R15 | uv's interpreter choice drifts (rev 3): with uv's default "prefer managed" policy, once a managed 3.11 is installed the CLI shebang may run on 3.11 instead of the system 3.13, and on the host a later managed install could shadow Homebrew python | Low / low | Any interpreter >= 3.11 is supported and tested at both ends of the range we control (3.11, 3.13); `/health` reports the host's `python_version`. |
+| R15 | uv's interpreter choice drifts (rev 3): with uv's default "prefer managed" policy, once a managed 3.11 is installed the CLI shebang may run on 3.11 instead of the system 3.13, and on the host a later managed install could shadow Homebrew python | Low / low; **materialised, harmless (acceptance run 1)** | Any interpreter >= 3.11 is supported and tested at both ends of the range we control (3.11, 3.13); `/health` reports the host's `python_version`. Rev 4: on the bench Mac `uv run tools/bench/bench_host.py` picked **python 3.12.12** although the Mac's `python3` is 3.15.0 (presumably a uv-managed or other installed interpreter that uv prefers; not investigated). Harmless, since 3.12 is inside the tested range; it also means the R7 "3.15 upper gap" is not what actually runs on the host today. |
+| R16 | A child tool grabs the controlling terminal (rev 4, **materialised in acceptance run 1**): after the first `/flash`, the Mac terminal running `bench_host.py` went into raw mode (staircase output, Ctrl-C dead); the user had to `pkill -f bench_host.py` from another tab and run `reset`. Cause: espflash's monitor (crossterm) opens the controlling terminal via `/dev/tty`, despite `stdin=DEVNULL`, and enables raw mode | Certain without mitigation / medium (host terminal unusable, service can't be stopped with Ctrl-C) | Fix (implemented in parallel to rev 4, see Security): every child (espflash, ffmpeg) is started with `start_new_session=True`, so it has no controlling terminal and `/dev/tty` can't be opened; stop/kill signal the child's **process group** (`os.killpg`, falling back to the pid); `main()` snapshots the termios state of a tty stdin at startup and restores it on exit, as a backstop. README step 7 documents recovery (`pkill -f bench_host.py` from another tab, then `reset`). **Residual [VERIFY in acceptance run 2]:** espflash's monitor might refuse to run, or behave differently, without a controlling tty; if so, revise this doc (options: a pty for the child, or `flash` + S2) rather than improvising. |
 
 Open questions: ~~B1–B5~~ (decided, see revision log); ~~the [VERIFY] items in step 1~~ (answered
 by the spike); remaining [VERIFY] items: `image2pipe` snapshot form (step 4/6), S3 backtrace
 symbolisation (Decision 2, step 6), avfoundation exposure/WB locking (R5), launchd TCC (B2);
 rev 3: pinned uv version and its release asset/checksum names (step 2a), uv's hash check of
-managed python downloads (Security), Camera permission under `uv run` (step 6).
+managed python downloads (Security), Camera permission under `uv run` (step 6); rev 4: espflash
+monitor without a controlling tty (R16), whether `-framerate 30` is honoured or falls back
+(R12), both in acceptance run 2.
 
 Deliberately deferred: boot test pattern (B3), launchd agent (B2), exposure/WB locking, automatic
 comparison against a sim reference render (needs a headless browser and a capture of the wasm sim,
@@ -836,3 +907,47 @@ third-party Python dependencies (stdlib-only stays, Decision 8), test runs on 3.
   JPEG magic client-side; `bench log --follow` without `--until` exits 0 on timeout (documented in
   `--help`); the CLI's POST /flash|/reset read timeout (330 s) is asserted > the host's 300 s flash
   timeout. `snap` retries 409 five times with back-off 0.5–4 s, then exits 4.
+- 2026-10-23: **rev 4, step-6 acceptance run 1 on the real Mac bench** (fix loop 1 of 2; the code
+  fixes are implemented and QA'd in parallel, this revision is doc only). Run results are recorded
+  in the new "Acceptance run 1" block of plan step 6. Nothing removed outright; superseded text is
+  struck through.
+  - Status line: rev-4 note appended (run 1 findings, fix loop 1 of 2, run 2 pending).
+  - **Decision 3 changed:** "the default argv does not pass `-framerate`" struck through. Spike 1c
+    had been misread: `-framerate 30` gave a fallback warning but captured, while omitting it makes
+    avfoundation request 29.97 fps, which the webcam rejects (run 1: 503, ffmpeg exit 251). New
+    default `-framerate 30` before `-video_size`, configurable via `--framerate`/`BENCH_FRAMERATE`,
+    `0`/empty omits it.
+  - Decision 8 (host start): notes uv picked 3.12.12, not the expected 3.15.0.
+  - API: `/log` row notes that successful long-polls are no longer access-logged (non-2xx still
+    are); `/snapshot.jpg` row notes that unsupported settings can also be rejected outright.
+  - Plan step 1 outcome (1c): annotated that `-framerate 30` still captured and that omitting it
+    fails, so it is now the default (original wording kept).
+  - Host config: `--framerate` default changed from "not passed" (struck through) to `30`, env
+    `BENCH_FRAMERATE`, `0`/empty omits.
+  - Security: new bullet "children never get the host's terminal" (`start_new_session=True`,
+    process-group kill with pid fallback, termios snapshot/restore in `main()`).
+  - Plan step 2: post-spike argv note and verify list — "omits `-framerate` unless configured" /
+    "no `-framerate` by default" struck through, replaced by `-framerate 30` by default.
+  - Plan step 4: new rev-4 bullet with the current argv; verify item "`-framerate` absent by
+    default" struck through, replaced by "present by default, before `-video_size`, configurable,
+    `0`/empty omits". The 409 concurrency rule and the QA minor notes (orchestrator notes above)
+    are unchanged.
+  - Plan step 6: run-1 interpreter noted in the health bullet; new "Acceptance run 1" results block
+    (health/token, flash with double boot confirmed on hardware, reset 3.94 s, snap failure,
+    raw-terminal defect, log noise, items not yet run) and an "Acceptance run 2 (pending)" block
+    (re-run everything incl. snap; snapshot timing; `image2pipe`, TCC under `uv run`, ffmpeg
+    stderr in the host log, framerate honoured or not, espflash without a controlling tty).
+  - Plan step 7: README rev-4 additions (terminal recovery: `pkill -f bench_host.py` from another
+    tab, then `reset`; `--framerate`/`BENCH_FRAMERATE`).
+  - Risks: R12 extended (hard rejection without `-framerate`; impact low → medium; old mitigation
+    "don't pass `-framerate` by default" struck through and replaced); R15 marked materialised,
+    harmless (uv picked 3.12.12); **new R16** (child grabs the controlling terminal; mitigation;
+    residual: espflash might not run without a controlling tty, [VERIFY] in run 2).
+  - Open questions: rev-4 VERIFYs added (R16 tty, R12 framerate honoured).
+  - Step numbering 1-8 unchanged.
+- 2026-10-23 (fix loop 1 QA, orchestrator note): QA PASS for the rev-4 fixes (framerate default,
+  new-session children with process-group kill, termios restore, quiet /log). Residual notes, accepted:
+  children now live in their own session, so a SIGKILL of the host orphans espflash/ffmpeg (Ctrl-C and
+  SIGTERM go through the host's handler, which kills the groups — verified for SIGTERM); the termios
+  restore uses `tcsetattr` and could raise SIGTTOU if the host were run as a background job (foreground
+  Terminal start per B2 is unaffected; relevant only if launchd/background start is revisited).

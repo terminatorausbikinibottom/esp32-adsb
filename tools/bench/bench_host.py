@@ -144,7 +144,7 @@ def espflash_argv(espflash, port, elf):
 def ffmpeg_argv(ffmpeg, camera, video_size, warmup, framerate=None):
     """One-shot snapshot: skip `warmup` frames, write one JPEG to stdout."""
     argv = [*_cmd(ffmpeg), "-f", "avfoundation"]
-    if framerate:
+    if framerate and str(framerate) != "0":  # "0"/empty = leave it to ffmpeg
         argv += ["-framerate", str(framerate)]
     argv += ["-video_size", video_size, "-i", f"{camera}:none"]
     # The backslash is ffmpeg filter-graph escaping for the comma; there is no shell involved.
@@ -166,10 +166,21 @@ def write_token(bench_dir):
 def tool_version(binary, flag):
     try:
         out = subprocess.run([*_cmd(binary), flag], capture_output=True, text=True, timeout=5,
-                             stdin=subprocess.DEVNULL).stdout
+                             stdin=subprocess.DEVNULL, start_new_session=True).stdout
         return out.strip().splitlines()[0] if out.strip() else None
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def _signal_group(proc, sig):
+    """Signal the child's whole process group (children run in their own session), else just the pid."""
+    try:
+        os.killpg(proc.pid, sig)
+    except OSError:
+        try:
+            proc.send_signal(sig)
+        except OSError:
+            pass
 
 
 # ---- core ------------------------------------------------------------------------------------
@@ -185,7 +196,7 @@ class Session:
 
 class Bench:
     def __init__(self, *, repo_root=REPO_ROOT, port=None, camera="1", video_size="1280x720",
-                 framerate=None, warmup=20, elf_prefix="firmware/target/", espflash="espflash",
+                 framerate="30", warmup=20, elf_prefix="firmware/target/", espflash="espflash",
                  ffmpeg="ffmpeg", candidates=list_candidates, flash_timeout=FLASH_TIMEOUT,
                  ring_lines=RING_LINES, snapshot_timeout=SNAPSHOT_TIMEOUT):
         self.repo_root, self.port, self.camera = repo_root, port, camera
@@ -275,7 +286,7 @@ class Bench:
     def _spawn(self, argv):
         try:
             proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT)
+                                    stderr=subprocess.STDOUT, start_new_session=True)
         except OSError as e:
             raise BenchError(500, f"cannot start espflash: {e.strerror}") from None
         with self.cond:
@@ -322,11 +333,11 @@ class Bench:
         if s is None:
             return
         if s.proc.poll() is None:
-            s.proc.terminate()
+            _signal_group(s.proc, signal.SIGTERM)
             try:
                 s.proc.wait(2)
             except subprocess.TimeoutExpired:
-                s.proc.kill()
+                _signal_group(s.proc, signal.SIGKILL)
                 s.proc.wait(5)
         s.reader.join(5)
 
@@ -360,19 +371,19 @@ class Bench:
                                self.warmup if warmup is None else warmup, self.framerate)
             try:
                 proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE)
+                                        stderr=subprocess.PIPE, start_new_session=True)
             except OSError as e:
                 raise BenchError(503, f"cannot start ffmpeg: {e.strerror}") from None
             try:
                 out, err = proc.communicate(timeout=self.snapshot_timeout)
                 problem = None
             except subprocess.TimeoutExpired:
-                proc.kill()
+                _signal_group(proc, signal.SIGKILL)
                 out, err = proc.communicate()
                 problem = f"ffmpeg timed out after {self.snapshot_timeout}s; killed"
             finally:
                 if proc.poll() is None:  # e.g. KeyboardInterrupt during communicate
-                    proc.kill()
+                    _signal_group(proc, signal.SIGKILL)
                     proc.wait()
             text = err.decode("utf-8", errors="replace")
             # Always logged: an unsupported setting only shows up here (R12), a TCC denial too (R4).
@@ -415,6 +426,8 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "bench-host"
 
     def log_message(self, fmt, *args):
+        if self.command == "GET" and self.path.startswith("/log") and str(args[1]).startswith("2"):
+            return  # long-poll noise; only failures are logged
         # The peer address is always 127.0.0.1 (gvproxy), so it says nothing about the caller.
         sys.stderr.write(f"{self.command} {self.path} -> {args[1] if len(args) > 1 else '?'}\n")
 
@@ -533,7 +546,8 @@ def parse_args(argv):
     p.add_argument("--port", default=env("BENCH_PORT"), help="serial device (default: auto-detect %s)" % PORT_GLOB)
     p.add_argument("--camera", default=env("BENCH_CAMERA", "1"), help="avfoundation name or index")
     p.add_argument("--video-size", default=env("BENCH_VIDEO_SIZE", "1280x720"))
-    p.add_argument("--framerate", default=env("BENCH_FRAMERATE"), help="not passed to ffmpeg by default")
+    p.add_argument("--framerate", default=env("BENCH_FRAMERATE", "30"),
+                   help="avfoundation input framerate (default 30; the camera rejects ffmpeg's 29.97 default); 0 or empty = don't pass")
     p.add_argument("--warmup", type=int, default=int(env("BENCH_WARMUP", "20")), help="warm-up frames")
     p.add_argument("--listen", default=env("BENCH_LISTEN", "127.0.0.1:7777"), help="loopback host:port")
     p.add_argument("--elf-prefix", default=env("BENCH_ELF_PREFIX", "firmware/target/"))
@@ -554,6 +568,7 @@ def main(argv=None, bench_dir=REPO_ROOT / ".bench"):
         resolve_port(args.port, list_candidates())  # fail fast; re-resolved on every flash/reset
     except (ValueError, PortError) as e:
         return _fail(str(e))
+    restore_tty = _save_termios()
     bench = Bench(port=args.port, camera=args.camera, video_size=args.video_size,
                   framerate=args.framerate, warmup=args.warmup, elf_prefix=args.elf_prefix,
                   espflash=args.espflash, ffmpeg=args.ffmpeg)
@@ -574,7 +589,25 @@ def main(argv=None, bench_dir=REPO_ROOT / ".bench"):
     finally:
         srv.server_close()
         bench.close()
+        restore_tty()
     return 0
+
+
+def _save_termios():
+    """Snapshot the terminal settings; the returned callable restores them (no-op without a tty)."""
+    try:
+        import termios
+        fd = sys.stdin.fileno()
+        saved = termios.tcgetattr(fd)
+    except Exception:
+        return lambda: None
+
+    def restore():
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        except Exception:
+            pass
+    return restore
 
 
 def _terminate(*_):

@@ -68,7 +68,11 @@ class SnapshotTest(unittest.TestCase):
         argv = self.invocations()[0]["argv"]
         self.assertIn("1:none", argv)
         self.assertIn("select=gte(n\\,20)", argv)
-        self.assertNotIn("-framerate", argv)
+        self.assertEqual(argv[argv.index("-framerate") + 1], "30")
+        self.assertEqual(argv.index("-framerate") + 2, argv.index("-video_size"))
+        inv = self.invocations()[0]  # own session: no controlling terminal to put in raw mode
+        self.assertNotEqual(inv["sid"], os.getsid(0))
+        self.assertEqual(inv["pgid"], inv["pid"])
 
     def test_warmup_param(self):
         self.get_logged("/snapshot.jpg?warmup=3")

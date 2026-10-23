@@ -18,7 +18,7 @@ if len(sys.argv) == 2 and sys.argv[1] == "-version":
     sys.exit(0)
 if os.environ.get("FAKE_FFMPEG_LOG"):
     with open(os.environ["FAKE_FFMPEG_LOG"], "a") as f:
-        f.write(json.dumps({"pid": os.getpid(), "argv": sys.argv[1:]}) + "\n")
+        f.write(json.dumps({"pid": os.getpid(), "argv": sys.argv[1:], "sid": os.getsid(0), "pgid": os.getpgid(0)}) + "\n")
 if MODE == "fail":
     sys.stderr.write("[avfoundation] Cannot use camera: not authorized\n")
     sys.exit(1)

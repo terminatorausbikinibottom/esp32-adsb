@@ -830,3 +830,9 @@ third-party Python dependencies (stdlib-only stays, Decision 8), test runs on 3.
   `bench snap` must treat 409 as "camera busy": retry a few times with a short back-off before exiting 4.
   QA minor notes left as is: `warmup` has no upper cap (bounded by the 20 s ffmpeg timeout); full
   ffmpeg stderr is logged per call.
+- 2026-10-23 (step 5, orchestrator note after QA): CLI exit-code contract clarified — usage/argument
+  errors and unexpected/malformed host responses exit **4** (never 1 or 2, so an agent can't confuse a
+  typo with a timeout or a crash with a panic; `BENCH_DEBUG` shows tracebacks); `bench snap` checks
+  JPEG magic client-side; `bench log --follow` without `--until` exits 0 on timeout (documented in
+  `--help`); the CLI's POST /flash|/reset read timeout (330 s) is asserted > the host's 300 s flash
+  timeout. `snap` retries 409 five times with back-off 0.5–4 s, then exits 4.

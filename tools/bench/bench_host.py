@@ -8,15 +8,18 @@
 Start from the repo root: `uv run tools/bench/bench_host.py [--port ...]`
 (fallback without uv: `python3 tools/bench/bench_host.py`, python >= 3.11).
 
-Step 2 skeleton: config, loopback-only bind, token + auth, GET /health, and the pure helpers
-(ELF staging, argv builders, serial port resolution) that later steps build on.
+Implemented: config, loopback-only bind, token + auth, GET /health, the pure helpers (ELF
+staging, argv builders, serial port resolution), and (step 3) /flash, /reset, /monitor/stop, /log
+around one espflash process per session. Snapshot and stream come in later steps.
 """
+import atexit
 import argparse
 import glob
 import hmac
 import ipaddress
 import json
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -25,7 +28,12 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+import urllib.parse
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from itertools import islice
 from pathlib import Path
 
 SERVICE_VERSION = "0.1"
@@ -35,6 +43,12 @@ MAX_BODY = 4096
 MAX_ELF = 64 * 1024 * 1024
 ELF_MAGIC = b"\x7fELF"
 PORT_GLOB = "/dev/cu.usbmodem*"
+COMPLETE = "Flashing has completed!"  # espflash's flash-success line (R9: one constant)
+ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+RING_LINES = 20000
+FLASH_TIMEOUT = 300
+LOG_WAIT_CAP = 30
+TAIL_LINES = 20
 
 
 class BenchError(Exception):
@@ -115,9 +129,14 @@ def stage_elf(repo_root, elf, elf_prefix, dest_dir):
     return copy
 
 
+def _cmd(binary):
+    """A binary is a path, or an argv prefix (tests run the fake as [sys.executable, fake])."""
+    return [binary] if isinstance(binary, str) else list(binary)
+
+
 def espflash_argv(espflash, port, elf):
     """The single S3 command: flash then stay in the monitor. `elf` is the staged copy, last."""
-    return [espflash, "flash", "--chip", "esp32s3", "--port", port, "--monitor", "--non-interactive", elf]
+    return [*_cmd(espflash), "flash", "--chip", "esp32s3", "--port", port, "--monitor", "--non-interactive", elf]
 
 
 def ffmpeg_argv(ffmpeg, camera, video_size, warmup, framerate=None):
@@ -144,7 +163,7 @@ def write_token(bench_dir):
 
 def tool_version(binary, flag):
     try:
-        out = subprocess.run([binary, flag], capture_output=True, text=True, timeout=5,
+        out = subprocess.run([*_cmd(binary), flag], capture_output=True, text=True, timeout=5,
                              stdin=subprocess.DEVNULL).stdout
         return out.strip().splitlines()[0] if out.strip() else None
     except (OSError, subprocess.SubprocessError):
@@ -154,15 +173,32 @@ def tool_version(binary, flag):
 # ---- core ------------------------------------------------------------------------------------
 
 
+class Session:
+    """One espflash process. phase: flashing -> running (completion line seen) -> exited."""
+
+    def __init__(self, id, proc, log_seq):
+        self.id, self.proc, self.log_seq = id, proc, log_seq
+        self.phase, self.app_seq, self.exit_code, self.reader = "flashing", None, None, None
+
+
 class Bench:
     def __init__(self, *, repo_root=REPO_ROOT, port=None, camera="1", video_size="1280x720",
                  framerate=None, warmup=20, elf_prefix="firmware/target/", espflash="espflash",
-                 ffmpeg="ffmpeg", candidates=list_candidates):
+                 ffmpeg="ffmpeg", candidates=list_candidates, flash_timeout=FLASH_TIMEOUT,
+                 ring_lines=RING_LINES):
         self.repo_root, self.port, self.camera = repo_root, port, camera
         self.video_size, self.framerate, self.warmup = video_size, framerate, warmup
         self.elf_prefix, self.espflash, self.ffmpeg = elf_prefix, espflash, ffmpeg
-        self.candidates = candidates
+        self.candidates, self.flash_timeout = candidates, flash_timeout
         self.espflash_version = tool_version(espflash, "--version")
+        self.flash_lock = threading.Lock()  # one flash/reset/stop at a time
+        self.cond = threading.Condition()  # guards ring, next_seq and session fields
+        self.ring = deque(maxlen=ring_lines)  # {seq, t, text}; seq is global across sessions
+        self.next_seq = 1
+        self.session = None
+        self.sessions = 0
+        self.last_elf = None  # staged copy kept for /reset
+        self.stage_dir = None
 
     def serial_status(self):
         cands = self.candidates()
@@ -177,6 +213,13 @@ class Bench:
             "candidates": cands,
         }
 
+    def monitor_status(self):
+        """phase is None until the first flash; running = the espflash process is alive."""
+        s = self.session
+        if s is None:
+            return {"running": False, "phase": None, "exit_code": None}
+        return {"running": s.phase != "exited", "phase": s.phase, "exit_code": s.exit_code}
+
     def health(self):
         return {
             "ok": True,
@@ -186,10 +229,140 @@ class Bench:
             "espflash_version": self.espflash_version,
             "ffmpeg_present": shutil.which(self.ffmpeg) is not None,
             "camera": self.camera,
-            # Stubs until step 3 adds sessions.
-            "monitor": {"running": False, "phase": None, "exit_code": None},
-            "busy": False,
+            "monitor": self.monitor_status(),
+            "busy": self.flash_lock.locked(),
         }
+
+    # -- flash / reset / stop
+
+    def flash(self, elf):
+        def stage():
+            if self.stage_dir is None:
+                self.stage_dir = tempfile.mkdtemp(prefix="bench-")
+            return stage_elf(self.repo_root, elf, self.elf_prefix, self.stage_dir)
+        return self._start(stage)
+
+    def reset(self):
+        return self._start(None)
+
+    def _start(self, stage):
+        if not self.flash_lock.acquire(blocking=False):
+            raise BenchError(409, "another flash or reset is running")
+        try:
+            if stage is None and self.last_elf is None:
+                raise BenchError(409, "nothing has been flashed since startup")
+            new = stage() if stage else None
+            try:
+                port = resolve_port(self.port, self.candidates())  # re-resolved every time
+                self._stop_process()
+                s = self._spawn(espflash_argv(self.espflash, port, new or self.last_elf))
+            except BaseException:
+                if new:
+                    os.unlink(new)
+                raise
+            if new:  # the previous copy is only dropped once the new one is in use
+                old, self.last_elf = self.last_elf, new
+                if old:
+                    os.unlink(old)
+            return self._await_flash(s)
+        finally:
+            self.flash_lock.release()
+
+    def _spawn(self, argv):
+        try:
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT)
+        except OSError as e:
+            raise BenchError(500, f"cannot start espflash: {e.strerror}") from None
+        with self.cond:
+            self.sessions += 1
+            s = self.session = Session(self.sessions, proc, self.next_seq)
+        s.reader = threading.Thread(target=self._read, args=(s,), daemon=True)
+        s.reader.start()
+        return s
+
+    def _read(self, s):
+        for raw in s.proc.stdout:
+            text = ANSI_RE.sub("", raw.decode("utf-8", errors="replace")).rstrip("\r\n")
+            with self.cond:
+                seq, self.next_seq = self.next_seq, self.next_seq + 1
+                self.ring.append({"seq": seq, "t": round(time.time(), 3), "text": text})
+                if s.phase == "flashing" and COMPLETE in text:
+                    s.phase, s.app_seq = "running", seq
+                self.cond.notify_all()
+        s.proc.stdout.close()
+        code = s.proc.wait()
+        with self.cond:
+            s.exit_code, s.phase = code, "exited"
+            self.cond.notify_all()
+
+    def _tail(self, s):
+        return [l["text"] for l in self.ring if l["seq"] >= s.log_seq][-TAIL_LINES:]
+
+    def _await_flash(self, s):
+        with self.cond:
+            done = self.cond.wait_for(lambda: s.phase != "flashing", self.flash_timeout)
+        if not done:
+            self._stop_process()
+        with self.cond:
+            info = {"exit_code": s.exit_code, "output_tail": self._tail(s), "session": s.id,
+                    "log_seq": s.log_seq}
+            if not done:
+                raise BenchError(504, f"no '{COMPLETE}' within {self.flash_timeout}s; killed", **info)
+            if s.app_seq is None:
+                raise BenchError(502, f"espflash exited with {s.exit_code} before '{COMPLETE}'", **info)
+            return {"ok": True, **info, "app_seq": s.app_seq}
+
+    def _stop_process(self):
+        s = self.session
+        if s is None:
+            return
+        if s.proc.poll() is None:
+            s.proc.terminate()
+            try:
+                s.proc.wait(2)
+            except subprocess.TimeoutExpired:
+                s.proc.kill()
+                s.proc.wait(5)
+        s.reader.join(5)
+
+    def stop_monitor(self):
+        # Holding the flash lock also covers "still flashing": a half-written image is never killed.
+        if not self.flash_lock.acquire(blocking=False):
+            raise BenchError(409, "flash or reset in progress")
+        try:
+            s = self.session
+            was_alive = s is not None and s.phase != "exited"
+            self._stop_process()
+            return {"ok": True, "stopped": was_alive}
+        finally:
+            self.flash_lock.release()
+
+    def close(self):
+        """Kill the child and delete staged copies. Idempotent; runs on shutdown and at exit."""
+        self._stop_process()
+        if self.stage_dir:
+            shutil.rmtree(self.stage_dir, ignore_errors=True)
+            self.stage_dir = self.last_elf = None
+
+    # -- log
+
+    def log(self, since=0, wait=0, max_lines=1000):
+        with self.cond:
+            if wait > 0:
+                self.cond.wait_for(lambda: self.next_seq - 1 > since, min(wait, LOG_WAIT_CAP))
+            oldest = self.ring[0]["seq"] if self.ring else self.next_seq
+            start = max(0, since + 1 - oldest)
+            lines = list(islice(self.ring, start, start + max_lines))
+            s = self.session
+            return {
+                "session": s.id if s else None,
+                "app_seq": s.app_seq if s else None,
+                "lines": lines,
+                "next": lines[-1]["seq"] if lines else since,
+                "dropped": since + 1 < oldest,
+                "monitor": self.monitor_status(),
+            }
 
 
 # ---- HTTP front end --------------------------------------------------------------------------
@@ -234,13 +407,48 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return False
 
+    def _json_body(self, allowed):
+        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        if not raw.strip():
+            return {}
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            raise BenchError(400, "body is not valid JSON") from None
+        if not isinstance(body, dict) or set(body) - allowed:
+            raise BenchError(400, f"body must be a JSON object with keys from {sorted(allowed)}")
+        return body
+
+    @staticmethod
+    def _num(query, name, default, cast, lo):
+        try:
+            value = cast(query.get(name, [default])[0])
+        except ValueError:
+            value = None
+        if value is None or not value >= lo:  # also rejects nan
+            raise BenchError(400, f"bad query parameter {name}")
+        return value
+
     def _route(self, method):
         if not self._authorized() or not self._body_ok():
             return
-        path = self.path.split("?", 1)[0]
+        url = urllib.parse.urlsplit(self.path)
+        path, bench = url.path, self.server.bench
         try:
             if (method, path) == ("GET", "/health"):
-                self._send(200, self.server.bench.health())
+                self._send(200, bench.health())
+            elif (method, path) == ("GET", "/log"):
+                q = urllib.parse.parse_qs(url.query)
+                self._send(200, bench.log(self._num(q, "since", 0, int, 0), self._num(q, "wait", 0, float, 0),
+                                          self._num(q, "max", 1000, int, 1)))
+            elif (method, path) == ("POST", "/flash"):
+                self._send(200, bench.flash(self._json_body({"elf"}).get("elf")))
+            elif (method, path) == ("POST", "/reset"):
+                self._json_body(set())
+                self._send(200, bench.reset())
+            elif (method, path) == ("POST", "/monitor/stop"):
+                self._json_body(set())
+                self._send(200, bench.stop_monitor())
             else:
                 self._send(404, {"ok": False, "error": "not found"})
         except BenchError as e:
@@ -302,6 +510,7 @@ def main(argv=None, bench_dir=REPO_ROOT / ".bench"):
     except OSError as e:
         return _fail(f"cannot listen on {host}:{port}: {e.strerror}")
     srv.token = write_token(bench_dir)
+    atexit.register(bench.close)
     signal.signal(signal.SIGTERM, _terminate)
     print(f"listening on {host}:{port}, token in {bench_dir / 'token'}", file=sys.stderr)
     try:
@@ -310,6 +519,7 @@ def main(argv=None, bench_dir=REPO_ROOT / ".bench"):
         pass
     finally:
         srv.server_close()
+        bench.close()
     return 0
 
 

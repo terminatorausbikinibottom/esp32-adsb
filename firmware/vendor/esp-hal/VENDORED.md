@@ -59,3 +59,6 @@ The default per-frame restart (`firmware/src/restart.rs`) resets the LCD and FIF
 the `Dpi::send` ordering may no longer matter. To test stock esp-hal 1.2.2: comment out `[patch.crates-io]`
 and its entry in `firmware/Cargo.toml` and rebuild. Only `Dpi::send`'s first frame, and the `no-resync`/`restart-vsync`
 variants (no reset before start), depend on the patch.
+
+**2026-10-23 (radar-ui RD.0):** stock esp-hal 1.2.2 passed on the board (39 fps, no shift), so the patch is now
+commented out in `firmware/Cargo.toml`. This directory stays until the `no-resync`/`restart-vsync` variants are dropped.

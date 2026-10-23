@@ -672,3 +672,10 @@ app partition size.
   `cargo:rustc-env` approach **replaced** by a generated `config.rs`; parent 5.1
   `serde-json-core` **replaced** by `serde_json` (alloc); parent lookup policy (in radius,
   approaching, nearest 5) **replaced** by focus + 2 prefetch for this layout.
+
+- 2026-10-23, **RD.0 result** (bench, head 75b721f): `fw-D-vendored` and `fw-D-stock` both PASS:
+  bar pattern, border on all four edges, no shift between photos 10–30 s apart,
+  `restart: frames/s=39`–40, `isr_max_us` 13 (vendored, first second) / 6 (stock). Decision rule:
+  stock passes, so `[patch.crates-io]` is commented out in `firmware/Cargo.toml`; the vendor
+  directory stays. Also found: build-script binaries under `*/target/` from 2026-10-21 had lost
+  their execute bit (host file-mode reset); fixed with `chmod u+x`, no clean needed.

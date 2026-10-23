@@ -99,8 +99,10 @@ static_cell      = "2.1.1"
 # The per-frame restart in src/restart.rs resets before every start, so stock esp-hal may suffice:
 # to try it, comment out the two lines below and rebuild (Cargo.lock switches to the registry source
 # by itself); to go back, uncomment them.
-[patch.crates-io]
-esp-hal = { path = "vendor/esp-hal" }
+# 2026-10-23 (radar-ui RD.0): stock esp-hal 1.2.2 passes on the board (39 fps, isr_max 6 us, no
+# shift), same as vendored, so the patch is off. The vendor directory stays for now.
+# [patch.crates-io]
+# esp-hal = { path = "vendor/esp-hal" }
 
 # For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html
 [profile.dev]

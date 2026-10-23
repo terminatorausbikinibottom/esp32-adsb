@@ -35,7 +35,9 @@ Everything goes through `tools/bench/bench`, which talks to a service the user r
 3. `tools/bench/bench flash <elf> --until '<marker>' --timeout 60`. Set the Bash tool timeout
    to at least 400000 ms for flash/reset calls: `--timeout` only covers the wait for the marker
    after flashing completes; flashing itself has the host's 300 s cap. The default `--fail-on`
-   already catches `panic|Guru Meditation|abort\(\)|Exception`. Exit codes:
+   already catches `panic|Guru Meditation|abort\(\)|Exception`. A line that pauses mid-way for
+   more than 0.5 s appears as two log lines, so `--until`/`--fail-on` regexes should match within
+   one fragment. Exit codes:
    - **0** marker matched. Continue.
    - **1** `--fail-on` matched or boot loop (more than `--max-boots`, default 3).
    - **2** timeout without the marker.

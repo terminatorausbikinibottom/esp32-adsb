@@ -330,7 +330,65 @@ class SerialReaderTest(FlashBase):
         self.assertEqual(texts, ["", "a" * bh.MAX_LINE + bh.LINE_SPLIT_MARK, "a"])
 
 
+class PhaseDetectionTest(FlashBase):
+    """_read on a real pipe: the completion marker must be found however the bytes arrive."""
+
+    def run_reader(self, *writes, pause=0.05):
+        r, w = os.pipe()
+        proc = mock.Mock(stdout=os.fdopen(r, "rb"))
+        proc.wait.return_value = 0
+        s = bh.Session(1, proc, 1)
+        t = threading.Thread(target=self.bench._read, args=(s,))
+        t.start()
+        for chunk in writes:
+            os.write(w, chunk)
+            time.sleep(pause)
+        os.close(w)
+        t.join(5)
+        return s, [l["text"] for l in self.bench.ring]
+
+    def test_marker_split_across_two_chunks(self):
+        s, texts = self.run_reader(b"INFO - Flashing ha", b"s completed!\n")
+        self.assertEqual((s.phase, s.app_seq), ("exited", 1))
+        self.assertEqual(texts, ["INFO - Flashing has completed!"])
+
+    def test_marker_after_the_cut_is_found_but_straddling_it_is_not(self):
+        # A line over MAX_LINE is several ring lines and each is checked on its own: a marker wholly
+        # in a later piece counts; one cut in two never matches (espflash lines are far shorter).
+        pad = b"x" * (bh.MAX_LINE + 10)
+        s, _ = self.run_reader(pad + b"Flashing has completed!\n")
+        self.assertIsNotNone(s.app_seq)
+        edge = b"x" * (bh.MAX_LINE - 10) + b"Flashing has completed!\n"
+        s, texts = self.run_reader(edge)
+        self.assertIsNone(s.app_seq)
+        self.assertTrue(texts[-2].endswith("Flashing h" + bh.LINE_SPLIT_MARK))
+
+    def test_cut_never_splits_utf8_or_ansi(self):
+        for line in ("é".encode() * bh.MAX_LINE, "€".encode() * bh.MAX_LINE, "😀".encode() * bh.MAX_LINE):
+            _, texts = self.run_reader(line + b"\n", pause=0)
+            self.assertFalse(any("\ufffd" in t for t in texts), line[:4])
+        red = b"\x1b[31;1m"
+        for shift in range(len(red) + 1):  # the escape starts at every offset around the cut
+            line = b"a" * (bh.MAX_LINE - shift) + red + b"tail" + b"b" * 100 + b"\n"
+            _, texts = self.run_reader(line, pause=0)
+            self.assertFalse(any("\x1b" in t or "[31;1m" in t for t in texts), shift)
+
+
 class CloseRaceTest(FlashBase):
+    def test_close_right_after_spawn_gives_503_and_no_stale_last_elf(self):
+        self.assertEqual(self.flash()[0], 200)  # an `old` copy exists
+        real = self.bench._spawn
+
+        def spawn_then_close(argv):
+            s = real(argv)
+            self.bench.close()  # removes the stage dir, so unlinking `old` would fail
+            return s
+
+        with mock.patch.object(self.bench, "_spawn", spawn_then_close):
+            status, _ = self.flash()
+        self.assertEqual(status, 503)
+        self.assertIsNone(self.bench.last_elf)
+
     def test_close_during_stage_spawns_nothing(self):
         staging, release = threading.Event(), threading.Event()
         real = bh.stage_elf

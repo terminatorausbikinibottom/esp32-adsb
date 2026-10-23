@@ -199,6 +199,22 @@ class TokenSymlinkTest(unittest.TestCase):
                 bh.write_token(linked)
 
 
+class TokenFailureTest(unittest.TestCase):
+    def test_symlinked_bench_dir_exits_2_without_traceback(self):
+        with tempfile.TemporaryDirectory() as d:
+            real = Path(d, "real")
+            real.mkdir()
+            Path(d, ".bench").symlink_to(real)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = bh.main(["--listen", "127.0.0.1:0", "--port", "/dev/x", "--espflash", sys.executable,
+                              "--ffmpeg", FAKE_FFMPEG], bench_dir=Path(d, ".bench"))
+            self.assertEqual(rc, 2)
+            self.assertIn("symlink", err.getvalue())
+            self.assertNotIn("Traceback", err.getvalue())
+            self.assertEqual(os.listdir(real), [])
+
+
 class BindFailureTest(unittest.TestCase):
     def test_port_in_use_keeps_existing_token(self):
         holder = bh.make_server(bh.Bench(), "127.0.0.1", 0)

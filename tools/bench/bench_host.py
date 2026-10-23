@@ -49,6 +49,7 @@ ELF_MAGIC = b"\x7fELF"
 PORT_GLOB = "/dev/cu.usbmodem*"
 COMPLETE = "Flashing has completed!"  # espflash's flash-success line (R9: one constant)
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+ANSI_BYTES_RE = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
 RING_LINES = 20000
 MAX_LINE = 4096  # bytes per ring line; longer serial lines are split
 LINE_SPLIT_MARK = " [line split]"
@@ -189,6 +190,17 @@ def write_token(bench_dir):
         os.unlink(tmp)
         raise
     return token
+
+
+def _safe_cut(b):
+    """Where to cut `b` (longer than MAX_LINE): not inside an ANSI escape, not inside a UTF-8 character."""
+    cut = MAX_LINE
+    esc = b.rfind(b"\x1b", 0, cut)
+    if esc > 0 and (m := ANSI_BYTES_RE.match(b, esc)) and m.end() > cut:
+        cut = esc
+    while cut > 1 and b[cut] & 0xC0 == 0x80:  # b[cut] would start the rest with a continuation byte
+        cut -= 1
+    return cut
 
 
 def tool_version(binary, flag):
@@ -368,7 +380,11 @@ class Bench:
             if new:  # the previous copy is only dropped once the new one is in use
                 old, self.last_elf = self.last_elf, new
                 if old:
-                    os.unlink(old)
+                    with contextlib.suppress(FileNotFoundError):  # close() may have removed the stage dir
+                        os.unlink(old)
+            if self.closed:  # close() ran after the spawn: it already killed the session
+                self.last_elf = None
+                raise BenchError(503, "service is shutting down")
             return self._await_flash(s)
         finally:
             self.flash_lock.release()
@@ -404,8 +420,9 @@ class Bench:
             for line in lines:
                 self._add_line(s, line)
             while len(buf) > MAX_LINE:  # no newline in sight: bounded memory
-                self._add_line(s, buf[:MAX_LINE], truncated=True)
-                buf = buf[MAX_LINE:]
+                cut = _safe_cut(buf)
+                self._add_line(s, buf[:cut], truncated=True)
+                buf = buf[cut:]
         if buf:
             self._add_line(s, buf)
         s.proc.stdout.close()
@@ -416,7 +433,12 @@ class Bench:
 
     def _add_line(self, s, raw, truncated=False):
         """Append one ring line; a line over MAX_LINE becomes several, all but the last marked."""
-        pieces = [raw[i:i + MAX_LINE] for i in range(0, len(raw), MAX_LINE)] or [raw]
+        pieces = []
+        while len(raw) > MAX_LINE:
+            cut = _safe_cut(raw)
+            pieces.append(raw[:cut])
+            raw = raw[cut:]
+        pieces.append(raw)
         for n, piece in enumerate(pieces):
             text = ANSI_RE.sub("", piece.decode("utf-8", errors="replace")).rstrip("\r\n")
             if truncated or n < len(pieces) - 1:
@@ -808,7 +830,11 @@ def main(argv=None, bench_dir=REPO_ROOT / ".bench"):
         srv = make_server(bench, host, port)  # bind before touching the token of a running instance
     except OSError as e:
         return _fail(f"cannot listen on {host}:{port}: {e.strerror}")
-    srv.token = write_token(bench_dir)
+    try:
+        srv.token = write_token(bench_dir)
+    except OSError as e:
+        srv.server_close()
+        return _fail(f"cannot write the token: {e}")
     atexit.register(bench.close)
     signal.signal(signal.SIGTERM, _terminate)
     print(f"listening on {host}:{port}, token in {bench_dir / 'token'}", file=sys.stderr)

@@ -281,6 +281,9 @@ pub struct Snapshot {
     pub in_radius: usize,
     /// Index into `list`; one of the in-radius rows, chosen with hysteresis.
     pub primary: Option<usize>,
+    /// Index into `list`: the nearest positioned aircraft (in or outside the radius), chosen
+    /// with the same hysteresis as `primary`. Equals `primary` whenever that is set.
+    pub focus: Option<usize>,
     pub just_passed: Option<JustPassed>,
     /// Indices into `list` of aircraft with a CPA inside the radius, soonest first.
     pub approaching: Vec<u8, CAPACITY>,
@@ -311,6 +314,7 @@ pub struct AircraftTable {
     counters: Counters,
     last_message_ms: Option<u64>,
     primary: Option<u32>,
+    focus: Option<u32>,
     just_passed: Option<(u32, u64)>,
 }
 
@@ -322,6 +326,7 @@ impl AircraftTable {
             counters: Counters::default(),
             last_message_ms: None,
             primary: None,
+            focus: None,
             just_passed: None,
         }
     }
@@ -457,6 +462,25 @@ impl AircraftTable {
         }
         self.primary = primary.map(|i| list[i].icao);
 
+        // Focus: same rule over all positioned aircraft. A stale or removed one has no
+        // position (or is gone), so it drops out of the search and the nearest takes over.
+        let positioned = list.iter().take_while(|v| v.position.is_some()).count();
+        let cur = self
+            .focus
+            .and_then(|i| list[..positioned].iter().position(|v| v.icao == i));
+        let focus = match cur {
+            Some(c) => {
+                let (g0, gc) = (ground(&list[0]), ground(&list[c]));
+                if g0 < gc * (1.0 - SWITCH_FRACTION) && gc - g0 > SWITCH_MIN_M {
+                    Some(0)
+                } else {
+                    Some(c)
+                }
+            }
+            None => (positioned > 0).then_some(0),
+        };
+        self.focus = focus.map(|i| list[i].icao);
+
         let just_passed = self.just_passed.and_then(|(icao, left_ms)| {
             let left_ago_ms = now_ms.saturating_sub(left_ms);
             let index = list
@@ -501,6 +525,7 @@ impl AircraftTable {
             list,
             in_radius,
             primary,
+            focus,
             just_passed,
             approaching,
             counters: self.counters,
@@ -800,6 +825,35 @@ mod tests {
         assert_eq!(primary(&mut t, 30_000), 2);
         step(&mut t, 650.0, 40_000);
         assert_eq!(primary(&mut t, 40_000), 2);
+    }
+
+    #[test]
+    fn focus_hysteresis_and_stale() {
+        let mut t = table();
+        let focus = |t: &mut AircraftTable, now| {
+            let s = t.snapshot(now, 5.0);
+            s.focus.map(|i| s.list[i].icao)
+        };
+        assert_eq!(focus(&mut t, 0), None);
+        // Both outside the 5 km radius: focus still picks the nearest. Moves are slow enough
+        // for the speed gate.
+        fix(&mut t, 1, 20_000.0, 0.0, 10_000, 0);
+        fix(&mut t, 2, 26_000.0, 0.0, 10_000, 0);
+        assert_eq!(focus(&mut t, 0), Some(1));
+        fix(&mut t, 1, 20_000.0, 0.0, 10_000, 20_000);
+        fix(&mut t, 2, 17_000.0, 0.0, 10_000, 20_000); // 15 % closer
+        assert_eq!(focus(&mut t, 20_000), Some(1));
+        fix(&mut t, 1, 20_000.0, 0.0, 10_000, 40_000);
+        fix(&mut t, 2, 10_000.0, 0.0, 10_000, 40_000); // 50 % and 10 km
+        assert_eq!(focus(&mut t, 40_000), Some(2));
+        // Aircraft 2 goes stale (no fix for more than 30 s): focus moves to 1.
+        fix(&mut t, 1, 20_000.0, 0.0, 10_000, 75_000);
+        assert_eq!(focus(&mut t, 75_000), Some(1));
+        // A new aircraft inside the radius takes the focus, and it is the primary.
+        fix(&mut t, 3, 3000.0, 0.0, 10_000, 80_000);
+        let s = t.snapshot(80_000, 5.0);
+        assert_eq!(s.list[s.focus.unwrap()].icao, 3);
+        assert_eq!(s.focus, s.primary);
     }
 
     #[test]

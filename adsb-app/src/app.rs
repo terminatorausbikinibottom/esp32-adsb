@@ -456,6 +456,7 @@ mod tests {
                 list: Default::default(),
                 in_radius: 0,
                 primary: None,
+                focus: None,
                 just_passed: None,
                 approaching: Default::default(),
                 counters: Counters::default(),

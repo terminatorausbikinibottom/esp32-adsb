@@ -1,0 +1,17 @@
+[package]
+name = "adsb-core"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+heapless = "0.9"
+libm = "0.2"
+modes = { path = "../modes" }
+
+[features]
+# Deterministic seeded scenarios (fictitious receiver) emitting AVR lines; pulls in `modes/encode`.
+scenario = ["modes/encode"]
+
+[dev-dependencies]
+modes = { path = "../modes", features = ["encode"] }

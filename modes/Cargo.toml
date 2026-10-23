@@ -1,0 +1,13 @@
+[package]
+name = "modes"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+heapless = "0.9"
+libm = "0.2"
+
+[features]
+# Frame encoders (inverse of `decode`), for scenarios and tests. Off by default.
+encode = []

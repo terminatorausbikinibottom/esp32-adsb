@@ -1,3 +1,9 @@
 /target
 **/*.rs.bk
 .DS_Store
+target/
+.env
+captures/
+*.capture
+
+dist/

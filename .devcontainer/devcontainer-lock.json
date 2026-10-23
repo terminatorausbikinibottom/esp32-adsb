@@ -10,6 +10,11 @@
       "resolved": "ghcr.io/devcontainers/features/common-utils@sha256:e76a6a8a35d1ad824daad1540725e0ec9f8ed2dc00d2850e990a9830013c7d08",
       "integrity": "sha256:e76a6a8a35d1ad824daad1540725e0ec9f8ed2dc00d2850e990a9830013c7d08"
     },
+    "ghcr.io/devcontainers/features/github-cli:1": {
+      "version": "1.1.3",
+      "resolved": "ghcr.io/devcontainers/features/github-cli@sha256:bd7ab48a832228f633239277552c30b353867fef2e5b037e064b4e64f0b843f2",
+      "integrity": "sha256:bd7ab48a832228f633239277552c30b353867fef2e5b037e064b4e64f0b843f2"
+    },
     "ghcr.io/devcontainers/features/node:1": {
       "version": "1.7.1",
       "resolved": "ghcr.io/devcontainers/features/node@sha256:8c0de46939b61958041700ee89e3493f3b2e4131a06dc46b4d9423427d06e5f6",
@@ -24,6 +29,11 @@
       "version": "1.6.0",
       "resolved": "ghcr.io/devcontainers/features/rust@sha256:846c949f52c9dea98d4f90a11957cbf152fb3f6e8a70ddd7cb83014a7d1d0c98",
       "integrity": "sha256:846c949f52c9dea98d4f90a11957cbf152fb3f6e8a70ddd7cb83014a7d1d0c98"
+    },
+    "ghcr.io/eitsupi/devcontainer-features/beads-cli:1": {
+      "version": "1.0.0",
+      "resolved": "ghcr.io/eitsupi/devcontainer-features/beads-cli@sha256:25bfb436e8ba8a77104f77261f9a2af23b756300c06dad367f80344a8d5f183b",
+      "integrity": "sha256:25bfb436e8ba8a77104f77261f9a2af23b756300c06dad367f80344a8d5f183b"
     },
     "ghcr.io/rio/features/chezmoi:1": {
       "version": "1.1.1",

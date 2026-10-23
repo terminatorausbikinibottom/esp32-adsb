@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ADS-B display simulator</title>
+  <link data-trunk rel="rust" data-wasm-opt="z">
+  <style>
+    body { font: 14px sans-serif; background: #222; color: #ddd; margin: 1em; }
+    #banner { background: #a60; color: #fff; padding: .4em .8em; margin-bottom: .6em; font-weight: bold; }
+    #screen { width: 800px; max-width: 100%; image-rendering: pixelated; background: #000; display: block; }
+    #controls { margin: .6em 0; display: flex; gap: .8em; align-items: center; flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+  <div id="banner">SIM: fictitious location (scenario mode, no real receiver data)</div>
+  <canvas id="screen"></canvas>
+  <div id="controls">
+    <label>Mode
+      <select id="scenario"><option>overflight</option><option>busy</option><option>edge</option><option id="mode-live" value="live" disabled>live (checking for local receiver config...)</option></select>
+    </label>
+    <label>Speed
+      <select id="speed"><option value="1">x1</option><option value="5">x5</option><option value="20">x20</option><option value="60">x60</option></select>
+    </label>
+    <button id="pause">Pause</button>
+    <label>Go to t (s) <input id="goto-t" type="number" min="0" value="20" style="width:5em"></label>
+    <button id="goto">Go</button>
+    <button id="dump">Dump frame</button>
+  </div>
+  <div id="time"></div>
+  <div id="hash"></div>
+  <script>
+    // Startup size log (target < 5 MB uncompressed). transferSize is 0 for same-origin without
+    // Timing-Allow-Origin on some browsers, hence both numbers.
+    window.addEventListener("load", () => setTimeout(() => {
+      const r = performance.getEntriesByType("resource").find(e => e.name.endsWith(".wasm"));
+      if (r) console.log(`wasm size: ${(r.decodedBodySize / 1048576).toFixed(2)} MB decoded, ${(r.encodedBodySize / 1048576).toFixed(2)} MB on the wire`);
+    }, 500));
+  </script>
+</body>
+</html>

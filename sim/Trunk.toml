@@ -1,0 +1,17 @@
+[build]
+dist = "dist"
+
+[serve]
+# Loopback: enough for VS Code port forwarding. Devcontainer CLI `-p 127.0.0.1:8080:8080` needs
+# `trunk serve --address 0.0.0.0` on the command line.
+addresses = ["127.0.0.1"]
+port = 8080
+open = false
+
+# Dev-only bridge (sim-bridge, loopback). The browser only talks to this server's port.
+[[proxy]]
+backend = "ws://127.0.0.1:8081/ws"
+ws = true
+
+[[proxy]]
+backend = "http://127.0.0.1:8081/local"

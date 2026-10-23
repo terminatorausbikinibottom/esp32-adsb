@@ -1,0 +1,115 @@
+[package]
+edition      = "2024"
+name         = "firmware"
+rust-version = "1.95"
+version      = "0.1.0"
+license      = "GPL-3.0-or-later"
+
+[[bin]]
+name = "firmware"
+path = "./src/bin/main.rs"
+
+[features]
+# Old step 1.5 SRAM bounce-buffer scanout (does not work, see docs/design/adsb-display.md). Off by default;
+# the exp-*, diag-norefill and pclk-16mhz features only apply to it.
+bounce = []
+# Extra log line before the scanout starts; changes timing and code layout only. Build with and
+# without it to check the image position does not depend on the build (see vendor/esp-hal/VENDORED.md).
+diag-shift = []
+# `no-resync` drops the per-frame DMA restart (1.3 behaviour; with `bounce`: keeps only the counter fix),
+# step 1.5 diagnostics (see docs/design/adsb-display.md): `diag-norefill` stops the refills (both buffers keep rows 0..19), `diag-ruler` paints the ruler.
+no-resync     = []
+# Continuous scanout with the per-VBLANK DMA restart of 699b035 (ring, 17 px skip); default is the stopped-panel restart.
+restart-vsync = []
+diag-norefill = []
+diag-ruler    = []
+# 16 MHz pixel clock (~55 % core-1 load) instead of 10 MHz.
+pclk-16mhz = []
+# Step 1.5 fix-loop 2 matrix (see docs/design/adsb-display.md). Default build = IDF-parity LCD/DMA config
+# (`lcd_always_out_en` set, internal-SRAM burst on). Each flag changes one thing back / to a test ring:
+exp-no-always-out = []  # e1: leave lcd_always_out_en clear (as esp-hal/1.5 before)
+exp-no-burst      = []  # e2: internal burst off (esp-hal default, as 1.5 before)
+exp-solid         = []  # e3: two SRAM buffers, buffer 0 solid red, buffer 1 solid blue, once, no refill, no interrupts, no core 1
+exp-solid-noeof   = []  # e4: with exp-solid, no suc_eof on any descriptor
+
+[dependencies]
+esp-hal = { version = "~1.2.2", features = ["esp32s3", "log-04", "unstable"] }
+# Same PAC esp-hal uses; the GDMA out-EOF and LCD VSYNC interrupt registers are not exposed by esp-hal.
+esp32s3 = "0.36"
+
+esp-rtos = { version = "0.4.0", features = [
+  "embassy",
+  "esp-alloc",
+  "esp-radio",
+  "esp32s3",
+  "log-04",
+] }
+
+esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3", "log-04"] }
+log                    = "0.4.27"
+
+embassy-net = { version = "0.9.1", features = [
+  "dhcpv4",
+  "log",
+  "medium-ethernet",
+  "tcp",
+  "udp",
+] }
+embedded-io = "0.7.1"
+embedded-io-async = "0.7.0"
+esp-alloc = { version = "0.11.0", features = ["esp32s3"] }
+esp-backtrace = { version = "0.20.0", features = [
+  "esp32s3",
+  "panic-handler",
+  "println",
+] }
+esp-println = { version = "0.18.0", features = ["esp32s3", "log-04"] }
+# for more networking protocol support see https://crates.io/crates/edge-net
+embassy-executor = { version = "0.10.0", features = ["log"] }
+embassy-time = { version = "0.5.0", features = ["log"] }
+esp-radio = { version = "1.0.0-beta.1", features = [
+  "esp-alloc",
+  "esp32s3",
+  "log-04",
+  "unstable",
+  "wifi",
+] }
+smoltcp = { version = "0.14.0", default-features = false, features = [
+  "log",
+  "medium-ethernet",
+  "multicast",
+  "proto-dhcpv4",
+  "proto-dns",
+  "proto-ipv4",
+  "socket-dns",
+  "socket-icmp",
+  "socket-raw",
+  "socket-tcp",
+  "socket-udp",
+] }
+
+adsb-core        = { path = "../adsb-core" }
+adsb-app         = { path = "../adsb-app", default-features = false, features = ["single-threaded"] }
+modes             = { path = "../modes" }
+critical-section = "1.2.0"
+static_cell      = "2.1.1"
+
+
+# Patched esp-hal (Dpi::send ordering), see vendor/esp-hal/VENDORED.md. Drop once fixed upstream.
+# The per-frame restart in src/restart.rs resets before every start, so stock esp-hal may suffice:
+# to try it, comment out the two lines below and rebuild (Cargo.lock switches to the registry source
+# by itself); to go back, uncomment them.
+[patch.crates-io]
+esp-hal = { path = "vendor/esp-hal" }
+
+# For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html
+[profile.dev]
+# The default debug profile is too slow and too big for resource-constrained devices.
+# Always build with some optimizations enabled.
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1     # LLVM can perform better optimizations using a single thread
+debug         = 2     # prefer slower builds but better debugging experience
+lto           = 'fat'
+opt-level     = 's'

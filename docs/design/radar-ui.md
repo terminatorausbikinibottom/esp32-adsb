@@ -798,3 +798,29 @@ app partition size.
 - 2026-10-23, **orchestrator decision:** RD.3 (WiFi, feed) starts while RD.2's display gate waits on
   the user. The networking code does not depend on the K4 fix; RD.3's drift check is recorded as
   pending K4.
+
+- 2026-10-23, **RD.3 done, drift check: no persistent drift; K4 glitches seen** (base 1173e4e + the RD.3
+  commit, live build against the real feed, `diag-border` build for the drift run). Code:
+  `firmware/src/net.rs` (`wifi_task`, `net_task`, `link_task`, `feed_task`), focus log and
+  `diag-border` in `ui.rs`. WiFi is WPA2, backoff 1 s to 30 s; DHCP; feed socket rx 8 KB (PSRAM), connect
+  timeout 10 s, idle timeout 60 s, backoff 1 s to 30 s, `reset_clock` on connect. In demo builds
+  with `ADSB_DEMO` set the network tasks are not started (demo feed instead). A feed host that is not
+  an IPv4 literal logs one warning and parks the task (DNS is RD.8).
+  - Markers (`bench flash --until`): `wifi: connected ip=...`, `feed: connected`, `feed: frames/s=18`
+    (first line, 10 s window) all matched in boot 2. Device log has no SSID, key, feed host or lat/lon
+    (count-only grep of the 590 s session log: 0 for each).
+  - Numbers, 590 s run: `feed: frames/s` 0-53 (this receiver sees little traffic, 3-4 aircraft at best),
+    `crc_fail=0`, `reconnects=0`, no WARN lines, no panic. Aircraft count 1-4 (13x 2, 31x 3, 13x 4, 1x 1):
+    3-128 is met in 44 of 58 lines, below 3 when the sky was quiet (traffic, not a fault; focus
+    distance 26-54 km, under 450 km).
+  - **Gate K1 pass:** `internal_free` 27404-29752 B (min 27404) with WiFi connected, feed and UI running,
+    10 min. WiFi association did not move it (29892 B before, 29108 B after).
+  - Drift check (6 photos at 0, 2, 4, 6, 8, 10 min): the white border is complete on all four edges and
+    at the same camera position in every unglitched photo; 4 of 6 photos show a K4 glitch (rows shifted
+    sideways, border cut inside the frame), no persistent shift or border loss. `restart: frames/s`:
+    538x 39, 50x 40, 1x 41, 1x 48 (first second after boot). Verdict: no drift; K4 is
+    more visible with live data: the radar redraws 450-480 rows (partial_ms 44-48) almost every second
+    because blips move, versus 5-21 ms in the demo card UI. More K4 evidence for the user's decision
+    (M2/M3/M4); not touched here.
+  - Not verified unattended: AP power cycle and fr24feed stop/start (reconnect paths are untested on
+    the board), flightradar24 cross-check.

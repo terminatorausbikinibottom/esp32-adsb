@@ -34,6 +34,8 @@ exp-solid-noeof   = []  # e4: with exp-solid, no suc_eof on any descriptor
 
 # Replace the boot-time test pattern by the UI's black frame (default) with the old bars/ruler.
 diag-pattern = []
+# 1-px white border over the UI after each render (drift check, RD.3).
+diag-border = []
 # Feeds the fictitious `ADSB_DEMO` scenario (adsb-core `scenario`) into the pipeline. Needed when ADSB_DEMO is set.
 demo = ["adsb-core/scenario"]
 

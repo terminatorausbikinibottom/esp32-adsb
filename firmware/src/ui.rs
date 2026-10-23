@@ -1,7 +1,7 @@
 //! Platform glue for the shared Slint UI (`adsb-app`): renders into the PSRAM framebuffer, runs the
 //! 1 Hz `ui_task` and (feature `demo`) the scenario `feed_task`. Everything here runs on core 0.
 
-use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use core::time::Duration;
 
 use adsb_app::{App, HEIGHT, Rgb565Pixel, Status, WIDTH};
@@ -20,11 +20,13 @@ pub type Pipeline = Mutex<CriticalSectionRawMutex, FeedPipeline>;
 
 /// Set by the feed task; the demo feed also publishes the scenario clock (the UI must snapshot at
 /// the time the scenario was last polled to, see `Scenario::poll`).
-static FEED_OK: AtomicBool = AtomicBool::new(false);
+pub static FEED_OK: AtomicBool = AtomicBool::new(false);
+/// Aircraft in the last snapshot, for the feed statistics line.
+pub static AIRCRAFT: AtomicU32 = AtomicU32::new(0);
 #[cfg(feature = "demo")]
 static DEMO_NOW_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0); // ms; 49 days of range
 
-const DEMO: bool = cfg!(feature = "demo") && config::DEMO.is_some();
+pub const DEMO: bool = cfg!(feature = "demo") && config::DEMO.is_some();
 
 fn radius_km() -> f64 {
     #[cfg(feature = "demo")]
@@ -58,7 +60,7 @@ pub fn new_pipeline() -> FeedPipeline {
 fn status() -> Status {
     Status {
         now_ms: now_ms(),
-        wifi_ok: DEMO, // RD.3 replaces this with the WiFi task's state
+        wifi_ok: DEMO || crate::net::WIFI_OK.load(Relaxed),
         feed_ok: FEED_OK.load(Relaxed),
         radius_km: radius_km(),
     }
@@ -70,6 +72,7 @@ pub struct FbUi {
     fb: *mut u16,
     line: &'static mut [Rgb565Pixel; WIDTH],
     full_ms: Option<u64>,
+    ticks: u32,
 }
 
 impl FbUi {
@@ -84,6 +87,7 @@ impl FbUi {
             fb,
             line: LINE.take(),
             full_ms: None,
+            ticks: 0,
         }
     }
 
@@ -91,6 +95,20 @@ impl FbUi {
     /// Returns whether anything was drawn.
     pub fn update(&mut self, snap: &Snapshot, st: &Status) -> bool {
         let kind = self.app.ui().kind;
+        AIRCRAFT.store(snap.list.len() as u32, Relaxed);
+        // Callsign, distance and bearing only (no coordinates, see Privacy).
+        if self.ticks.is_multiple_of(30) {
+            let focus = snap.focus.and_then(|i| snap.list.get(i));
+            match focus.and_then(|a| Some((a.callsign.as_ref()?, a.position.as_ref()?))) {
+                Some((cs, p)) => info!(
+                    "ui: focus callsign={cs} dist_km={} bearing={}",
+                    (p.ground_m / 1000.0) as u32,
+                    p.bearing_deg as u32
+                ),
+                None => info!("ui: focus none"),
+            }
+        }
+        self.ticks = self.ticks.wrapping_add(1);
         self.app.update(snap, st, None);
         if self.full_ms.is_none() || kind != self.app.ui().kind {
             info!("ui: card={:?}", self.app.ui().kind);
@@ -108,6 +126,8 @@ impl FbUi {
             y1 = y1.max(y);
         });
         if drawn {
+            #[cfg(feature = "diag-border")]
+            draw_border(fb, y0, y1);
             // SAFETY: `fb` is the framebuffer (see `new`).
             unsafe { display::writeback_rows(self.fb, y0, y1 + 1) };
             let ms = t0.elapsed().as_millis();
@@ -121,6 +141,18 @@ impl FbUi {
             );
         }
         drawn
+    }
+}
+
+/// Drift check: 1-px white frame, redrawn on the rows just rendered (the rest is untouched).
+#[cfg(feature = "diag-border")]
+fn draw_border(fb: &mut [u16], y0: usize, y1: usize) {
+    for y in y0..=y1 {
+        let row = &mut fb[y * WIDTH..(y + 1) * WIDTH];
+        if y == 0 || y == HEIGHT - 1 {
+            row.fill(0xFFFF);
+        }
+        (row[0], row[WIDTH - 1]) = (0xFFFF, 0xFFFF);
     }
 }
 

@@ -159,10 +159,9 @@ async fn main(spawner: Spawner) -> ! {
     info!("Embassy initialized!");
     log_heap("rtos started");
 
-    let _wifi_controller =
+    let wifi_controller =
         esp_radio::wifi::WifiController::new(peripherals.WIFI, Default::default())
             .expect("Failed to initialize Wi-Fi controller");
-    let _wifi_interface = esp_radio::wifi::Interface::station();
     log_heap("wifi init");
 
     // Async I2C0; touch_task will take over the bus (and the expander) in step 1.6.
@@ -408,7 +407,13 @@ async fn main(spawner: Spawner) -> ! {
 
         spawner.spawn(ui::ui_task(ui, pipeline).expect("ui_task"));
         #[cfg(feature = "demo")]
-        spawner.spawn(ui::feed_task(pipeline).expect("feed_task"));
+        if ui::DEMO {
+            spawner.spawn(ui::feed_task(pipeline).expect("feed_task"));
+        } else {
+            firmware::net::start(spawner, wifi_controller, pipeline);
+        }
+        #[cfg(not(feature = "demo"))]
+        firmware::net::start(spawner, wifi_controller, pipeline);
 
         let mut n = 0u32;
         let mut last = Instant::now();

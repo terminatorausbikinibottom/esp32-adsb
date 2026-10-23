@@ -36,6 +36,10 @@ pub fn decode(jpeg: &[u8]) -> Result<Photo, PhotoError> {
     if dec.output_buffer_size() != Some(w * h * 3) {
         return Err(PhotoError::Decode); // not 3 channels (e.g. grayscale or CMYK)
     }
+    let (cw, ch) = crop_size(w, h);
+    if cw < 2 || ch < 2 {
+        return Err(PhotoError::Decode); // degenerate (e.g. 1 px wide): nothing to interpolate
+    }
     let mut src = vec![0u8; w * h * 3];
     dec.decode_into(&mut src).map_err(|_| PhotoError::Decode)?;
     Ok(Photo {
@@ -45,13 +49,18 @@ pub fn decode(jpeg: &[u8]) -> Result<Photo, PhotoError> {
     })
 }
 
-/// Centre crop to 3:2, then bilinear resample (sample positions in 1/256 px, integer maths).
-fn scale(src: &[u8], w: usize, h: usize) -> Vec<u8> {
-    let (cw, ch) = if w * HEIGHT > h * WIDTH {
+/// Size of the centre crop with the panel's 3:2 aspect. `scale` needs both sides >= 2.
+fn crop_size(w: usize, h: usize) -> (usize, usize) {
+    if w * HEIGHT > h * WIDTH {
         (h * WIDTH / HEIGHT, h) // too wide: crop the sides
     } else {
         (w, w * HEIGHT / WIDTH) // too tall: crop top and bottom
-    };
+    }
+}
+
+/// Centre crop to 3:2, then bilinear resample (sample positions in 1/256 px, integer maths).
+fn scale(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let (cw, ch) = crop_size(w, h);
     let (x0, y0) = ((w - cw) / 2, (h - ch) / 2);
     let pos = |o: usize, n: usize, len: usize| -> (usize, usize, i64) {
         // Source coordinate of the centre of output pixel `o`, in 1/256 px.
@@ -156,6 +165,37 @@ mod tests {
             t.elapsed(),
             p.rgb.iter().map(|&v| v as u64).sum::<u64>() / p.rgb.len() as u64
         );
+    }
+
+    #[test]
+    fn tiny_images_do_not_panic() {
+        // Sizes whose 3:2 crop is empty or 1 px are refused; the rest scale without a panic.
+        for (w, h) in [
+            (1, 1),
+            (1, 2),
+            (1, 3),
+            (1, 4000),
+            (4000, 1),
+            (3, 1),
+            (2, 1),
+            (2, 2),
+            (2, 3),
+            (3, 2),
+            (3, 3),
+            (4, 2),
+            (1, 100),
+            (100, 1),
+        ] {
+            for progressive in [false, true] {
+                let r = decode(&encode(w, h, progressive));
+                let (cw, ch) = crop_size(w, h);
+                if cw < 2 || ch < 2 {
+                    assert_eq!(r, Err(PhotoError::Decode), "{w}x{h}");
+                } else {
+                    assert_eq!(r.unwrap().rgb.len(), WIDTH * HEIGHT * 3, "{w}x{h}");
+                }
+            }
+        }
     }
 
     #[test]

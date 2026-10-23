@@ -43,16 +43,19 @@ shared workspace:
 ```sh
 # host, once
 brew install espflash        # or: cargo binstall espflash
-# host, per flash
+# host, per flash (use your usbmodem port; the suffix depends on the USB port, e.g. usbmodem101 or usbmodem11401)
 espflash flash --monitor --port /dev/cu.usbmodem101 \
   firmware/target/xtensa-esp32s3-none-elf/release/firmware
 ```
+
+If the bench service below is running, stop it first (Ctrl-C): only one process can hold the
+serial port.
 
 The Waveshare ESP32-S3-Touch-LCD-7 enumerates as two serial ports:
 
 | Connector | macOS device | What it is |
 | --- | --- | --- |
-| USB | `/dev/cu.usbmodem101` (VID 303A) | native USB-Serial-JTAG — **use this one** |
+| USB | `/dev/cu.usbmodem<N>` (VID 303A; the number depends on the USB port) | native USB-Serial-JTAG — **use this one** |
 | UART | `/dev/tty.usbmodem<serial>` | USB-UART bridge to UART0 |
 
 `esp-println` is in `auto` mode: while a host is attached to the native USB port, all log
@@ -61,6 +64,86 @@ into the app. Unplug the USB cable if you want logs on the UART port instead.
 
 On a Linux host you can pass the device instead, e.g. add
 `"--device=/dev/ttyUSB0"` (or `/dev/ttyACM0`) to `runArgs`, and `cargo run` works inside the container.
+
+### Bench service (automated)
+
+Lets the agent in the container flash the board, read the serial log and photograph the panel
+without a human (skill `.claude/skills/board-verify`). A small service runs on the Mac; the
+container talks to it at `http://host.containers.internal:7777`.
+
+Host prerequisites (once):
+
+```sh
+brew install uv ffmpeg       # plus espflash, see above
+```
+
+Start it from the repo root in a macOS Terminal tab (leave it running):
+
+```sh
+uv run tools/bench/bench_host.py
+# fallback without uv (python >= 3.11): python3 tools/bench/bench_host.py
+```
+
+- **Camera permission:** macOS asks to let the terminal app use the camera on the first snapshot;
+  allow it (the grant belongs to Terminal/iTerm, which is why it is not a launchd agent).
+- **Camera by name only.** Default `"HD Pro Webcam C920"`; set another with `--camera "<name>"` or
+  `BENCH_CAMERA`. Numeric indices are refused, because they shift when an iPhone (Continuity)
+  camera appears. List the names, and quote the one you pick exactly as printed:
+  `ffmpeg -f avfoundation -list_devices true -i "" 2>&1 | command grep -A10 'video devices'`
+  (`command grep` because `grep` may be aliased to `rg`). The service refuses to start if the
+  name is missing, and always refuses `Capture screen N` devices. The camera can only be set on
+  the host.
+- **Serial port:** auto-detected (the single `/dev/cu.usbmodem*`; zero or several is an error
+  listing them). Override with `--port /dev/cu.usbmodem<N>`.
+- **One holder for the serial port.** After a flash the service keeps the port open (monitor)
+  until the next flash/reset or until you stop it. Stop the service before running `espflash`
+  by hand.
+- **Terminal recovery (just in case):** if the service's terminal ever shows staircase output and
+  ignores Ctrl-C, run `pkill -f bench_host.py` from another tab, then `reset` in the broken one.
+- **uv downloads:** uv may fetch a python >= 3.11 on first use if none is installed; set
+  `UV_PYTHON_DOWNLOADS=never` (host or container) to forbid it. The tools then use an installed
+  python or fail with a clear message.
+- **launchd:** not recommended yet (Camera permission / TCC is unreliable without a terminal app).
+- Other options: `uv run tools/bench/bench_host.py --help` (`--video-size`, `--framerate`,
+  `--warmup`, `--listen`, ...). A 503 from a snapshot includes ffmpeg's stderr, which lists the
+  camera's supported modes.
+
+Security: the service binds to `127.0.0.1` only (non-loopback `--listen` is refused) and needs a
+bearer token that it regenerates on every start into `.bench/token` (mode 0600, gitignored,
+shared with the container through the bind mount). Whoever can read that file (anything running
+as you on the Mac, or any container that mounts this repo) can flash ELFs from `firmware/target/`
+and take camera photos. Stop the service when you are not using it. Snapshots and logs may show
+live traffic or your room: they stay in `.bench/`; don't commit or share them.
+
+Use from the container (uv comes with the devcontainer; until it is rebuilt, prefix with
+`python3`):
+
+```sh
+tools/bench/bench health
+tools/bench/bench flash firmware/target/xtensa-esp32s3-none-elf/release/firmware --until 'alive 0s' --timeout 60
+tools/bench/bench log --session --follow --timeout 10
+tools/bench/bench reset --until 'ch422g: backlight on'   # re-flashes the last image
+tools/bench/bench snap --delay 1                         # prints .bench/snaps/<time>.jpg
+```
+
+Build first with `cd firmware && cargo build --release` (ELF at
+`firmware/target/xtensa-esp32s3-none-elf/release/firmware`). If `tools/bench/bench` fails with
+`env: 'uv': No such file or directory` (exit 127), the container has no uv yet: use
+`python3 tools/bench/bench ...`. `snap` and `health` exit 0 or 4 (any failure, message on stderr).
+
+Exit codes of `flash`/`reset`/`log`: 0 `--until` matched, 1 `--fail-on` matched or boot loop,
+2 timeout, 3 monitor died, 4 transport/argument error, 5 flash failed. The chip boots twice after
+a flash; this is normal.
+
+Tests (from the repo root, in the container):
+
+```sh
+uv run --python 3.11 python -m unittest discover -s tools/bench/tests -t tools/bench
+python3 -m unittest discover -s tools/bench/tests -t tools/bench   # no uv needed
+```
+
+The uv feature (`.devcontainer/features/uv`) needs a devcontainer rebuild; before that,
+`uv` is missing in the container and only the `python3` forms work.
 
 ## Simulator
 

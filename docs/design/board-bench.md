@@ -1344,3 +1344,14 @@ time-based warm-up (only relevant if the snapshot rate changes).
 - 2026-10-23 (fix loop 3 QA, orchestrator note): QA PASS for names-only camera selection. The code
   refuses `str.isnumeric()` values (a superset of `isdigit()`; also refuses e.g. `½`, `²`) — accepted.
   `--camera` help text updated to "exact avfoundation video device name (indices are refused)".
+- 2026-10-23 (step 7, orchestrator note): skill dry-run by a fresh agent given only SKILL.md on the
+  real board → PASS (flash → `alive 0s` in boot 2 → snapshot judged correctly). Its 12 feedback
+  points were applied to the skill (real uv-missing error/exit 127, build command
+  `cd firmware && cargo build --release`, always rebuild + record dirty state and ELF mtime,
+  expectation and exit codes in the report, timeout scopes and Bash timeout ≥ 400 s, snapshot
+  INCONCLUSIVE/retake rule, strict PASS bar, snap/health exit codes, explicit permission to delete a
+  wrong-camera photo). Design's `lcd: scanout started` marker: the firmware logs either
+  `lcd: scanout started …` (default) or `lcd: bounce scanout started …` (bounce feature), so the skill
+  names the common substring `scanout started`. B4 allow-list added to the git-excluded
+  `.claude/settings.local.json`: `Bash(tools/bench/bench:*)` and `Bash(python3 tools/bench/bench:*)`
+  (the python3 form until the container has uv).

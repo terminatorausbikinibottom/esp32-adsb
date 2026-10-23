@@ -1,8 +1,11 @@
 # Board bench: automated flash, serial log and webcam check from the container
 
 Status: **approved; step 1 (spike) done, revised with its results; rev 3: tools run via uv;
-rev 4: step-6 acceptance run 1 findings (snapshot framerate, controlling-terminal defect); step 6
-in fix loop 1 of 2, acceptance run 2 pending.**
+rev 4: step-6 acceptance run 1 findings (snapshot framerate, controlling-terminal defect); ~~step 6
+in fix loop 1 of 2, acceptance run 2 pending.~~ rev 5: step-6 acceptance run 2 results (all
+checks pass except camera selection: index `1` captured the wrong camera); step 6 in fix loop 2
+of 2 (camera by name), short acceptance run 3 pending; step 8 (`/stream.mjpg`) now in scope
+for a demo, with its own 640x480 @ 30 capture settings (pending user confirmation).**
 Date: 2026-10-23.
 Branch: `feature/adsb-display`.
 
@@ -20,7 +23,7 @@ Conventions (same as [adsb-display.md](adsb-display.md) and
 
 | # | Decision | Options | Recommendation | Blocks |
 |---|----------|---------|----------------|--------|
-| B1 | **Which camera?** | (a) UVC USB webcam on a fixed mount. (b) Mac built-in camera. | **(a)**. A built-in camera means the laptop lid is the camera mount and blocks video calls while the bench runs. The design handles both: the avfoundation device is a host-side setting (`--camera`, name or index). | Step 1 (device name), step 6 |
+| B1 | **Which camera?** | (a) UVC USB webcam on a fixed mount. (b) Mac built-in camera. | **(a)**. A built-in camera means the laptop lid is the camera mount and blocks video calls while the bench runs. The design handles both: the avfoundation device is a host-side setting (`--camera`, name or index). *Rev 5:* decided (a) = **"HD Pro Webcam C920"** (Logitech). ~~Device index `1`~~ was the C920 at spike time, but avfoundation indices are **not stable** (Continuity iPhone cameras come and go; acceptance run 2 captured a room camera with index `1`), so the default and the recommended setting is the **device name** (R17). | Step 1 (device name), step 6 |
 | B2 | **How is the host service started?** | (a) Manually in a macOS Terminal tab (`python3 tools/bench/bench_host.py ...`; since rev 3 `uv run tools/bench/bench_host.py ...`). (b) launchd user agent (`~/Library/LaunchAgents/*.plist`). | **(a) for now.** Camera permission (TCC) is granted to the app that launches ffmpeg (Terminal/iTerm). Under launchd there is no such app and the grant is unreliable [VERIFY]. (b) is documented as a later option. | Step 7 |
 | B3 | **Firmware boot test pattern** (corner markers, colour bars behind a feature flag) in this feature? | (a) Yes. (b) Later, as a firmware step in adsb-display. | **(b).** This feature is host tooling. The existing log lines (`ch422g: backlight on`, `alive 0s`) are good enough boot markers. Revisit once step 6 shows whether photos of the real UI are good enough to judge. | — |
 | B4 | **Claude Code allow-list entry for `tools/bench/bench`?** | (a) Add `Bash(tools/bench/bench:*)` to `.claude/settings.local.json`. (b) Leave as is, so each call is prompted. | Your call. This design doesn't change permission settings. (a) is what makes the loop actually unattended. | Step 7 |
@@ -154,9 +157,41 @@ where its cache and managed pythons live.
      `-video_size 1280x720` is passed (it worked). Default warm-up is **20 frames**
      (~2 s at ~10 fps). The single frame goes to stdout via `-f image2pipe -c:v mjpeg pipe:1` (no
      `-update 1` temp file needed). ffmpeg's stderr is always logged on the host, because
-     unsupported settings fall back silently. A `GET /stream.mjpg` for a human in
-     a browser on the Mac is an **optional last step** (step 8), with one ffmpeg per connected
-     client. The human can also just open Photo Booth or `ffplay`.
+     unsupported settings fall back silently. *Rev 5 (acceptance run 2):* with `-framerate 30`
+     the C920 still logs "Configuration of video device failed, falling back to default" and
+     really runs at **~10 fps**, but it captures (the 29.97 fps hard failure is gone); pixel
+     format `uyvy422` is auto-selected ("Selected pixel format (yuv420p) is not supported" is a
+     benign override); `image2pipe` works (30 KiB JPEG, ffmpeg elapsed 1.91 s). So the 20-frame
+     warm-up (~2 s) stays. **Frame rate (rev 5, user request):** the user wants a real
+     camera frame rate (snapshots and the step-8 stream). ~~Hypothesis: the default `yuv420p`
+     request fails the device configuration, which triggers the fallback to ~10 fps. New
+     optional host setting `--pixel-format`/`BENCH_PIXEL_FORMAT`, passed as `-pixel_format <fmt>`
+     before `-i` for snapshot **and** stream; default **TBD by the Mac experiment (candidate
+     `uyvy422`)**; empty omits it. If the device then really runs at 30 fps, the warm-up is
+     re-tuned or made time-based (R12, step 8a).~~ **Disproven by the Mac experiment** (C920,
+     ffmpeg 9.0.2, `-t 5 -f null -`): 1280x720 @ 30 with `-pixel_format` `uyvy422`, `nv12` or
+     `yuyv422` → still "configuration failed", 10 fps; 1280x720 @ 15 → failed, 10 fps;
+     1920x1080 @ 30 → failed, 4.9 fps; **640x480 @ 30 → no failure, 145 frames in 5 s
+     (fps=31)**. Interpretation: avfoundation receives uncompressed YUV from the C920 over
+     USB 2.0, so the rate is bandwidth-capped by resolution (720p ~10 fps, 1080p ~5 fps; 480p
+     fits 30 fps); the pixel format is irrelevant and **no `--pixel-format` option** is added.
+     Decision (orchestrator, **to be confirmed by the user** at the checkpoint): **snapshots keep
+     1280x720 with `-framerate 30`** (falls back to ~10 fps, sharp, ~2 s with the 20-frame
+     warm-up — unchanged, warm-up unchanged); **the stream gets its own settings**
+     `--stream-size` (default `640x480`) and `--stream-framerate` (default `30`), so the demo is
+     smooth at a real 30 fps. **Camera selection (rev 5):** the camera is chosen **by
+     avfoundation device name**, default `"HD Pro Webcam C920"` (B1), because indices are not
+     stable (R17). At startup the host lists the avfoundation video devices
+     (`ffmpeg -f avfoundation -list_devices true -i ""`, stderr parsed, video section only) and
+     **refuses to start** if the configured name is missing, printing the available devices. An
+     all-digit `--camera` is still accepted as an index, with a stderr warning naming the device
+     it currently maps to; an out-of-range index is refused. Any device whose name starts with
+     `Capture screen` is refused, whether selected by name or by index (screen capture is not a
+     camera; Security). A `GET /stream.mjpg` for a human in
+     a browser on the Mac is ~~an **optional last step**~~ (rev 5: **in scope**, user request for a
+     demo that shares the webcam output) step 8, with one ffmpeg per connected
+     client (`-f mpjpeg` pass-through, see step 8). The human can also just open Photo Booth or
+     `ffplay`.
   4. **Container CLI `tools/bench/bench`** (Python stdlib, `urllib`; a uv script since rev 3,
      see 8). Regex matching for
      `--until`/`--fail-on` runs **in the container, on the CLI side**. The host only serves lines by
@@ -233,7 +268,9 @@ where its cache and managed pythons live.
     espflash upgrade that rewords it breaks flash-success detection loudly (timeout/502), not
     silently.
   - **A process in the container can now flash the board and take photos of the room** in front
-    of the camera without a human in the loop. Mitigations: the security section and B4.
+    of the camera without a human in the loop. Mitigations: the security section and B4. *Rev 5:*
+    with a wrong camera index it could also photograph a person or capture the screen (run 2,
+    R17); camera by name, startup check and screen-capture refusal close that.
   - New container prerequisite (rev 3): uv, installed by the new local feature `./features/uv`;
     needs a container rebuild (user action). Until then the tests run with `python3 -m unittest`
     (3.13) and the CLI is called as `python3 tools/bench/bench ...`.
@@ -257,14 +294,24 @@ All requests need `Authorization: Bearer <token>`. The token is compared with
 | `POST /monitor/stop` | Kill the espflash process and release the serial port (for manual use by the user). **409** while the session is still in the `flashing` phase (killing mid-write leaves a half-written image). |
 | `GET /log?since=N&wait=S&max=M` | Lines with `seq > N`, long-polled up to `S` seconds (cap 30). Returns `{session, app_seq, lines:[{seq, t, text}], next, dropped, monitor:{running, phase, exit_code}}`. `phase` = `flashing` (before `Flashing has completed!`), `running` (after it, process alive), `exited`. `dropped=true` if `N` is older than the oldest buffered line. Ring buffer: 20 000 lines. Lines are UTF-8 decoded with `errors="replace"`, with ANSI escapes and trailing `\r` stripped. The host does no other parsing; boot counting and marker matching happen in the CLI. Rev 4: successful (2xx) `/log` long-polls are **not** written to the host's access log (log noise seen in acceptance run 1); non-2xx responses still are. |
 | `GET /snapshot.jpg?warmup=N` | One-shot ffmpeg (timeout 20 s), returns `image/jpeg`. The output is checked for JPEG magic (`FF D8`). **503** if ffmpeg fails (the body has the stderr tail, which is where TCC denials show up). ffmpeg's stderr is also logged on the host for **every** snapshot, because unsupported framerate/size settings fall back to the device default with only a log line (spike 1c), or are rejected outright with the supported modes listed in stderr (rev 4, acceptance run 1: 29.97 fps). The camera lock is separate from the flash lock, so a snapshot can run during a flash. |
-| `GET /stream.mjpg` | Step 8, optional. |
+| `GET /stream.mjpg` | Step 8, ~~optional~~ in scope since rev 5. `Content-Type: multipart/x-mixed-replace; boundary=<b>`; each part `Content-Type: image/jpeg` + `Content-Length`. One ffmpeg per client (`-f mpjpeg -boundary_tag <b>`, bytes passed through; `--stream-size` 640x480, `--stream-framerate` 30), killed (process group) on client disconnect. Auth: bearer **or** `?token=` (this endpoint only); `Origin` header allowed (this endpoint only). At most **2** concurrent stream clients, **409** beyond. Does not take the snapshot camera lock (concurrent device use [VERIFY], step 8). |
 
 Host config (CLI flags of `bench_host.py`, with env var equivalents): `--port` (serial device;
 default: **auto-detect** = the single `/dev/cu.usbmodem*` match; if there are zero or several, it
 errors and lists them. Auto mode is checked at startup (fail fast with the list) **and re-resolved
 on every flash/reset**, because the `usbmodem…` name depends on the USB port/hub — spike 1b saw
 `usbmodem11401`, not the README's `usbmodem101`. A given `--port` is used as is.),
-`--camera` (avfoundation name or index, default `1` per B1), `--video-size` (default `1280x720`),
+`--camera` (env `BENCH_CAMERA`; avfoundation name or index, default ~~`1` per B1~~ **`"HD Pro
+Webcam C920"`** (rev 5, B1/R17); checked against the device list at startup: a missing name →
+refuse to start and print the available video devices; an all-digit value → index, accepted with
+a stderr warning naming the device it maps to now, refused if out of range; `Capture screen…`
+devices refused by name or index), `--video-size` (default `1280x720`; snapshots), rev 5 stream
+settings (step 8): `--stream-size` (env `BENCH_STREAM_SIZE`, default `640x480` — the largest
+tested size the C920 delivers at a real 30 fps via avfoundation), `--stream-framerate` (env
+`BENCH_STREAM_FRAMERATE`, default `30`), `--stream-clients` (max concurrent `/stream.mjpg`
+clients, default `2`); ~~`--pixel-format` (env `BENCH_PIXEL_FORMAT`, `-pixel_format <fmt>`
+before `-i`, default TBD, candidate `uyvy422`)~~ dropped in rev 5 (experiment: pixel format
+doesn't change the rate),
 `--framerate` (env `BENCH_FRAMERATE`; default **`30`**, passed as `-framerate 30` before
 `-video_size`; `0` or empty omits the flag. ~~default: not passed; the webcam ignores 30 and uses
 ~10 fps anyway, spike 1c~~ — rev 4: without it avfoundation asks for 29.97 fps, which the webcam
@@ -330,6 +377,19 @@ Rules:
   can read the token, so they count as trusted.
 - Requests that carry an `Origin` header are rejected, except `GET /stream.mjpg`. That blocks
   browser-based CSRF/DNS-rebinding attempts against the loopback port even before the token check.
+- **`GET /stream.mjpg` exceptions and their cost** (rev 5, step 8 in scope for a demo: a Teams
+  screen share/recording of a browser window on the Mac). Browsers (`<img>`, address bar) and OBS
+  browser/media sources can't send a bearer header, so this endpoint alone accepts `?token=`
+  (still `hmac.compare_digest`), and alone tolerates an `Origin` header so `<img>` embedding in a
+  local page works. Every other endpoint keeps bearer-only and Origin rejection; a test pins
+  both exceptions to this one path. Consequences: the token in the URL **lands in browser
+  history, OBS scene config and any page that embeds it, and is visible on screen** if the address
+  bar is shown during the demo — with that token, anything that can reach the loopback port can
+  also flash the board. Mitigations: loopback only, **no LAN exposure** (unchanged; the demo
+  shares the screen, not the port); the token **rotates on every service start**, so stop/restart
+  the service after a demo and old URLs die; don't show the address bar (open the stream full
+  window or in a kiosk/app window); the host's access log **redacts** the `token` query value.
+  The stream is read-only (camera), and the client cap bounds camera/CPU use.
 - Request bodies are capped at 4 KiB, and unknown JSON keys are rejected. Every subprocess has a
   timeout. Child processes are killed on shutdown (SIGINT/SIGTERM handler, `atexit`).
 - **Children never get the host's terminal** (rev 4, R16). Acceptance run 1 showed espflash's
@@ -342,6 +402,14 @@ Rules:
   keystrokes typed into the service's terminal.
 - The serial port is either the user-given `--port` or the single auto-detected
   `/dev/cu.usbmodem*` glob match; it is never taken from a request.
+- **Camera selection is host-only, and screen capture is refused** (rev 5, R17). The camera is
+  set only by the host's `--camera`/`BENCH_CAMERA` at startup, **never per request** (no query or
+  body parameter selects a device). avfoundation also exposes the Mac's screens as video devices
+  (`Capture screen 0`, `Capture screen 1` on the bench Mac), and a wrong index can point at a
+  person/room camera or a screen; so the host resolves the configured value against the startup
+  device list, prefers names, warns on indices, and refuses any `Capture screen…` device by name
+  or index. Acceptance run 2 showed the risk is real: the default index `1` photographed the room
+  (the image was deleted immediately and not described).
 - **uv may fetch a python interpreter from the network** (rev 3). `uv run` / `uv run --script`
   downloads a managed CPython (python-build-standalone, from GitHub) on first use **if no
   installed interpreter satisfies `>=3.11`**. On the bench Mac (3.15.0) and in the container
@@ -371,7 +439,8 @@ tools/bench/
   tests/               # plain unittest; fakes are plain python, not uv scripts
     fake_espflash.py   # S3 imitation: flash progress, "Flashing has completed!", double boot,
                        # periodic alive lines; failure modes; driven by env vars (see step 3)
-    fake_ffmpeg.py     # writes a tiny valid JPEG, or fails like a TCC denial
+    fake_ffmpeg.py     # writes a tiny valid JPEG, or fails like a TCC denial; rev 5: canned
+                       # -list_devices stderr (step 4), N mpjpeg parts for the stream (step 8)
     test_host_core.py  # path validation, argv builders, ring buffer, ANSI strip
     test_host_http.py  # server on an ephemeral 127.0.0.1 port with the fakes
     test_cli.py        # CLI against the in-container server (end to end, no hardware)
@@ -424,7 +493,8 @@ Each step is one commit, and its verification runs green before the next starts.
    - *Verify:* all three outcomes recorded in the revision log. Fallback decisions, if any, made
      with the user before step 2.
    - **Outcome (2026-10-23): step 1 DONE.** (The commands above are kept as run; on the bench Mac
-     the port was `/dev/cu.usbmodem11401`, and the camera was device `1`.)
+     the port was `/dev/cu.usbmodem11401`, and the camera was device `1` — rev 5: at that time;
+     the index is not stable, the device is "HD Pro Webcam C920", see R17.)
      - 1a **T1 confirmed**: `host.containers.internal` → `192.168.127.254`, curl 200; host logged
        the client as `127.0.0.1`.
      - 1b **S1 rejected, S3 confirmed**: espflash 4.6.0; separate monitor lost ~6 s of boot; single
@@ -581,6 +651,20 @@ Each step is one commit, and its verification runs green before the next starts.
      `-video_size`; `--framerate 0` / `BENCH_FRAMERATE=0` or empty omits it. Whether the device
      then really runs at 30 fps or still falls back to ~10 fps (spike 1c warning) is recorded in
      acceptance run 2; the warm-up default stays 20 frames until then.
+   - **Rev 5 (acceptance run 2):** `-framerate 30` falls back to ~10 fps but captures; the
+     warm-up default stays **20 frames** (snapshot 1.91 s inside ffmpeg). The `image2pipe` form
+     is confirmed (the `-update 1` fallback is not needed). The `-i "1:none"` above becomes
+     `-i "<camera>:none"` with the camera **name** by default (`"HD Pro Webcam C920:none"`); this
+     is still a single argv element, so names with spaces or non-ASCII characters need no quoting.
+     Startup device check (fix loop 2, implemented in parallel): a pure parser for the stderr of
+     `ffmpeg -f avfoundation -list_devices true -i ""` (video section only, `[index] name`
+     entries) and a pure `resolve_camera(configured, devices)` → device or an error listing the
+     devices; name missing → error; all-digit → index, warning with the mapped name; out of
+     range → error; `Capture screen…` → error by name or index. *Verify additions (container):*
+     parser tests on the run-2 device list (incl. the iPhone names with `„“` and `’`, the audio
+     section ignored); resolve tests for each rule; the host refuses to start with a bogus name
+     and prints the list (fake ffmpeg emits a canned `-list_devices` stderr); no request
+     parameter can change the camera.
    - *Verify (container), with `--ffmpeg tests/fake_ffmpeg.py`:* 200 + `image/jpeg` + bytes start
      with `FF D8`; fake failure → 503 with the stderr tail; timeout → 503 and the fake is killed;
      the argv builder test checks the camera/warm-up values and that ~~`-framerate` is absent by
@@ -609,8 +693,9 @@ Each step is one commit, and its verification runs green before the next starts.
 
 6. **[manual] Acceptance on the real bench.** The user installs uv (`brew install uv`; rev 3) and
    starts `uv run tools/bench/bench_host.py --camera "<B1 device>"` from the repo root in a Mac
-   Terminal (was `python3 tools/bench/bench_host.py ...` before rev 3) (B1: device `1`
-   is the default; no `--port` needed if exactly one `/dev/cu.usbmodem*` is present), then the
+   Terminal (was `python3 tools/bench/bench_host.py ...` before rev 3) (B1: ~~device `1`
+   is the default~~ rev 5: `"HD Pro Webcam C920"` is the default, so `--camera` is only needed
+   for a different camera; no `--port` needed if exactly one `/dev/cu.usbmodem*` is present), then the
    agent (or user) runs in the container:
    - `tools/bench/bench health` → exit 0, and `serial.chosen` is the board's port
      (`/dev/cu.usbmodem11401` on the spike's USB port); record `python_version` (which
@@ -660,13 +745,53 @@ Each step is one commit, and its verification runs green before the next starts.
        Security).
      - Log noise: successful `GET /log` long-polls are no longer access-logged (API table).
      - Not yet run: bad-path rejection, stop-service → exit 4, camera tuning, flash→marker timing.
-   - **Acceptance run 2 (pending, after the fixes land):** re-run **everything** above, including
+   - **Acceptance run 2 ~~(pending, after the fixes land)~~ (2026-10-23): pass except camera
+     selection; fix loop 2 of 2.** Planned scope (kept): re-run **everything** above, including
      `bench snap`, plus: snapshot timing; `image2pipe` form (step 4 [VERIFY]); Camera permission
      under `uv run` (rev 3 [VERIFY]); ffmpeg stderr visible in the host log (incl. whether
      `-framerate 30` is honoured or falls back to ~10 fps); espflash's monitor still runs and
      streams the log without a controlling tty, and the host terminal stays cooked and Ctrl-C
      stops the service cleanly with no orphaned espflash/ffmpeg (R16 [VERIFY]). If run 2 fails,
-     that is fix loop 2 of 2.
+     that is fix loop 2 of 2. Results (host `uv run tools/bench/bench_host.py`, python 3.12.12,
+     espflash 4.6.0, ffmpeg 9.0.2):
+     - `bench health` → exit 0.
+     - `bench flash firmware/target/xtensa-esp32s3-none-elf/release/firmware` (default
+       `--until 'alive 0s'`) → exit 0 in **3.92 s** wall (flash→marker); double boot recognised,
+       matched in boot 2.
+     - `bench reset --until 'ch422g: backlight on'` → exit 0 in **3.92 s** (reset→marker).
+     - Bad paths `../README.md` and `/etc/passwd` → HTTP 400 → exit 4. Service stopped →
+       `bench health` exit 4 (connection refused).
+     - **R16 resolved:** espflash's monitor runs and streams the log without a controlling
+       terminal; the host terminal stays clean and Ctrl-C stops the service cleanly. The request
+       log is clean (no `/log` noise).
+     - `bench snap` → exit 0 in **2.19 s** (ffmpeg elapsed 1.91 s, 30 KiB JPEG). `-framerate 30`:
+       "Configuration of video device failed, falling back to default", runs at ~10 fps;
+       `uyvy422` auto-selected, "Selected pixel format (yuv420p) is not supported" is a benign
+       override. **`image2pipe` VERIFY closed** (step 4); **Camera permission under `uv run`
+       VERIFY closed** (TCC grant of the terminal applies); ffmpeg stderr appears in the host log.
+     - **DEFECT: wrong camera.** The default `--camera 1` captured a different camera (a room
+       view, not the panel). avfoundation video devices on the bench Mac at the time: `[0]`
+       MacBook Pro-Kamera, `[1]` HD Pro Webcam C920, `[2]` Kamera von „Sergej’s iPhone (5)“
+       (Continuity), `[3]` MacBook Pro-Schreibtischansicht-Kamera, `[4]` Schreibtischansicht-Kamera
+       von „Sergej’s iPhone (5)“, `[5]` Capture screen 0, `[6]` Capture screen 1. This listing shows
+       `[1]` as the C920, yet index `1` captured another camera: the index→device mapping is not
+       stable (Continuity devices come and go; the exact shift at capture time was not
+       reconstructed), so B1's "device index `1`" is not a usable identifier.
+       The accidental photo was deleted immediately and not described. With
+       `--camera "HD Pro Webcam C920"` the snapshot showed the panel: colour bars, **no glare**
+       (the spike's glare is gone at the current mount; R5). Fix (fix loop 2 of 2, implemented in
+       parallel): camera by name, default `"HD Pro Webcam C920"`, startup device check, index
+       warning, screen-capture refusal (Decision 3, host config, Security, step 4, R17).
+     - Not observed: a panic (backtrace symbolisation stays [VERIFY]).
+   - **Acceptance run 3 (pending, after fix loop 2 lands; short, user-run):**
+     - start `uv run tools/bench/bench_host.py` **without** `--camera` (default name) →
+       `bench snap` → the snapshot shows the panel;
+     - start with a bogus name (e.g. `--camera "No Such Camera"`) → the host refuses to start and
+       prints the available video devices.
+     - (The frame-rate experiment the user ran by hand alongside run 2/3 is recorded in Decision
+       3 and the rev-5 revision log; it is not a run-3 pass criterion.)
+     - If run 3 fails, the fix loop budget (2 of 2) is spent: stop and revise this doc with the
+       user instead of a third fix loop.
 
 7. **[devops] Skill and docs.**
    - `.claude/skills/board-verify/SKILL.md` covers:
@@ -702,14 +827,87 @@ Each step is one commit, and its verification runs green before the next starts.
      from another terminal tab, then `reset` in the broken one; the `--framerate` /
      `BENCH_FRAMERATE` setting (default 30, `0` omits it) next to `--camera`, with the hint that
      ffmpeg's 503 stderr lists the camera's supported modes.
+     Rev 5 additions: `--camera`/`BENCH_CAMERA` takes the avfoundation **device name** (default
+     `"HD Pro Webcam C920"`); **prefer names over indices**, because indices shift when
+     Continuity cameras (iPhone) appear or disappear and a wrong index can photograph a person,
+     the room or the screen. How to find the name:
+     `ffmpeg -f avfoundation -list_devices true -i "" 2>&1 | command grep -A10 'video devices'`
+     (`command grep` because of the bench Mac's `grep`→`rg` alias). The host checks the name at
+     startup and refuses to start, listing the devices, if it is missing; an index is accepted
+     with a warning naming the device; `Capture screen…` devices are always refused. The camera
+     can only be set on the host, never from the container.
    - *Verify:* a fresh agent session that is only given the skill completes step 6's flash→snap
      sequence unaided; the README commands match what was run in step 6.
 
-8. **[devops] [optional] `GET /stream.mjpg`** for a human in a Mac browser: one ffmpeg per client
-   (`-f mpjpeg`), `multipart/x-mixed-replace`, killed on client disconnect, `?token=` accepted.
-   - *Verify (container):* with the fake ffmpeg emitting two frames, the response has two
-     multipart parts and the fake is gone after the client closes. **[manual]** The stream renders
-     in Safari/Chrome at `http://127.0.0.1:7777/stream.mjpg?token=...`.
+8. **[devops] ~~[optional]~~ `GET /stream.mjpg`** for a human in a Mac browser (rev 5: **in
+   scope**, no longer optional — user request, for a demo that shares the webcam output via a Teams
+   screen share/recording of a browser window on the Mac; loopback only, no LAN exposure). ~~One
+   ffmpeg per client (`-f mpjpeg`), `multipart/x-mixed-replace`, killed on client disconnect,
+   `?token=` accepted.~~ Rev 5 spec:
+   - **8a. Stream capture settings (separate from snapshots).** The Mac frame-rate experiment
+     (Decision 3, revision log) showed the C920 reaches a real 30 fps via avfoundation only at
+     640x480 (uncompressed YUV over USB 2.0; 720p ~10 fps, 1080p ~5 fps; pixel format
+     irrelevant). So the stream has its own host options `--stream-size` (env
+     `BENCH_STREAM_SIZE`, default `640x480`) and `--stream-framerate` (env
+     `BENCH_STREAM_FRAMERATE`, default `30`; `0`/empty omits it, like `--framerate`); snapshots
+     keep `--video-size 1280x720`, `--framerate 30` and the 20-frame warm-up unchanged. The
+     stream has no warm-up (the first second may be under-exposed; acceptable for a live view).
+     Pending the user's confirmation at the checkpoint (orchestrator decision).
+   - **Response:** `200`, `Content-Type: multipart/x-mixed-replace; boundary=<b>`,
+     `Cache-Control: no-store`; each part `Content-Type: image/jpeg` + `Content-Length`, then the
+     JPEG. `<b>` is a fixed constant (e.g. `benchframe`) passed to ffmpeg as
+     `-boundary_tag <b>`, so the header and the body can't disagree (ffmpeg's default is
+     `ffmpeg`).
+   - **Framing decision: ffmpeg `-f mpjpeg` pass-through**, not image2pipe + JPEG re-framing.
+     Argv: `-f avfoundation -framerate <stream-framerate> -video_size <stream-size>
+     -i "<camera>:none" -c:v mjpeg -f mpjpeg -boundary_tag <b> pipe:1` (defaults: `30`,
+     `640x480`; same camera resolution and screen-capture refusal as snapshots). Why: ffmpeg already writes each part
+     with the boundary, `Content-type: image/jpeg` and `Content-length` (header names are
+     case-insensitive), so the host only copies bytes from the pipe to the socket — no JPEG
+     scanning, no buffering, least host code. Re-framing (split image2pipe output on
+     `FF D8`…`FF D9`, write our own part headers) gives exact header control and per-frame
+     validation but is ~30 more lines of parsing for no demo benefit; it stays the **fallback**
+     if Safari/Chrome/OBS reject ffmpeg's part headers [VERIFY on the Mac].
+   - **Lifecycle:** one ffmpeg per client, started with `start_new_session=True` (rev 4); a write
+     error to the client (`BrokenPipeError`/`ConnectionResetError`) or service shutdown kills the
+     **process group** (`os.killpg`, pid fallback) and frees the client slot; ffmpeg exiting ends
+     the response and logs the stderr tail. No timeout on the stream itself (it runs until the
+     client leaves); each `write` uses a socket timeout so a stalled client is dropped.
+   - **Client cap:** at most `--stream-clients` (default **2**) concurrent streams; beyond that
+     **409** ("stream clients busy").
+   - **Interaction with `/snapshot.jpg`:** a running stream does **not** take the snapshot camera
+     lock; the snapshot opens the device concurrently (avfoundation generally allows several
+     clients of one camera [VERIFY on the Mac]). If the Mac shows that a second open fails or
+     disturbs the stream, the fallback is: an active stream makes `/snapshot.jpg` return **409**
+     (the CLI already retries 409 and then exits 4) — revise the doc before switching.
+   - **Auth:** bearer header **or** `?token=` (this endpoint only); `Origin` tolerated (this
+     endpoint only); access log redacts `token=`. Security and R18 record the consequences.
+   - README (in this step): how to open the stream on the Mac
+     (`http://127.0.0.1:7777/stream.mjpg?token=$(cat .bench/token)` — with `command cat` on the
+     bench Mac), the demo caution (don't show the address bar; restart the service afterwards to
+     rotate the token), OBS browser/media source setup, the client cap.
+   - *Verify (container):* ~~with the fake ffmpeg emitting two frames, the response has two
+     multipart parts and the fake is gone after the client closes.~~ With `fake_ffmpeg.py`
+     extended to emit N mpjpeg parts using the `-boundary_tag` from its argv (and exit 2 if
+     `-f mpjpeg`/`-boundary_tag` are missing): the response `Content-Type` is
+     `multipart/x-mixed-replace` with a boundary equal to the argv's `-boundary_tag`; a stdlib
+     multipart parse yields N parts, each `image/jpeg` with a correct `Content-Length` and
+     `FF D8` magic; closing the client kills the fake (no process left, group killed); a third
+     concurrent client → 409 and the first two keep streaming; `?token=` accepted here, and
+     `?token=` on `/health`, `/snapshot.jpg`, `/flash` → 401; `Origin` accepted here and still
+     403 on every other endpoint; the access log line contains no token value; the stream argv
+     builder test pins `-framerate 30 -video_size 640x480` by default, configured
+     `--stream-size`/`--stream-framerate` replace them, `0`/empty framerate omits it, and the
+     snapshot argv is unchanged (`1280x720`); a snapshot during an active stream succeeds with
+     the fakes.
+   - **[manual]** ~~The stream renders in Safari/Chrome at
+     `http://127.0.0.1:7777/stream.mjpg?token=...`.~~ The stream renders in Safari and Chrome on the
+     Mac and in an OBS browser source and media source at 640x480, with the observed fps
+     recorded (expected ~30, per the experiment) and no "configuration failed" line in the host
+     log; closing
+     the tab stops ffmpeg (camera LED off); a snapshot during a running stream works or the 409
+     fallback is decided (concurrency [VERIFY]); a Teams share of the browser window shows the
+     stream with the address bar hidden.
 
 ## Risks
 
@@ -718,33 +916,47 @@ Each step is one commit, and its verification runs green before the next starts.
 | R1 | `host.containers.internal` doesn't reach host loopback under applehv/libkrun | ~~Medium / high~~ **Resolved (spike 1a)** | Step 1a checked it: it works (via `192.168.127.254`). T2 not needed. Side effect recorded under Security: requests arrive as `127.0.0.1`, so the token is the only discriminator. Not opening a non-loopback port stays a hard rule. |
 | R2 | `espflash monitor` won't run without a TTY, or doesn't reset on attach, so early boot lines are lost | ~~Medium / medium~~ **Materialised, resolved by S3 (spike 1b)** | The monitor ran with piped stdout and did reset the chip, but its first app line was `alive 6s`: ~6 s of boot (i2c scan, `Embassy initialized!`, `ch422g: backlight on`, `alive 0s`) lost. Switched to S3 (single `flash --monitor --non-interactive` process), which captured everything from the ROM banner. `POST /reset` also uses S3 for this reason. The `alive 0s` default marker was chosen for this risk and is kept (see Container CLI). |
 | R3 | Native USB-Serial-JTAG re-enumerates on reset (device node disappears briefly) and the monitor exits | Medium / medium | Observed indirectly in spike 1b: after a reset by a separately attached `espflash monitor`, ~6 s of output were lost before the monitor saw data, consistent with re-enumeration plus reconnect (esp-println drops output while no host has the port open). Under S3, espflash survived both observed resets (`rst:0x15` twice) without losing lines, so the flash path is covered. Remaining exposure: resets not driven by espflash (panic reboot, RST button, watchdog) may lose up to ~6 s of the next boot, or end the process. The panic text itself is printed before the reset, so `--fail-on` still sees it. The monitor exit is visible (`running=false`, CLI exit 3); `POST /reset` recovers. Bounded restart-on-exit stays deferred until step 6 shows the need. |
-| R4 | macOS Camera permission (TCC) denied or attributed to the wrong app; under launchd no prompt at all | ~~High on first run~~ Low now / medium | Spike 1c: permission was already granted to the terminal app; capture worked. The 503 body carries ffmpeg's stderr. launchd is deferred (B2) and would re-open this risk. |
-| R5 | Photos of an LCD are hard to judge: auto exposure/white balance drift, moiré, reflections, focus | High / medium; **mildly materialised (spike 1c)** | Spike 1c photo: sharp and well exposed, the colour-bar image clearly judgeable, but window glare top-left (over the green/blue bars) and room reflections on the right of the panel. Fixed mount and angle (plus shading the window), warm-up frames, and a judging rubric of structural checks ("backlight on, no full-screen noise, layout regions present") rather than pixel-exact comparison. ffmpeg's avfoundation input can't lock exposure/WB [VERIFY]. A UVC control tool or the boot test pattern (B3) are follow-ups if needed. Step 6 records the tuning. |
+| R4 | macOS Camera permission (TCC) denied or attributed to the wrong app; under launchd no prompt at all | ~~High on first run~~ Low now / medium | Spike 1c: permission was already granted to the terminal app; capture worked. The 503 body carries ffmpeg's stderr. launchd is deferred (B2) and would re-open this risk. *Rev 5:* acceptance run 2 confirmed the grant also applies when ffmpeg runs under `uv run` from the terminal. |
+| R5 | Photos of an LCD are hard to judge: auto exposure/white balance drift, moiré, reflections, focus | High / medium; **mildly materialised (spike 1c)** | Spike 1c photo: sharp and well exposed, the colour-bar image clearly judgeable, but window glare top-left (over the green/blue bars) and room reflections on the right of the panel. Fixed mount and angle (plus shading the window), warm-up frames, and a judging rubric of structural checks ("backlight on, no full-screen noise, layout regions present") rather than pixel-exact comparison. ffmpeg's avfoundation input can't lock exposure/WB [VERIFY]. A UVC control tool or the boot test pattern (B3) are follow-ups if needed. Step 6 records the tuning. *Rev 5 (acceptance run 2):* at the current mount the C920 photo of the colour bars shows **no glare**; the panel is judgeable. Exposure/WB locking stays [VERIFY]/deferred. |
 | R6 | The service and the user's manual `espflash` fight over the port | Medium / low | Documented one-holder rule, `POST /monitor/stop`. espflash's "port busy" error is clear. |
 | R7 | Host python version: the Xcode CLT `python3` may be 3.9; the container tests run on 3.13 and wouldn't catch newer syntax | ~~Medium / low~~ **Low (relaxed after spike)** | Original mitigation, now dropped: "Code `bench_host.py` to 3.9 (no `match`, `from __future__ import annotations`, no `tomllib`)". The bench Mac has python 3.15.0, so the binding constraint is the container's 3.13 that runs the tests. New rule: target **>= 3.11** syntax/stdlib for host service and CLI; the README states host `python3 >= 3.11`; the startup check prints the version and refuses to start below 3.11. Remaining gap: a 3.15 host could behave differently from the 3.13 test run (deprecations/removals); step 6 is the check. *Rev 3:* the lower bound is now exercised (canonical tests on 3.11 via uv, plus 3.13); the upper gap stays, and can optionally be narrowed by also running the suite with `uv run --python 3.15 ...` if uv offers that version (not required). |
 | R8 | The capability itself: anything that can read `.bench/token` can flash the board and photograph the room | Certain (by design) / medium | Loopback only, token, Origin rejection, ELF prefix allowlist, temp copy, no shell, the service runs only while started by hand. Images and logs live in gitignored `.bench/`. B4 keeps the user in control of unattended use. |
 | R9 | Host and container espflash versions differ (flag names, output format) | Medium / ~~low~~ **medium** (S3 depends on output wording) | `/health` reports the host espflash version (4.6.0 at spike 1b). The argv builders sit in one place. Flash success depends on the literal line `Flashing has completed!`; if an upgrade rewords it, flashes end in 504 (timeout) rather than a false success, and the string is one constant. Observed flag values on 4.6.0: `monitor --before` = `default-reset`, `no-reset`, `no-reset-no-sync`; `flash --after` = `hard-reset`, `no-reset` (list possibly truncated). `flash --after no-reset` without `--monitor` printed a harmless WARN about monitor options being ignored; not used under S3. |
 | R11 | Serial port auto-detect picks the wrong device or none: the name changes with the USB port/hub, or a second `usbmodem` device (e.g. the board's CH343 UART port, if also cabled, or another dev board) is present | Medium / low | Auto mode accepts exactly one `/dev/cu.usbmodem*` match and otherwise errors with the candidate list (startup, `/health`, flash/reset 503). `--port` overrides. Filtering by VID 303A would need `ioreg`/`system_profiler` parsing; deferred until ambiguity actually happens. |
-| R12 | Camera settings silently ignored (spike 1c: `-framerate 30` fell back to the device default ~10 fps; pixel format overridden to `uyvy422`) — or, **rev 4**, hard-rejected: without `-framerate` avfoundation requests 29.97 fps and the webcam refuses it (acceptance run 1: 503, ffmpeg exit 251) | Certain / ~~low~~ **medium** (materialised as a hard failure) | ~~Don't pass `-framerate` by default~~ (rev 4: that was the cause of the failure). Pass `-framerate 30` by default (a rate the device lists as supported), configurable via `--framerate`/`BENCH_FRAMERATE`, `0`/empty omits it; warm-up expressed in frames sized for ~10 fps (default 20 ≈ 2 s; revisit if run 2 shows a true 30 fps); ffmpeg stderr logged on every snapshot so fallbacks are visible, and the 503 body carries the stderr tail (which named the supported modes in run 1); JPEG magic check catches outright failure. |
+| R12 | Camera settings silently ignored (spike 1c: `-framerate 30` fell back to the device default ~10 fps; pixel format overridden to `uyvy422`) — or, **rev 4**, hard-rejected: without `-framerate` avfoundation requests 29.97 fps and the webcam refuses it (acceptance run 1: 503, ffmpeg exit 251) | Certain / ~~low~~ **medium** (materialised as a hard failure) | ~~Don't pass `-framerate` by default~~ (rev 4: that was the cause of the failure). Pass `-framerate 30` by default (a rate the device lists as supported), configurable via `--framerate`/`BENCH_FRAMERATE`, `0`/empty omits it; warm-up expressed in frames sized for ~10 fps (default 20 ≈ 2 s; revisit if run 2 shows a true 30 fps); ffmpeg stderr logged on every snapshot so fallbacks are visible, and the 503 body carries the stderr tail (which named the supported modes in run 1); JPEG magic check catches outright failure. *Rev 5 (acceptance run 2):* with `-framerate 30` the C920 captures but still falls back to ~10 fps ("Configuration of video device failed"); `uyvy422` is auto-selected after "Selected pixel format (yuv420p) is not supported". Snapshots work (2.19 s); warm-up stays 20 frames. ~~Hypothesis for the fallback: avfoundation first requests `yuv420p`, which the C920 doesn't support, so the device configuration fails and the device falls back to its default (~10 fps); an explicit `-pixel_format` may give a real 30 fps.~~ **Disproven** by the Mac experiment (`uyvy422`/`nv12`/`yuyv422` at 1280x720 @ 30 all still fall back to 10 fps). The cap is resolution-bound (uncompressed YUV over USB 2.0): 1280x720 ~10 fps (at 30 or 15 requested), 1920x1080 ~4.9 fps, **640x480 @ 30 works (fps=31)**. So: no pixel-format option; snapshots keep 1280x720 (sharpness matters more than rate; ~10 fps, 20-frame warm-up ≈ 2 s, unchanged); the stream uses `--stream-size 640x480 --stream-framerate 30` (step 8a). The "configuration failed" warning at 720p is expected and benign. |
 | R10 | Privacy: snapshots/logs show live traffic and the room | Medium / medium | `.bench/` is gitignored. The skill forbids sharing or committing them. Same rule as the README simulator note. |
 | R13 | uv missing (rev 3): not installed on the Mac, or the container not yet rebuilt with `./features/uv`, so `uv run ...` and the CLI shebang fail (`env: 'uv': No such file or directory`) | Medium until step 2a/6 / low | Both tools stay runnable with a plain `python3 >= 3.11` (`python3 tools/bench/bench_host.py`, `python3 tools/bench/bench ...`, `python3 -m unittest ...`); README and skill name the fallback; the shebang smoke test is skipped, not failed, without uv. Note: the B4 allow-list entry matches `tools/bench/bench`, not `python3 tools/bench/bench`, so the fallback is prompted. |
 | R14 | Managed-python download (rev 3): `uv run --python 3.11` (or a host without python >= 3.11) needs network on first use; offline, or GitHub unreachable, it fails | Low / low | Only the canonical test command needs it in the container; the V1 volume keeps the managed 3.11 across rebuilds, so it is a one-time download. The 3.13 test command and the CLI need no download. On the host, 3.15.0 satisfies `>=3.11`, so nothing is fetched. `UV_PYTHON_DOWNLOADS=never` turns a silent fetch into a clear error where that is preferred. |
 | R15 | uv's interpreter choice drifts (rev 3): with uv's default "prefer managed" policy, once a managed 3.11 is installed the CLI shebang may run on 3.11 instead of the system 3.13, and on the host a later managed install could shadow Homebrew python | Low / low; **materialised, harmless (acceptance run 1)** | Any interpreter >= 3.11 is supported and tested at both ends of the range we control (3.11, 3.13); `/health` reports the host's `python_version`. Rev 4: on the bench Mac `uv run tools/bench/bench_host.py` picked **python 3.12.12** although the Mac's `python3` is 3.15.0 (presumably a uv-managed or other installed interpreter that uv prefers; not investigated). Harmless, since 3.12 is inside the tested range; it also means the R7 "3.15 upper gap" is not what actually runs on the host today. |
-| R16 | A child tool grabs the controlling terminal (rev 4, **materialised in acceptance run 1**): after the first `/flash`, the Mac terminal running `bench_host.py` went into raw mode (staircase output, Ctrl-C dead); the user had to `pkill -f bench_host.py` from another tab and run `reset`. Cause: espflash's monitor (crossterm) opens the controlling terminal via `/dev/tty`, despite `stdin=DEVNULL`, and enables raw mode | Certain without mitigation / medium (host terminal unusable, service can't be stopped with Ctrl-C) | Fix (implemented in parallel to rev 4, see Security): every child (espflash, ffmpeg) is started with `start_new_session=True`, so it has no controlling terminal and `/dev/tty` can't be opened; stop/kill signal the child's **process group** (`os.killpg`, falling back to the pid); `main()` snapshots the termios state of a tty stdin at startup and restores it on exit, as a backstop. README step 7 documents recovery (`pkill -f bench_host.py` from another tab, then `reset`). **Residual [VERIFY in acceptance run 2]:** espflash's monitor might refuse to run, or behave differently, without a controlling tty; if so, revise this doc (options: a pty for the child, or `flash` + S2) rather than improvising. |
+| R16 | A child tool grabs the controlling terminal (rev 4, **materialised in acceptance run 1**): after the first `/flash`, the Mac terminal running `bench_host.py` went into raw mode (staircase output, Ctrl-C dead); the user had to `pkill -f bench_host.py` from another tab and run `reset`. Cause: espflash's monitor (crossterm) opens the controlling terminal via `/dev/tty`, despite `stdin=DEVNULL`, and enables raw mode | Certain without mitigation / medium (host terminal unusable, service can't be stopped with Ctrl-C) | Fix (implemented in parallel to rev 4, see Security): every child (espflash, ffmpeg) is started with `start_new_session=True`, so it has no controlling terminal and `/dev/tty` can't be opened; stop/kill signal the child's **process group** (`os.killpg`, falling back to the pid); `main()` snapshots the termios state of a tty stdin at startup and restores it on exit, as a backstop. README step 7 documents recovery (`pkill -f bench_host.py` from another tab, then `reset`). ~~**Residual [VERIFY in acceptance run 2]:** espflash's monitor might refuse to run, or behave differently, without a controlling tty; if so, revise this doc (options: a pty for the child, or `flash` + S2) rather than improvising.~~ **Resolved (acceptance run 2, rev 5):** espflash runs and streams the full log without a controlling terminal; the host terminal stays clean and Ctrl-C stops the service cleanly. Accepted residual (fix loop 1 QA): a SIGKILL of the host orphans the children. |
+| R17 | Camera index instability (rev 5, **materialised in acceptance run 2**): avfoundation indices shift when devices appear/disappear (Continuity iPhone cameras, desk-view cameras), so a fixed index selects the wrong camera — a person/room camera, or a screen (`Capture screen N` devices are listed as video devices). Run 2: the default `--camera 1` photographed the room instead of the panel | Certain with indices / **high** (privacy: photo of a person, the room or the screen contents; and wrong-evidence verdicts if the agent judged a non-panel image) | Camera chosen by **name**, default `"HD Pro Webcam C920"`; startup lists the avfoundation video devices and refuses to start if the name is missing (prints the list); an all-digit index is accepted only with a stderr warning naming the device it maps to now, out of range refused; `Capture screen…` refused by name or index; camera configurable only on the host, never per request (Decision 3, host config, Security). Residual: the name→device mapping is checked only at startup, so if the C920 is unplugged while the service runs, ffmpeg fails (503) rather than picking another device — names don't shift the way indices do. Two devices with the same name (a second C920) would be ambiguous [not handled; refuse if it ever happens]. The run-2 accidental photo was deleted immediately and not described. Acceptance run 3 checks the default and the refusal. |
+| R18 | Stream token exposure (rev 5, step 8): `?token=` puts the service token into URLs — browser history, OBS scene config, pages embedding the `<img>`, and the screen during a Teams demo if the address bar is visible; Origin tolerance on this endpoint lets any local web page embed the stream if it has the token | Medium during demos / medium (the same token authorises `/flash`) | Query token and Origin tolerance limited to `GET /stream.mjpg` (tested); loopback only, no LAN exposure; token rotates per service start — restart after a demo; hide the address bar while sharing; access log redacts the token; client cap 2. A separate read-only stream token would remove the flash capability from leaked URLs — deferred unless demos become routine. |
+| R19 | Concurrent camera use (rev 5, step 8): a snapshot while a stream runs may fail to open the device, or disturb the stream, if avfoundation doesn't share the camera as expected | Low–medium / low | Default: stream doesn't take the snapshot lock [VERIFY on the Mac in step 8]; fallback: an active stream makes `/snapshot.jpg` return 409 (CLI retries, then exit 4); snapshot failures already surface as 503 with ffmpeg's stderr. |
 
 Open questions: ~~B1–B5~~ (decided, see revision log); ~~the [VERIFY] items in step 1~~ (answered
-by the spike); remaining [VERIFY] items: `image2pipe` snapshot form (step 4/6), S3 backtrace
+by the spike); remaining [VERIFY] items: ~~`image2pipe` snapshot form (step 4/6)~~ (closed in
+run 2), S3 backtrace
 symbolisation (Decision 2, step 6), avfoundation exposure/WB locking (R5), launchd TCC (B2);
 rev 3: pinned uv version and its release asset/checksum names (step 2a), uv's hash check of
-managed python downloads (Security), Camera permission under `uv run` (step 6); rev 4: espflash
-monitor without a controlling tty (R16), whether `-framerate 30` is honoured or falls back
-(R12), both in acceptance run 2.
+managed python downloads (Security), ~~Camera permission under `uv run` (step 6)~~ (closed in
+run 2); rev 4: ~~espflash monitor without a controlling tty (R16), whether `-framerate 30` is
+honoured or falls back (R12), both in acceptance run 2~~ (closed in run 2: espflash fine without a
+tty; `-framerate 30` falls back to ~10 fps but captures). Rev 5: camera by name with startup check (R17) —
+acceptance run 3; user confirmation of the split capture settings (snapshot 1280x720 ~10 fps,
+stream 640x480 @ 30; step 8a); real stream fps in browsers/OBS (step 8 manual); concurrent
+snapshot + stream on one camera (R19); browser/OBS acceptance of ffmpeg's mpjpeg part headers
+(step 8).
 
 Deliberately deferred: boot test pattern (B3), launchd agent (B2), exposure/WB locking, automatic
 comparison against a sim reference render (needs a headless browser and a capture of the wasm sim,
 which is its own feature), monitor auto-restart (R3, only if step 6 shows the need), serial
 auto-detect by USB VID (R11), a deliberate-panic ELF to test backtrace decoding; rev 3:
-third-party Python dependencies (stdlib-only stays, Decision 8), test runs on 3.15 (R7).
+third-party Python dependencies (stdlib-only stays, Decision 8), test runs on 3.15 (R7); rev 5:
+a separate read-only stream token (R18), disambiguation of two cameras with the same name (R17),
+LAN exposure of the stream (not needed: the demo shares the screen); compressed capture modes
+from the C920 (MJPEG/H.264 on the device, which would lift the USB 2.0 bandwidth cap) — not
+reachable via avfoundation as far as observed (it delivered only uncompressed YUV); a
+time-based warm-up (only relevant if the snapshot rate changes).
 
 ## Revision log
 
@@ -951,3 +1163,102 @@ third-party Python dependencies (stdlib-only stays, Decision 8), test runs on 3.
   SIGTERM go through the host's handler, which kills the groups — verified for SIGTERM); the termios
   restore uses `tcsetattr` and could raise SIGTTOU if the host were run as a background job (foreground
   Terminal start per B2 is unaffected; relevant only if launchd/background start is revisited).
+- 2026-10-23: **rev 5, step-6 acceptance run 2 on the real Mac bench; camera-selection defect (fix
+  loop 2 of 2, code implemented in parallel, this revision is doc only); step 8 brought into scope
+  with its own capture settings after a frame-rate experiment (user requests, same day).** Results
+  recorded in the new run-2 block of plan step 6. Nothing pre-existing deleted; superseded text is
+  struck through.
+  - **Frame-rate experiment** (user, Mac, C920 "HD Pro Webcam C920", ffmpeg 9.0.2,
+    `-t 5 -f null -`): 1280x720 @ `-framerate 30` with `-pixel_format` `uyvy422` / `nv12` /
+    `yuyv422` → all "Configuration of video device failed, falling back to default", 10 fps;
+    1280x720 @ 15 → failed, 10 fps; 1920x1080 @ 30 → failed, 4.9 fps; 640x480 @ 30 → no
+    failure, 145 frames in 5 s, fps=31. Interpretation: avfoundation gets uncompressed YUV from
+    the C920 over USB 2.0, so the rate is bandwidth-capped by resolution. The pixel-format
+    hypothesis (yuv420p unsupported → configuration failed → fallback) is **disproven**.
+  - Sequence within this revision, for the record: the user first wanted the stream in scope
+    (step 8); then answered "frame rate OK as is, no `--pixel-format`", then corrected that (wants
+    a proper frame rate) and asked for an optional `--pixel-format` (env `BENCH_PIXEL_FORMAT`,
+    default TBD, candidate `uyvy422`) plus the experiment; the experiment disproved it, so the
+    `--pixel-format` option (drafted earlier in this same revision in Decision 3, host config,
+    step 8a, step 8 verify, R12, open questions) was **removed again** — the Decision 3 and host
+    config drafts are kept struck through, the rest was replaced. Final decision (orchestrator,
+    **to be confirmed by the user** at the checkpoint): snapshots unchanged (1280x720,
+    `-framerate 30` → ~10 fps, 20-frame warm-up); the stream gets `--stream-size` (default
+    `640x480`) and `--stream-framerate` (default `30`), env `BENCH_STREAM_SIZE` /
+    `BENCH_STREAM_FRAMERATE`.
+  - Status line: rev-4 "step 6 in fix loop 1 of 2, acceptance run 2 pending" struck through;
+    rev-5 note added (run 2 passes except camera selection; fix loop 2 of 2; run 3 pending).
+  - B1: decided device recorded as "HD Pro Webcam C920"; "device index `1`" struck through as
+    not a stable identifier (R17).
+  - Decision 3: rev-5 run-2 findings (`-framerate 30` falls back to ~10 fps but captures,
+    `uyvy422` auto-selected / benign `yuv420p` override, `image2pipe` works, 20-frame warm-up
+    kept); new **frame-rate** paragraph (user wants a real frame rate; the yuv420p /
+    `--pixel-format` draft struck through as disproven; experiment results; snapshots keep
+    1280x720, stream gets `--stream-size 640x480` / `--stream-framerate 30`, pending user
+    confirmation); new **camera selection** paragraph (by name,
+    default "HD Pro Webcam C920", startup device listing, refuse missing name with the list,
+    index with warning, out of range refused, `Capture screen…` refused); "optional last step"
+    for the stream struck through → in scope, mpjpeg pass-through.
+  - Consequences: the "photos of the room" bullet notes person/screen capture via a wrong
+    index and its mitigation.
+  - API: `/stream.mjpg` row "Step 8, optional" replaced ("optional" struck through) by the full
+    rev-5 behaviour (content types, mpjpeg + `-boundary_tag`, process-group kill, `?token=` and
+    Origin only here, 2-client cap with 409, stream size/framerate, no snapshot camera lock
+    [VERIFY]).
+  - Host config: `--camera` default `1` struck through → `"HD Pro Webcam C920"`, env
+    `BENCH_CAMERA`, startup check rules; `--video-size` marked as the snapshot size; new
+    `--stream-size` (env `BENCH_STREAM_SIZE`, default `640x480`), `--stream-framerate` (env
+    `BENCH_STREAM_FRAMERATE`, default `30`), `--stream-clients` (default 2); the drafted
+    `--pixel-format` struck through as dropped.
+  - Security: new bullet "camera selection is host-only, and screen capture is refused" (never
+    per request; `Capture screen N` devices; run-2 room photo deleted and not described); new
+    bullet on the `/stream.mjpg` exceptions (query token, Origin tolerance) and their cost
+    (token in history/OBS config/on screen during a Teams demo; rotates per start; hide address
+    bar; access log redacts the token; loopback only, no LAN exposure).
+  - Layout: `fake_ffmpeg.py` comment extended (canned `-list_devices` stderr, mpjpeg parts).
+  - Plan step 1 outcome: "camera was device `1`" annotated (at that time; not stable; R17).
+  - Plan step 4: new rev-5 bullet (framerate/warm-up result, `image2pipe` confirmed, `-i` uses
+    the camera name, pure device-list parser and `resolve_camera`, verify additions).
+  - Plan step 6: start note "device `1` is the default" struck through → name default;
+    "(pending, after the fixes land)" struck through and replaced by the run-2 results (health;
+    flash 3.92 s with double boot matched in boot 2; reset 3.92 s; bad paths `../README.md` and
+    `/etc/passwd` → 400 → exit 4; service stopped → exit 4; R16 resolved; clean request log;
+    snap 2.19 s / ffmpeg 1.91 s / 30 KiB; `image2pipe` and TCC-under-uv VERIFYs closed; ffmpeg
+    stderr in the host log; wrong-camera defect with the device list; C920 by name shows the
+    panel with no glare; no panic observed). The planned run-2 scope text is kept. New
+    "Acceptance run 3 (pending)" block: default name → panel, bogus name → refusal with list;
+    the frame-rate experiment noted as separate; run-3 failure → revise with the user (fix
+    loop budget spent).
+  - Plan step 7: README rev-5 additions (camera name, prefer names, how to list devices with
+    `command grep -A10 'video devices'`, startup refusal, index warning, screen refusal,
+    host-only setting).
+  - **Plan step 8 changed from optional to in scope** ("[optional]", the old one-paragraph spec,
+    the old container verify and the old manual check struck through). New: 8a stream capture
+    settings (`--stream-size 640x480`, `--stream-framerate 30`, no warm-up; snapshots
+    unchanged); response format; framing decision **mpjpeg
+    pass-through with a fixed `-boundary_tag`** over image2pipe re-framing (less host code;
+    re-framing is the fallback if browsers/OBS reject ffmpeg's part headers); lifecycle (new
+    session, process-group kill on disconnect/shutdown, write timeout); client cap 2 → 409;
+    snapshot concurrency decision (no shared lock, [VERIFY], 409 fallback); auth exceptions;
+    README items; container verify list (boundary match, multipart parse, content types,
+    disconnect kills fake, cap, token-in-query and Origin only here, token redaction,
+    stream argv defaults/overrides with the snapshot argv unchanged, snapshot during stream);
+    manual verify (Safari/Chrome/OBS at 640x480, fps ~30 recorded, no "configuration failed",
+    camera LED off on close, concurrency, Teams share without the address bar).
+  - Risks: R4 notes TCC under `uv run` confirmed; R5 notes no glare at the current mount; R12
+    extended with run-2 results, the yuv420p hypothesis struck through as disproven, the
+    experiment's resolution-bound rates and the snapshot/stream split; R16 residual struck through → resolved in run 2 (SIGKILL-orphan residual
+    accepted); **new R17** (camera index instability → wrong camera or screen; mitigations);
+    **new R18** (stream token exposure); **new R19** (concurrent camera use by snapshot and
+    stream).
+  - Open questions: `image2pipe`, TCC under `uv run`, R16 tty and R12 framerate VERIFYs struck
+    through as closed in run 2; rev-5 items added (camera by name in run 3, user confirmation
+    of the snapshot/stream capture split, real stream fps in browsers/OBS, R19 concurrency,
+    mpjpeg header acceptance).
+  - Deferred: read-only stream token (R18), same-name camera disambiguation (R17), LAN exposure
+    of the stream, compressed C920 capture modes (MJPEG/H.264; not reachable via avfoundation as
+    far as observed), time-based warm-up.
+  - Step numbering 1-8 unchanged (8a is a sub-part of step 8).
+- 2026-10-23 (orchestrator note): user confirmed the rev-5 capture split — sharp 1280x720 snapshots,
+  640x480@30 stream — and step 8 (stream) in scope; demo is a Teams share of a Mac browser window
+  (loopback only). The "to be confirmed by user" marks in rev 5 are resolved by this entry.

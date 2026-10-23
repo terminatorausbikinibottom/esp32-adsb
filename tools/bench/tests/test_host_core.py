@@ -11,6 +11,20 @@ from unittest import mock
 import bench_host as bh
 
 PREFIX = "firmware/target/"
+FAKE_FFMPEG = str(Path(__file__).resolve().parent / "fake_ffmpeg.py")
+REAL_LIST = """\
+[AVFoundation indev @ 0x1] AVFoundation video devices:
+[AVFoundation indev @ 0x1] [0] MacBook Pro-Kamera
+[AVFoundation indev @ 0x1] [1] HD Pro Webcam C920
+[AVFoundation indev @ 0x1] [2] Kamera von \u201eSergej\u2019s iPhone (5)\u201c
+[AVFoundation indev @ 0x1] [3] MacBook Pro-Schreibtischansicht-Kamera
+[AVFoundation indev @ 0x1] [4] Schreibtischansicht-Kamera von \u201eSergej\u2019s iPhone (5)\u201c
+[AVFoundation indev @ 0x1] [5] Capture screen 0
+[AVFoundation indev @ 0x1] [6] Capture screen 1
+[AVFoundation indev @ 0x1] AVFoundation audio devices:
+[AVFoundation indev @ 0x1] [0] Mikrofon von \u201eSergej\u2019s iPhone (5)\u201c
+[AVFoundation indev @ 0x1] [1] MacBook Pro-Mikrofon
+"""
 
 
 class StageElfTest(unittest.TestCase):
@@ -177,12 +191,85 @@ class BindFailureTest(unittest.TestCase):
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
                 rc = bh.main(["--listen", f"127.0.0.1:{port}", "--port", "/dev/x",
-                              "--espflash", sys.executable, "--ffmpeg", sys.executable],
+                              "--espflash", sys.executable, "--ffmpeg", FAKE_FFMPEG],
                              bench_dir=Path(d))
             self.assertEqual(rc, 2)
             self.assertEqual(token.read_text(), "running-instance")
             self.assertIn(f"127.0.0.1:{port}", err.getvalue())
             self.assertNotIn("Traceback", err.getvalue())
+
+
+class CameraTest(unittest.TestCase):
+    def test_parse_real_output_video_section_only(self):
+        d = bh.parse_video_devices(REAL_LIST)
+        self.assertEqual(sorted(d), [0, 1, 2, 3, 4, 5, 6])
+        self.assertEqual(d[1], "HD Pro Webcam C920")
+        self.assertEqual(d[2], "Kamera von \u201eSergej\u2019s iPhone (5)\u201c")
+        self.assertNotIn("MacBook Pro-Mikrofon", d.values())
+
+    def test_parse_keeps_name_whitespace(self):
+        d = bh.parse_video_devices("[AVFoundation indev @ 0x1] AVFoundation video devices:\n"
+                                   "[AVFoundation indev @ 0x1] [0]  Cam \n")
+        self.assertEqual(d, {0: " Cam "})
+
+    def test_parse_edge_cases(self):
+        self.assertEqual(bh.parse_video_devices(""), {})
+        self.assertEqual(bh.parse_video_devices("[AVFoundation indev @ 0x1] AVFoundation video devices:\n"), {})
+        self.assertEqual(bh.parse_video_devices(
+            "[AVFoundation indev @ 0x1] AVFoundation audio devices:\n[AVFoundation indev @ 0x1] [0] Mic\n"), {})
+
+    def run_main(self, camera, devices=None, extra=()):
+        env = {"FAKE_FFMPEG_DEVICES": devices} if devices else {}
+        err = io.StringIO()
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, env), \
+                mock.patch.object(bh, "make_server", side_effect=OSError(98, "stop here")), \
+                contextlib.redirect_stderr(err):
+            rc = bh.main(["--listen", "127.0.0.1:0", "--port", "/dev/x", "--espflash", sys.executable,
+                          "--ffmpeg", FAKE_FFMPEG, *(["--camera", camera] if camera else []), *extra],
+                         bench_dir=Path(d))
+        return rc, err.getvalue()
+
+    def test_default_camera_is_c920(self):
+        rc, err = self.run_main(None)
+        self.assertIn("stop here", err)  # got past camera check to the bind
+        self.assertNotIn("warning", err)
+
+    def test_name_present_starts(self):
+        rc, err = self.run_main("MacBook Pro-Kamera")
+        self.assertIn("stop here", err)
+
+    def test_name_absent_lists_devices(self):
+        rc, err = self.run_main("Nope")
+        self.assertEqual(rc, 2)
+        self.assertIn("'Nope' not found", err)
+        self.assertIn("HD Pro Webcam C920", err)
+
+    def test_index_refused(self):
+        for cam in ("1", "9", "\uff11"):  # ASCII and fullwidth digits
+            rc, err = self.run_main(cam)
+            self.assertEqual(rc, 2, cam)
+            self.assertIn("indices are not stable; use a device name", err)
+            self.assertIn("HD Pro Webcam C920", err)
+
+    def test_screen_capture_refused_but_lookalike_accepted(self):
+        devs = "Cam|Capture screen 0|Capture screenshot cam"
+        rc, err = self.run_main("Capture screen 0", devices=devs)
+        self.assertEqual(rc, 2)
+        self.assertIn("screen capture", err)
+        rc, err = self.run_main("Capture screenshot cam", devices=devs)
+        self.assertIn("stop here", err)
+
+    def test_listing_failure_refuses(self):
+        with mock.patch.object(bh, "list_video_devices", side_effect=ValueError("cannot list cameras")):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(bh.main(["--listen", "127.0.0.1:0", "--port", "/dev/x",
+                                          "--espflash", sys.executable, "--ffmpeg", sys.executable]), 2)
+            self.assertIn("cannot list cameras", err.getvalue())
+
+    def test_listing_unparseable_refuses(self):
+        with self.assertRaises(ValueError):
+            bh.list_video_devices(sys.executable)
 
 
 class ScriptTest(unittest.TestCase):

@@ -3,9 +3,12 @@
 Status: **approved; step 1 (spike) done, revised with its results; rev 3: tools run via uv;
 rev 4: step-6 acceptance run 1 findings (snapshot framerate, controlling-terminal defect); ~~step 6
 in fix loop 1 of 2, acceptance run 2 pending.~~ rev 5: step-6 acceptance run 2 results (all
-checks pass except camera selection: index `1` captured the wrong camera); step 6 in fix loop 2
-of 2 (camera by name), short acceptance run 3 pending; step 8 (`/stream.mjpg`) now in scope
-for a demo, with its own 640x480 @ 30 capture settings (pending user confirmation).**
+checks pass except camera selection: index `1` captured the wrong camera); ~~step 6 in fix loop 2
+of 2 (camera by name), short acceptance run 3 pending;~~ step 8 (`/stream.mjpg`) now in scope
+for a demo, with its own 640x480 @ 30 capture settings (pending user confirmation). rev 6: QA of
+fix loop 2 found the snapshot still used the configured index; camera is now selected by name
+only (numeric `--camera` refused); step 6 in a user-authorised fix loop 3 (budget was 2),
+short acceptance run 3 pending.**
 Date: 2026-10-23.
 Branch: `feature/adsb-display`.
 
@@ -23,7 +26,7 @@ Conventions (same as [adsb-display.md](adsb-display.md) and
 
 | # | Decision | Options | Recommendation | Blocks |
 |---|----------|---------|----------------|--------|
-| B1 | **Which camera?** | (a) UVC USB webcam on a fixed mount. (b) Mac built-in camera. | **(a)**. A built-in camera means the laptop lid is the camera mount and blocks video calls while the bench runs. The design handles both: the avfoundation device is a host-side setting (`--camera`, name or index). *Rev 5:* decided (a) = **"HD Pro Webcam C920"** (Logitech). ~~Device index `1`~~ was the C920 at spike time, but avfoundation indices are **not stable** (Continuity iPhone cameras come and go; acceptance run 2 captured a room camera with index `1`), so the default and the recommended setting is the **device name** (R17). | Step 1 (device name), step 6 |
+| B1 | **Which camera?** | (a) UVC USB webcam on a fixed mount. (b) Mac built-in camera. | **(a)**. A built-in camera means the laptop lid is the camera mount and blocks video calls while the bench runs. The design handles both: the avfoundation device is a host-side setting (`--camera`, ~~name or index~~ *rev 6:* device name only). *Rev 5:* decided (a) = **"HD Pro Webcam C920"** (Logitech). ~~Device index `1`~~ was the C920 at spike time, but avfoundation indices are **not stable** (Continuity iPhone cameras come and go; acceptance run 2 captured a room camera with index `1`), so the default ~~and the recommended setting~~ is the **device name** (R17). *Rev 6:* the name is the **only** way to select the camera; a numeric `--camera` is refused at startup. | Step 1 (device name), step 6 |
 | B2 | **How is the host service started?** | (a) Manually in a macOS Terminal tab (`python3 tools/bench/bench_host.py ...`; since rev 3 `uv run tools/bench/bench_host.py ...`). (b) launchd user agent (`~/Library/LaunchAgents/*.plist`). | **(a) for now.** Camera permission (TCC) is granted to the app that launches ffmpeg (Terminal/iTerm). Under launchd there is no such app and the grant is unreliable [VERIFY]. (b) is documented as a later option. | Step 7 |
 | B3 | **Firmware boot test pattern** (corner markers, colour bars behind a feature flag) in this feature? | (a) Yes. (b) Later, as a firmware step in adsb-display. | **(b).** This feature is host tooling. The existing log lines (`ch422g: backlight on`, `alive 0s`) are good enough boot markers. Revisit once step 6 shows whether photos of the real UI are good enough to judge. | — |
 | B4 | **Claude Code allow-list entry for `tools/bench/bench`?** | (a) Add `Bash(tools/bench/bench:*)` to `.claude/settings.local.json`. (b) Leave as is, so each call is prompted. | Your call. This design doesn't change permission settings. (a) is what makes the loop actually unattended. | Step 7 |
@@ -183,11 +186,23 @@ where its cache and managed pythons live.
      avfoundation device name**, default `"HD Pro Webcam C920"` (B1), because indices are not
      stable (R17). At startup the host lists the avfoundation video devices
      (`ffmpeg -f avfoundation -list_devices true -i ""`, stderr parsed, video section only) and
-     **refuses to start** if the configured name is missing, printing the available devices. An
+     **refuses to start** if the configured name is missing, printing the available devices. ~~An
      all-digit `--camera` is still accepted as an index, with a stderr warning naming the device
      it currently maps to; an out-of-range index is refused. Any device whose name starts with
      `Capture screen` is refused, whether selected by name or by index (screen capture is not a
-     camera; Security). A `GET /stream.mjpg` for a human in
+     camera; Security).~~ **Camera selection (rev 6, user decision after QA of fix loop 2): by
+     name only.** Numeric avfoundation indices are **not supported at all**, because they shift
+     as Continuity cameras come and go. A `--camera`/`BENCH_CAMERA` value that consists only of
+     digits (`str.isdigit()`, so non-ASCII digits such as `١` or `１` count too) is **refused at
+     startup with exit 2**, a "use a device name" message and the device list; no index lookup
+     is attempted. Device names are kept **exactly as ffmpeg prints them** (the text after
+     `[N] ` up to the line ending; case-sensitive comparison, no trimming, case folding or
+     Unicode normalisation), and the configured value must equal one of them. A device whose name
+     is **exactly** `Capture screen <digits>` (`re.fullmatch(r"Capture screen [0-9]+", name)`,
+     not a prefix match) is refused (screen capture is not a camera; Security). **Capture (the
+     snapshot and the step-8 stream) always passes the resolved device name** to ffmpeg
+     (`-i "<name>:none"`), never an index; the parsed index is not used for capture at all.
+     A `GET /stream.mjpg` for a human in
      a browser on the Mac is ~~an **optional last step**~~ (rev 5: **in scope**, user request for a
      demo that shares the webcam output) step 8, with one ffmpeg per connected
      client (`-f mpjpeg` pass-through, see step 8). The human can also just open Photo Booth or
@@ -270,7 +285,8 @@ where its cache and managed pythons live.
   - **A process in the container can now flash the board and take photos of the room** in front
     of the camera without a human in the loop. Mitigations: the security section and B4. *Rev 5:*
     with a wrong camera index it could also photograph a person or capture the screen (run 2,
-    R17); camera by name, startup check and screen-capture refusal close that.
+    R17); camera by name, startup check and screen-capture refusal close that (rev 6: by name
+    only, numeric values refused, capture uses the resolved name).
   - New container prerequisite (rev 3): uv, installed by the new local feature `./features/uv`;
     needs a container rebuild (user action). Until then the tests run with `python3 -m unittest`
     (3.13) and the CLI is called as `python3 tools/bench/bench ...`.
@@ -301,11 +317,15 @@ default: **auto-detect** = the single `/dev/cu.usbmodem*` match; if there are ze
 errors and lists them. Auto mode is checked at startup (fail fast with the list) **and re-resolved
 on every flash/reset**, because the `usbmodem…` name depends on the USB port/hub — spike 1b saw
 `usbmodem11401`, not the README's `usbmodem101`. A given `--port` is used as is.),
-`--camera` (env `BENCH_CAMERA`; avfoundation name or index, default ~~`1` per B1~~ **`"HD Pro
-Webcam C920"`** (rev 5, B1/R17); checked against the device list at startup: a missing name →
-refuse to start and print the available video devices; an all-digit value → index, accepted with
-a stderr warning naming the device it maps to now, refused if out of range; `Capture screen…`
-devices refused by name or index), `--video-size` (default `1280x720`; snapshots), rev 5 stream
+`--camera` (env `BENCH_CAMERA`; avfoundation ~~name or index~~ device name (rev 6: name only),
+default ~~`1` per B1~~ **`"HD Pro Webcam C920"`** (rev 5, B1/R17); checked against the device
+list at startup: a missing name → refuse to start and print the available video devices; ~~an
+all-digit value → index, accepted with a stderr warning naming the device it maps to now, refused
+if out of range; `Capture screen…` devices refused by name or index~~ rev 6: an all-digit value
+(any Unicode digits) → refused, exit 2, "use a device name" plus the device list; exact
+case-sensitive match against the names as ffmpeg prints them; a name that is exactly
+`Capture screen <digits>` → refused; snapshot and stream capture use the resolved name),
+`--video-size` (default `1280x720`; snapshots), rev 5 stream
 settings (step 8): `--stream-size` (env `BENCH_STREAM_SIZE`, default `640x480` — the largest
 tested size the C920 delivers at a real 30 fps via avfoundation), `--stream-framerate` (env
 `BENCH_STREAM_FRAMERATE`, default `30`), `--stream-clients` (max concurrent `/stream.mjpg`
@@ -407,9 +427,13 @@ Rules:
   body parameter selects a device). avfoundation also exposes the Mac's screens as video devices
   (`Capture screen 0`, `Capture screen 1` on the bench Mac), and a wrong index can point at a
   person/room camera or a screen; so the host resolves the configured value against the startup
-  device list, prefers names, warns on indices, and refuses any `Capture screen…` device by name
-  or index. Acceptance run 2 showed the risk is real: the default index `1` photographed the room
-  (the image was deleted immediately and not described).
+  device list, ~~prefers names, warns on indices, and refuses any `Capture screen…` device by name
+  or index~~ (rev 6:) accepts **names only** (an all-digit value is refused at startup, exit 2),
+  refuses a device named exactly `Capture screen <digits>`, and captures with the resolved name,
+  never an index. Acceptance run 2 showed the risk is real: the default index `1` photographed the room
+  (the image was deleted immediately and not described). QA of fix loop 2 found the snapshot
+  still passed the configured index instead of the resolved name, which would have hit a
+  shifted device again; that is why indices were removed entirely (rev 6).
 - **uv may fetch a python interpreter from the network** (rev 3). `uv run` / `uv run --script`
   downloads a managed CPython (python-build-standalone, from GitHub) on first use **if no
   installed interpreter satisfies `>=3.11`**. On the bench Mac (3.15.0) and in the container
@@ -659,12 +683,22 @@ Each step is one commit, and its verification runs green before the next starts.
      Startup device check (fix loop 2, implemented in parallel): a pure parser for the stderr of
      `ffmpeg -f avfoundation -list_devices true -i ""` (video section only, `[index] name`
      entries) and a pure `resolve_camera(configured, devices)` → device or an error listing the
-     devices; name missing → error; all-digit → index, warning with the mapped name; out of
-     range → error; `Capture screen…` → error by name or index. *Verify additions (container):*
-     parser tests on the run-2 device list (incl. the iPhone names with `„“` and `’`, the audio
-     section ignored); resolve tests for each rule; the host refuses to start with a bogus name
-     and prints the list (fake ffmpeg emits a canned `-list_devices` stderr); no request
-     parameter can change the camera.
+     devices; name missing → error; ~~all-digit → index, warning with the mapped name; out of
+     range → error; `Capture screen…` → error by name or index~~ (rev 6:) all-digit
+     (`str.isdigit()`, incl. non-ASCII digits) → error "use a device name" with the device list,
+     host exits 2; exact case-sensitive match on names as printed; a name that fullmatches
+     `Capture screen [0-9]+` → error (a name that merely starts with `Capture screen` is not
+     refused by this rule). **Rev 6:** the snapshot (and step-8 stream) argv builder receives the
+     **resolved device name** from `resolve_camera`, never the raw `--camera` value or an index
+     (QA of fix loop 2: the snapshot passed the configured index). *Verify additions
+     (container):* parser tests on the run-2 device list (incl. the iPhone names with `„“` and
+     `’`, kept byte-for-byte, the audio section ignored); resolve tests for each rule; the host
+     refuses to start with a bogus name and prints the list (fake ffmpeg emits a canned
+     `-list_devices` stderr); rev 6: `--camera 1`, `--camera ١` and `BENCH_CAMERA=1` → exit 2
+     with "use a device name" and the list; `Capture screen 0` refused, while a hypothetical
+     `Capture screen 0 Pro` or `Capture screens` is not treated as a screen; the snapshot argv
+     seen by the fake ffmpeg contains `-i "HD Pro Webcam C920:none"` (the name, no digits-only
+     device); no request parameter can change the camera.
    - *Verify (container), with `--ffmpeg tests/fake_ffmpeg.py`:* 200 + `image/jpeg` + bytes start
      with `FF D8`; fake failure → 503 with the stderr tail; timeout → 503 and the fake is killed;
      the argv builder test checks the camera/warm-up values and that ~~`-framerate` is absent by
@@ -780,18 +814,29 @@ Each step is one commit, and its verification runs green before the next starts.
        The accidental photo was deleted immediately and not described. With
        `--camera "HD Pro Webcam C920"` the snapshot showed the panel: colour bars, **no glare**
        (the spike's glare is gone at the current mount; R5). Fix (fix loop 2 of 2, implemented in
-       parallel): camera by name, default `"HD Pro Webcam C920"`, startup device check, index
-       warning, screen-capture refusal (Decision 3, host config, Security, step 4, R17).
+       parallel): camera by name, default `"HD Pro Webcam C920"`, startup device check, ~~index
+       warning,~~ screen-capture refusal (Decision 3, host config, Security, step 4, R17).
+     - **QA of fix loop 2 (rev 6):** the snapshot passed the configured index instead of the
+       resolved device name, so it would have hit a shifted device. The step-6 fix-loop budget
+       was exhausted (3 of 2); the **user authorised a third fix** with a simplification: camera
+       by **name only**, numeric `--camera` refused at startup (exit 2, "use a device name" +
+       list), capture always with the resolved name, exact `Capture screen <digits>` refusal,
+       names kept exactly as ffmpeg prints them (Decision 3).
      - Not observed: a panic (backtrace symbolisation stays [VERIFY]).
-   - **Acceptance run 3 (pending, after fix loop 2 lands; short, user-run):**
+   - **Acceptance run 3 (pending, after fix loop ~~2~~ 3 lands; short, user-run):**
      - start `uv run tools/bench/bench_host.py` **without** `--camera` (default name) →
-       `bench snap` → the snapshot shows the panel;
+       `bench snap` → the snapshot shows the panel (rev 6: the host log's ffmpeg line shows the
+       device **name** in `-i`, not an index);
      - start with a bogus name (e.g. `--camera "No Such Camera"`) → the host refuses to start and
-       prints the available video devices.
+       prints the available video devices;
+     - (rev 6) start with `--camera 1` → refused at startup, exit 2, "use a device name" and the
+       device list.
      - (The frame-rate experiment the user ran by hand alongside run 2/3 is recorded in Decision
        3 and the rev-5 revision log; it is not a run-3 pass criterion.)
-     - If run 3 fails, the fix loop budget (2 of 2) is spent: stop and revise this doc with the
-       user instead of a third fix loop.
+     - ~~If run 3 fails, the fix loop budget (2 of 2) is spent: stop and revise this doc with the
+       user instead of a third fix loop.~~ Rev 6: the budget is already exceeded (fix loop 3 of 2,
+       user-authorised). If run 3 fails, stop and revise this doc with the user; no further fix
+       loop without the user's explicit OK.
 
 7. **[devops] Skill and docs.**
    - `.claude/skills/board-verify/SKILL.md` covers:
@@ -828,13 +873,17 @@ Each step is one commit, and its verification runs green before the next starts.
      `BENCH_FRAMERATE` setting (default 30, `0` omits it) next to `--camera`, with the hint that
      ffmpeg's 503 stderr lists the camera's supported modes.
      Rev 5 additions: `--camera`/`BENCH_CAMERA` takes the avfoundation **device name** (default
-     `"HD Pro Webcam C920"`); **prefer names over indices**, because indices shift when
+     `"HD Pro Webcam C920"`); ~~**prefer names over indices**~~ (rev 6: **names only**; a numeric
+     value is refused at startup), because indices shift when
      Continuity cameras (iPhone) appear or disappear and a wrong index can photograph a person,
      the room or the screen. How to find the name:
      `ffmpeg -f avfoundation -list_devices true -i "" 2>&1 | command grep -A10 'video devices'`
      (`command grep` because of the bench Mac's `grep`→`rg` alias). The host checks the name at
-     startup and refuses to start, listing the devices, if it is missing; an index is accepted
-     with a warning naming the device; `Capture screen…` devices are always refused. The camera
+     startup and refuses to start, listing the devices, if it is missing; ~~an index is accepted
+     with a warning naming the device; `Capture screen…` devices are always refused~~ (rev 6:) a
+     numeric value is refused (exit 2, "use a device name"); the name must match exactly as
+     ffmpeg prints it (case, punctuation such as `„“’` included; quote it in the shell);
+     `Capture screen <N>` devices are always refused. The camera
      can only be set on the host, never from the container.
    - *Verify:* a fresh agent session that is only given the skill completes step 6's flash→snap
      sequence unaided; the README commands match what was run in step 6.
@@ -861,7 +910,8 @@ Each step is one commit, and its verification runs green before the next starts.
    - **Framing decision: ffmpeg `-f mpjpeg` pass-through**, not image2pipe + JPEG re-framing.
      Argv: `-f avfoundation -framerate <stream-framerate> -video_size <stream-size>
      -i "<camera>:none" -c:v mjpeg -f mpjpeg -boundary_tag <b> pipe:1` (defaults: `30`,
-     `640x480`; same camera resolution and screen-capture refusal as snapshots). Why: ffmpeg already writes each part
+     `640x480`; same camera resolution and screen-capture refusal as snapshots; rev 6: `<camera>`
+     is the resolved device name, never an index). Why: ffmpeg already writes each part
      with the boundary, `Content-type: image/jpeg` and `Content-length` (header names are
      case-insensitive), so the host only copies bytes from the pipe to the socket — no JPEG
      scanning, no buffering, least host code. Re-framing (split image2pipe output on
@@ -929,7 +979,7 @@ Each step is one commit, and its verification runs green before the next starts.
 | R14 | Managed-python download (rev 3): `uv run --python 3.11` (or a host without python >= 3.11) needs network on first use; offline, or GitHub unreachable, it fails | Low / low | Only the canonical test command needs it in the container; the V1 volume keeps the managed 3.11 across rebuilds, so it is a one-time download. The 3.13 test command and the CLI need no download. On the host, 3.15.0 satisfies `>=3.11`, so nothing is fetched. `UV_PYTHON_DOWNLOADS=never` turns a silent fetch into a clear error where that is preferred. |
 | R15 | uv's interpreter choice drifts (rev 3): with uv's default "prefer managed" policy, once a managed 3.11 is installed the CLI shebang may run on 3.11 instead of the system 3.13, and on the host a later managed install could shadow Homebrew python | Low / low; **materialised, harmless (acceptance run 1)** | Any interpreter >= 3.11 is supported and tested at both ends of the range we control (3.11, 3.13); `/health` reports the host's `python_version`. Rev 4: on the bench Mac `uv run tools/bench/bench_host.py` picked **python 3.12.12** although the Mac's `python3` is 3.15.0 (presumably a uv-managed or other installed interpreter that uv prefers; not investigated). Harmless, since 3.12 is inside the tested range; it also means the R7 "3.15 upper gap" is not what actually runs on the host today. |
 | R16 | A child tool grabs the controlling terminal (rev 4, **materialised in acceptance run 1**): after the first `/flash`, the Mac terminal running `bench_host.py` went into raw mode (staircase output, Ctrl-C dead); the user had to `pkill -f bench_host.py` from another tab and run `reset`. Cause: espflash's monitor (crossterm) opens the controlling terminal via `/dev/tty`, despite `stdin=DEVNULL`, and enables raw mode | Certain without mitigation / medium (host terminal unusable, service can't be stopped with Ctrl-C) | Fix (implemented in parallel to rev 4, see Security): every child (espflash, ffmpeg) is started with `start_new_session=True`, so it has no controlling terminal and `/dev/tty` can't be opened; stop/kill signal the child's **process group** (`os.killpg`, falling back to the pid); `main()` snapshots the termios state of a tty stdin at startup and restores it on exit, as a backstop. README step 7 documents recovery (`pkill -f bench_host.py` from another tab, then `reset`). ~~**Residual [VERIFY in acceptance run 2]:** espflash's monitor might refuse to run, or behave differently, without a controlling tty; if so, revise this doc (options: a pty for the child, or `flash` + S2) rather than improvising.~~ **Resolved (acceptance run 2, rev 5):** espflash runs and streams the full log without a controlling terminal; the host terminal stays clean and Ctrl-C stops the service cleanly. Accepted residual (fix loop 1 QA): a SIGKILL of the host orphans the children. |
-| R17 | Camera index instability (rev 5, **materialised in acceptance run 2**): avfoundation indices shift when devices appear/disappear (Continuity iPhone cameras, desk-view cameras), so a fixed index selects the wrong camera — a person/room camera, or a screen (`Capture screen N` devices are listed as video devices). Run 2: the default `--camera 1` photographed the room instead of the panel | Certain with indices / **high** (privacy: photo of a person, the room or the screen contents; and wrong-evidence verdicts if the agent judged a non-panel image) | Camera chosen by **name**, default `"HD Pro Webcam C920"`; startup lists the avfoundation video devices and refuses to start if the name is missing (prints the list); an all-digit index is accepted only with a stderr warning naming the device it maps to now, out of range refused; `Capture screen…` refused by name or index; camera configurable only on the host, never per request (Decision 3, host config, Security). Residual: the name→device mapping is checked only at startup, so if the C920 is unplugged while the service runs, ffmpeg fails (503) rather than picking another device — names don't shift the way indices do. Two devices with the same name (a second C920) would be ambiguous [not handled; refuse if it ever happens]. The run-2 accidental photo was deleted immediately and not described. Acceptance run 3 checks the default and the refusal. |
+| R17 | Camera index instability (rev 5, **materialised in acceptance run 2**): avfoundation indices shift when devices appear/disappear (Continuity iPhone cameras, desk-view cameras), so a fixed index selects the wrong camera — a person/room camera, or a screen (`Capture screen N` devices are listed as video devices). Run 2: the default `--camera 1` photographed the room instead of the panel | Certain with indices / **high** (privacy: photo of a person, the room or the screen contents; and wrong-evidence verdicts if the agent judged a non-panel image) | Camera chosen by **name**, default `"HD Pro Webcam C920"`; startup lists the avfoundation video devices and refuses to start if the name is missing (prints the list); ~~an all-digit index is accepted only with a stderr warning naming the device it maps to now, out of range refused; `Capture screen…` refused by name or index;~~ *rev 6:* **name only** — an all-digit value (incl. non-ASCII digits) is refused at startup (exit 2, "use a device name" + list), names compared exactly as ffmpeg prints them, a device named exactly `Capture screen <digits>` refused, and snapshot/stream capture always pass the resolved name (QA of fix loop 2 caught the snapshot still passing the configured index); camera configurable only on the host, never per request (Decision 3, host config, Security). Residual: the name→device mapping is checked only at startup, so if the C920 is unplugged while the service runs, ffmpeg fails (503) rather than picking another device — names don't shift the way indices do. Two devices with the same name (a second C920) would be ambiguous [not handled; refuse if it ever happens]. The run-2 accidental photo was deleted immediately and not described. Acceptance run 3 checks the default, the bogus-name refusal and (rev 6) the `--camera 1` refusal. Residual (rev 6): an avfoundation device whose real name is all digits could not be selected; accepted (not seen). |
 | R18 | Stream token exposure (rev 5, step 8): `?token=` puts the service token into URLs — browser history, OBS scene config, pages embedding the `<img>`, and the screen during a Teams demo if the address bar is visible; Origin tolerance on this endpoint lets any local web page embed the stream if it has the token | Medium during demos / medium (the same token authorises `/flash`) | Query token and Origin tolerance limited to `GET /stream.mjpg` (tested); loopback only, no LAN exposure; token rotates per service start — restart after a demo; hide the address bar while sharing; access log redacts the token; client cap 2. A separate read-only stream token would remove the flash capability from leaked URLs — deferred unless demos become routine. |
 | R19 | Concurrent camera use (rev 5, step 8): a snapshot while a stream runs may fail to open the device, or disturb the stream, if avfoundation doesn't share the camera as expected | Low–medium / low | Default: stream doesn't take the snapshot lock [VERIFY on the Mac in step 8]; fallback: an active stream makes `/snapshot.jpg` return 409 (CLI retries, then exit 4); snapshot failures already surface as 503 with ffmpeg's stderr. |
 
@@ -942,7 +992,7 @@ managed python downloads (Security), ~~Camera permission under `uv run` (step 6)
 run 2); rev 4: ~~espflash monitor without a controlling tty (R16), whether `-framerate 30` is
 honoured or falls back (R12), both in acceptance run 2~~ (closed in run 2: espflash fine without a
 tty; `-framerate 30` falls back to ~10 fps but captures). Rev 5: camera by name with startup check (R17) —
-acceptance run 3; user confirmation of the split capture settings (snapshot 1280x720 ~10 fps,
+acceptance run 3 (rev 6: name only, incl. the `--camera 1` refusal); user confirmation of the split capture settings (snapshot 1280x720 ~10 fps,
 stream 640x480 @ 30; step 8a); real stream fps in browsers/OBS (step 8 manual); concurrent
 snapshot + stream on one camera (R19); browser/OBS acceptance of ffmpeg's mpjpeg part headers
 (step 8).
@@ -1262,3 +1312,35 @@ time-based warm-up (only relevant if the snapshot rate changes).
 - 2026-10-23 (orchestrator note): user confirmed the rev-5 capture split — sharp 1280x720 snapshots,
   640x480@30 stream — and step 8 (stream) in scope; demo is a Teams share of a Mac browser window
   (loopback only). The "to be confirmed by user" marks in rev 5 are resolved by this entry.
+- 2026-10-23: **rev 6, camera by name only** (user decision after QA of fix loop 2; doc only,
+  code fix implemented separately). QA context: QA of fix loop 2 found that the snapshot passed
+  the **configured index** to ffmpeg instead of the resolved device name, so it would have hit a
+  shifted device again (the run-2 defect). The step-6 fix-loop budget was exhausted (this is fix
+  loop 3 of 2); the **user authorised a third fix** on condition of this simplification. Nothing
+  deleted; superseded text is struck through.
+  - Rule: the camera is selected **by name only**. An all-digit `--camera`/`BENCH_CAMERA`
+    (`str.isdigit()`, incl. non-ASCII digits) is refused at startup with **exit 2**, "use a
+    device name" and the device list. Capture (snapshot and step-8 stream) always uses the
+    resolved device name. Screen-capture refusal is an exact `Capture screen <digits>` match
+    (`re.fullmatch`), not a prefix match. Device names are kept exactly as ffmpeg prints them
+    (exact, case-sensitive comparison; no trimming or normalisation).
+  - **Removed** (struck through) everywhere: "all-digit value accepted as an index with a stderr
+    warning naming the mapped device", "out-of-range index refused", "`Capture screen…` refused
+    by name or index" (prefix rule), "prefer names over indices" — in B1 ("name or index", "and
+    the recommended setting"), Decision 3, host config `--camera`, Security camera bullet, R17
+    mitigation, step 4 rev-5 note, step 6 run-2 fix summary ("index warning"), step 7 README
+    rev-5 additions.
+  - Added: Status line rev-6 note (rev-5 "fix loop 2 of 2, run 3 pending" struck through);
+    Decision 3 rev-6 paragraph; Consequences note; step 4 rev-6 note (argv builder takes the
+    resolved name from `resolve_camera`) and verify additions (`--camera 1`/`١`/`BENCH_CAMERA=1`
+    → exit 2; exact screen match; snapshot argv carries the name); step 6 "QA of fix loop 2"
+    bullet; run-3 block retitled to "after fix loop 3", new check **"start with `--camera 1` →
+    refused"** and a name-in-`-i` check on the snapshot, the "budget spent" sentence struck
+    through and replaced (no further fix loop without the user's explicit OK); step 7 README
+    (names only, exact match, quote names in the shell); step 8 stream argv uses the resolved
+    name; R17 mitigation rewritten and a residual added (an all-digit real device name cannot be
+    selected; accepted); open questions note for run 3.
+  - Step numbering 1-8 unchanged.
+- 2026-10-23 (fix loop 3 QA, orchestrator note): QA PASS for names-only camera selection. The code
+  refuses `str.isnumeric()` values (a superset of `isdigit()`; also refuses e.g. `½`, `²`) — accepted.
+  `--camera` help text updated to "exact avfoundation video device name (indices are refused)".

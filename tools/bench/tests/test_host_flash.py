@@ -302,6 +302,8 @@ class FlashTest(FlashBase):
             self.assertGreater(sum(t.startswith("ESP-ROM:") for t in texts), 3)
             self.assertNotIn("INFO - alive 0s", texts)
 
+FAKE_FFMPEG = str(Path(__file__).resolve().parent / "fake_ffmpeg.py")
+
 
 class ShutdownTest(FlashBase):
     def test_main_kills_child_on_interrupt(self):
@@ -320,7 +322,7 @@ class ShutdownTest(FlashBase):
         with mock.patch.object(bh, "make_server", fake_make_server), \
                 mock.patch.object(bh.atexit, "register") as register:
             rc = bh.main(["--listen", "127.0.0.1:0", "--port", "/dev/x", "--espflash", FAKE,
-                          "--ffmpeg", sys.executable], bench_dir=self.root / ".bench")
+                          "--ffmpeg", FAKE_FFMPEG], bench_dir=self.root / ".bench")
         self.assertEqual(rc, 0)
         self.assertEqual([p for p in self.pids() if pid_alive(p)], [])  # killed by main's finally
         self.assertEqual(register.call_args.args[0].__name__, "close")  # and atexit is armed

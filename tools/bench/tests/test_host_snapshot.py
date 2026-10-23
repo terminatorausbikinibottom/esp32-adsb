@@ -61,12 +61,18 @@ class SnapshotTest(unittest.TestCase):
             res = self.get(path)
         return res, err.getvalue()
 
+    def test_capture_uses_camera_name(self):
+        self.bench.camera_name = "Resolved Cam"
+        self.get_logged()
+        argv = self.invocations()[0]["argv"]
+        self.assertIn("Resolved Cam:none", argv)
+
     def test_ok_jpeg(self):
         (status, ctype, body), _ = self.get_logged()
         self.assertEqual((status, ctype), (200, "image/jpeg"))
         self.assertTrue(body.startswith(b"\xff\xd8"))
         argv = self.invocations()[0]["argv"]
-        self.assertIn("1:none", argv)
+        self.assertIn("HD Pro Webcam C920:none", argv)
         self.assertIn("select=gte(n\\,20)", argv)
         self.assertEqual(argv[argv.index("-framerate") + 1], "30")
         self.assertEqual(argv.index("-framerate") + 2, argv.index("-video_size"))

@@ -172,6 +172,45 @@ def tool_version(binary, flag):
         return None
 
 
+def parse_video_devices(text):
+    """{index: name} from the video section of `ffmpeg -f avfoundation -list_devices true -i ""` stderr."""
+    devices, in_video = {}, False
+    for line in text.splitlines():
+        body = re.sub(r"^\[AVFoundation[^\]]*\] ", "", line.rstrip("\r\n"))  # names stay exactly as printed
+        if body.strip().endswith("video devices:"):
+            in_video = True
+        elif body.strip().endswith("audio devices:"):
+            in_video = False
+        elif in_video and (m := re.match(r"\[(\d+)\] (.+)$", body)):
+            devices[int(m[1])] = m[2]
+    return devices
+
+
+def list_video_devices(ffmpeg):
+    try:  # the listing itself exits non-zero (empty input), so only stderr matters
+        err = subprocess.run([*_cmd(ffmpeg), "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+                             capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL,
+                             start_new_session=True).stderr
+    except (OSError, subprocess.SubprocessError) as e:
+        raise ValueError(f"cannot list cameras with ffmpeg: {e}")
+    devices = parse_video_devices(err)
+    if not devices:
+        raise ValueError("cannot list cameras: no video devices in ffmpeg output")
+    return devices
+
+
+def resolve_camera(camera, devices):
+    """The device name to capture from; ValueError if not a listed camera. Names only: indices shift."""
+    available = "available video devices: " + ", ".join(f"[{i}] {n}" for i, n in devices.items())
+    if camera.isnumeric():  # superset of isdigit/isdecimal, catches fullwidth etc.
+        raise ValueError(f"camera '{camera}': camera indices are not stable; use a device name; {available}")
+    if camera not in devices.values():
+        raise ValueError(f"camera '{camera}' not found; {available}")
+    if re.fullmatch(r"Capture screen \d+", camera):
+        raise ValueError(f"camera '{camera}' is a screen capture, not a camera; {available}")
+    return camera
+
+
 def _signal_group(proc, sig):
     """Signal the child's whole process group (children run in their own session), else just the pid."""
     try:
@@ -195,7 +234,7 @@ class Session:
 
 
 class Bench:
-    def __init__(self, *, repo_root=REPO_ROOT, port=None, camera="1", video_size="1280x720",
+    def __init__(self, *, repo_root=REPO_ROOT, port=None, camera="HD Pro Webcam C920", video_size="1280x720",
                  framerate="30", warmup=20, elf_prefix="firmware/target/", espflash="espflash",
                  ffmpeg="ffmpeg", candidates=list_candidates, flash_timeout=FLASH_TIMEOUT,
                  ring_lines=RING_LINES, snapshot_timeout=SNAPSHOT_TIMEOUT):
@@ -204,6 +243,7 @@ class Bench:
         self.elf_prefix, self.espflash, self.ffmpeg = elf_prefix, espflash, ffmpeg
         self.candidates, self.flash_timeout = candidates, flash_timeout
         self.snapshot_timeout = snapshot_timeout
+        self.camera_name = camera  # resolved device name (main() sets it after validation); the one capture uses
         self.camera_lock = threading.Lock()  # separate from flash_lock: snapshots work during a flash
         self.espflash_version = tool_version(espflash, "--version")
         self.flash_lock = threading.Lock()  # one flash/reset/stop at a time
@@ -244,6 +284,7 @@ class Bench:
             "espflash_version": self.espflash_version,
             "ffmpeg_present": shutil.which(_cmd(self.ffmpeg)[0]) is not None,
             "camera": self.camera,
+            "camera_name": self.camera_name,
             "monitor": self.monitor_status(),
             "busy": self.flash_lock.locked(),
         }
@@ -367,7 +408,7 @@ class Bench:
         if not self.camera_lock.acquire(blocking=False):
             raise BenchError(409, "another snapshot is running")
         try:
-            argv = ffmpeg_argv(self.ffmpeg, self.camera, self.video_size,
+            argv = ffmpeg_argv(self.ffmpeg, self.camera_name, self.video_size,
                                self.warmup if warmup is None else warmup, self.framerate)
             try:
                 proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -544,7 +585,7 @@ def parse_args(argv):
     env = os.environ.get
     p = argparse.ArgumentParser(description="Board bench host service (loopback only).")
     p.add_argument("--port", default=env("BENCH_PORT"), help="serial device (default: auto-detect %s)" % PORT_GLOB)
-    p.add_argument("--camera", default=env("BENCH_CAMERA", "1"), help="avfoundation name or index")
+    p.add_argument("--camera", default=env("BENCH_CAMERA", "HD Pro Webcam C920"), help="exact avfoundation video device name (indices are refused)")
     p.add_argument("--video-size", default=env("BENCH_VIDEO_SIZE", "1280x720"))
     p.add_argument("--framerate", default=env("BENCH_FRAMERATE", "30"),
                    help="avfoundation input framerate (default 30; the camera rejects ffmpeg's 29.97 default); 0 or empty = don't pass")
@@ -566,12 +607,14 @@ def main(argv=None, bench_dir=REPO_ROOT / ".bench"):
             if shutil.which(b) is None:
                 raise ValueError(f"binary not found: {b}")
         resolve_port(args.port, list_candidates())  # fail fast; re-resolved on every flash/reset
+        camera_name = resolve_camera(args.camera, list_video_devices(args.ffmpeg))
     except (ValueError, PortError) as e:
         return _fail(str(e))
     restore_tty = _save_termios()
     bench = Bench(port=args.port, camera=args.camera, video_size=args.video_size,
                   framerate=args.framerate, warmup=args.warmup, elf_prefix=args.elf_prefix,
                   espflash=args.espflash, ffmpeg=args.ffmpeg)
+    bench.camera_name = camera_name
     print(f"python {sys.version.split()[0]}, {bench.espflash_version}, "
           f"{tool_version(args.ffmpeg, '-version')}", file=sys.stderr)
     try:

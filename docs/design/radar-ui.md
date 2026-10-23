@@ -752,3 +752,40 @@ app partition size.
 - 2026-10-23, **RD.5 QA PASS** (2c55d18), ahead of RD.2/RD.3 (beads entry pending, as RD.4). Radar
   label overlap in crowded scenes is the deferred "label collision avoidance" (Risks/deferred);
   suggestion for later: draw the focus label last.
+
+- 2026-10-23, **RD.7 done** (host only, no bench). Code: `adsb-core::meta` (FocusMeta, adsbdb and
+  planespotters parsers, `Lru`, `Policy`, `RateLimiter`), `adsb-core::photo` (feature `photo`),
+  panel rows, photo and credit in `adsb-app`, fixtures in `sim/src/fixtures.rs`.
+  - **API facts verified live (2026-10-23, no raw responses committed):**
+    - adsbdb `GET /v0/aircraft/<ICAO24>?callsign=<CS>` exists and returns
+      `response.aircraft` (`type`, `icao_type`, `manufacturer`, `mode_s`, `registration`,
+      `registered_owner*`, `url_photo`, `url_photo_thumbnail`) and `response.flightroute`
+      (`callsign*`, `airline{name,icao,iata,...}`, `origin`/`destination{iata_code, icao_code,
+      municipality, name, latitude, longitude, ...}`). Without the callsign only `aircraft`;
+      `/v0/callsign/<CS>` only `flightroute`. Not found: `{"response":"unknown aircraft"}` or
+      `"unknown callsign"`. **Catch:** with the combined query an unknown callsign turns the
+      whole reply into `"unknown callsign"` although the aircraft is known (checked with a made-up
+      callsign), so RD.9 must retry without the callsign. Same for an unknown aircraft with a
+      known callsign (`"unknown aircraft"`, no route).
+    - planespotters `GET /pub/photos/hex/<ICAO24>`: `{"photos":[{"id","thumbnail":{"src",
+      "size"},"thumbnail_large":{"src","size"},"link","photographer"}]}`; `{"photos":[]}` when
+      there is none. **A User-Agent with a contact URL or e-mail is required**; without it the API
+      answers `{"error":"Server User-Agent strings must include a contact URL or email ..."}`.
+      RD.9 must set one (the user decides which contact; not committed yet). Image host is
+      `t.plnspttrs.net` (the parser accepts only `https://t.plnspttrs.net/`). The large thumbnail
+      is **280 px high and 422-498 px wide** (not always 420x280), 35 KB, **progressive JPEG**
+      (SOF2): the decoder must handle progressive (zune-jpeg does; a real photo decodes in
+      about 2 ms on the host, release). Panel crop is centre crop to 3:2, then scale to 336x224.
+  - Still `[VERIFY]`: the planespotters terms page (behind a Cloudflare challenge, not readable
+    here) for the exact credit form; the panel shows "Photo (c) <photographer> / planespotters.net"
+    (name cut at 22 chars so the source stays visible). Xtensa decode time and memory (K9, RD.10).
+    HTTP 429 behaviour of both services (only the client-side pause is implemented).
+  - `zune-jpeg`: pinned `=0.5.15` (newest stable; `0.5.16-rc*` are pre-releases),
+    `default-features = false`. `cargo check -p adsb-core --features photo` passes for
+    `xtensa-esp32s3-none-elf` (esp toolchain, `-Zbuild-std=core,alloc`) and `wasm32-unknown-unknown`:
+    `no_std` + `alloc` confirmed. `serde` + `serde_json` (alloc) are now plain dependencies of
+    `adsb-core` (the firmware links them anyway). `jpeg-encoder` 0.7 (no default features) is a
+    dev-dependency and makes baseline and progressive test images.
+  - Sim: scenario callsigns `ZQJ*` (jet, full metadata and synthetic photo), `ZQB*` (aircraft
+    only, no photo), `ZQLONG99` (very long names) have fixtures; everything else shows dashes.
+    `frame_hash` reference values changed for keyframes 1-5 (the panel has metadata now).

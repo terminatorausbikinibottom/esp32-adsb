@@ -1,9 +1,11 @@
 //! Renders keyframes (overflight states, busy, edge, range steps, track angles) to `target/ui-snapshots/*.png`.
 use adsb_app::{Badge, CardKind, HEIGHT, Status, WIDTH};
+use adsb_core::meta::FocusMeta;
 use adsb_core::scenario::{Kind, overflight as t};
 use adsb_core::tracker::{AircraftView, Card, Counters, Marker, PositionView, Snapshot};
-use sim::Sim;
+use sim::{Sim, fixtures};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 fn save(sim: &Sim, dir: &Path, name: &str) -> PathBuf {
     let path = dir.join(format!("{name}.png"));
@@ -77,7 +79,7 @@ fn synthetic(list: impl IntoIterator<Item = AircraftView>) -> Box<Snapshot> {
 }
 
 /// Shows a synthetic snapshot on a fresh app state.
-fn show(sim: &mut Sim, snap: &Snapshot) {
+fn show(sim: &mut Sim, snap: &Snapshot, meta: Option<&FocusMeta>) {
     sim.reset(Kind::Overflight, 1);
     let st = Status {
         now_ms: 1000,
@@ -85,7 +87,7 @@ fn show(sim: &mut Sim, snap: &Snapshot) {
         feed_ok: true,
         radius_km: 5.0,
     };
-    sim.app.update(snap, &st, None);
+    sim.app.update(snap, &st, meta);
     sim.render();
 }
 
@@ -129,6 +131,15 @@ fn keyframes_render_to_png() {
                 let f = ui.blips.iter().find(|b| b.focus).expect("focus blip");
                 assert_eq!(ui.title, f.label.as_str());
                 assert_eq!(ui.badge, Badge::Overhead);
+                // Scenario fixtures: full metadata and the synthetic photo.
+                assert_eq!(ui.airline, "Zeta Quebec Airways");
+                assert_eq!(ui.model, "Example Aerospace Testliner 300 (TL30)");
+                assert_eq!(ui.route, "AAA \u{2192} BBB");
+                assert_eq!(ui.cities, "Alphaville \u{2192} Bravo Bay");
+                assert_eq!(ui.credit, "Photo \u{a9} Jane Example / planespotters.net");
+                assert!(ui.photo.is_some());
+                // Photo at the top of the panel: its sky colour is at the panel's top-left corner.
+                assert!(pixel(&sim, 448 + 8 + 4, 32 + 4 + 4)[2] > 150);
                 let ring = pixel(&sim, f.x, 32 + f.y - 14);
                 assert!(
                     ring[0] > 0xf0 && ring[1] > 0xc0 && ring[2] < 0x20,
@@ -177,7 +188,7 @@ fn keyframes_render_to_png() {
         (100, 80_000.0),
     ] {
         let snap = synthetic((0..10).map(|n| ac(n, d_m, n as f64 * 36.0, Some(n as f32 * 36.0))));
-        show(&mut sim, &snap);
+        show(&mut sim, &snap, None);
         assert_eq!(sim.app.ui().range_label, format!("{km} km"));
         assert_eq!(sim.app.ui().blips.len(), 10);
         shots.push(save(&sim, &dir, &format!("9-range-{km}")));
@@ -206,11 +217,61 @@ fn keyframes_render_to_png() {
             }))
             .chain([ac(20, 30_000.0, 100.0, Some(10.0))]),
     );
-    show(&mut sim, &snap);
+    show(&mut sim, &snap, None);
     assert_eq!(sim.app.ui().beyond, "+1 beyond");
     let sprites: Vec<u8> = sim.app.ui().blips.iter().map(|b| b.sprite).collect();
     assert_eq!(sprites[..6], [0, 3, 6, 12, 18, 24]);
     shots.push(save(&sim, &dir, "10-tracks"));
+
+    // Metadata states on a synthetic snapshot whose focus has a callsign.
+    let one = || synthetic([ac(1, 1_500.0, 40.0, Some(90.0))]);
+    let photo = fixtures::synthetic_photo();
+    let with = |json, by: &str| fixtures::from_json(json, Some((by, Rc::clone(&photo))));
+
+    let m = fixtures::from_json(fixtures::PRIVATE, None);
+    show(&mut sim, &one(), Some(&m));
+    let ui = sim.app.ui();
+    assert_eq!(
+        (ui.airline.as_str(), ui.route.as_str()),
+        ("Example Flying Club", "\u{2014} \u{2192} \u{2014}")
+    );
+    assert!(ui.photo.is_none() && ui.credit.is_empty());
+    shots.push(save(&sim, &dir, "11-meta-no-photo"));
+
+    show(&mut sim, &one(), None);
+    let ui = sim.app.ui();
+    assert_eq!(
+        (
+            ui.airline.as_str(),
+            ui.model.as_str(),
+            ui.registration.as_str()
+        ),
+        ("\u{2014}", "\u{2014}", "\u{2014}")
+    );
+    assert_eq!(ui.title, "ZQ01");
+    shots.push(save(&sim, &dir, "12-meta-not-found"));
+
+    let m = with(fixtures::LONG_NAME, "A. Photographer-Wit...Long-Name");
+    show(&mut sim, &one(), Some(&m));
+    assert_eq!(
+        sim.app.ui().credit,
+        "Photo \u{a9} A. Photographer-Wit... / planespotters.net"
+    );
+    shots.push(save(&sim, &dir, "13-meta-long-names"));
+
+    let m = with(fixtures::DIACRITICS, "Zoë Łukasiewicz");
+    show(&mut sim, &one(), Some(&m));
+    assert_eq!(
+        sim.app.ui().cities,
+        "Łódź \u{2192} Zürich · São Paulo · Kraków"
+    );
+    shots.push(save(&sim, &dir, "14-meta-diacritics"));
+
+    // Meta without a focus is ignored.
+    let mut none = one();
+    none.focus = None;
+    show(&mut sim, &none, Some(&m));
+    assert_eq!(sim.app.ui().airline, "\u{2014}");
 
     for s in shots {
         let len = std::fs::metadata(&s).unwrap().len();

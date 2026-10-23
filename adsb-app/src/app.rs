@@ -1,7 +1,7 @@
 use crate::ui::{self, AppWindow};
 use crate::{Badge, CardKind, HEIGHT, WIDTH, render_by_line};
 use adsb_core::geo::compass_label;
-use adsb_core::meta::FocusMeta;
+use adsb_core::meta::{Airport, FocusMeta, Photo};
 use adsb_core::radar::{self, Blip, RangeKm, RangeState};
 use adsb_core::tracker::{AircraftView, Card, Marker, Snapshot};
 use alloc::boxed::Box;
@@ -15,7 +15,7 @@ use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferTyp
 use slint::platform::{Platform, PointerEventButton, WindowAdapter, WindowEvent};
 use slint::{
     ComponentHandle, Image, LogicalPosition, Model, ModelRc, PhysicalSize, PlatformError,
-    Rgba8Pixel, SharedPixelBuffer, VecModel,
+    Rgb8Pixel, Rgba8Pixel, SharedPixelBuffer, VecModel,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +65,15 @@ pub struct Ui {
     /// Focus aircraft: callsign or ICAO, an em dash without one.
     pub title: String,
     pub badge: Badge,
+    /// Metadata rows (an em dash while unknown or not loaded yet).
+    pub airline: String,
+    pub model: String,
+    pub registration: String,
+    pub route: String,
+    pub cities: String,
+    /// "Photo © name / planespotters.net"; empty without a photo.
+    pub credit: String,
+    pub photo: Option<Rc<Photo>>,
     pub alt: String,
     pub gs: String,
     pub trk: String,
@@ -89,6 +98,13 @@ impl Default for Ui {
             blips: Vec::new(),
             title: dash(),
             badge: Badge::None,
+            airline: dash(),
+            model: dash(),
+            registration: dash(),
+            route: "\u{2014} \u{2192} \u{2014}".to_string(),
+            cities: "\u{2014} \u{2192} \u{2014}".to_string(),
+            credit: String::new(),
+            photo: None,
             alt: dash(),
             gs: dash(),
             trk: dash(),
@@ -175,6 +191,54 @@ fn panel(snap: &Snapshot, ui: &mut Ui) {
             Badge::Approaching
         } else {
             Badge::Nearest
+        };
+    }
+}
+
+fn some(s: &Option<String>) -> Option<&str> {
+    s.as_deref().filter(|s| !s.is_empty())
+}
+
+/// Metadata values of the focus aircraft into the panel rows.
+fn meta_rows(m: &FocusMeta, ui: &mut Ui) {
+    let place = |a: &Option<Airport>, f: fn(&Airport) -> Option<&String>| {
+        a.as_ref()
+            .and_then(f)
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .unwrap_or_else(|| "\u{2014}".to_string())
+    };
+    let pair = |f| {
+        format!(
+            "{} \u{2192} {}",
+            place(&m.origin, f),
+            place(&m.destination, f)
+        )
+    };
+    ui.airline = some(&m.airline).map_or(ui.airline.clone(), String::from);
+    let kind: Vec<&str> = [some(&m.manufacturer), some(&m.model)]
+        .into_iter()
+        .flatten()
+        .collect();
+    if !kind.is_empty() {
+        ui.model = kind.join(" ");
+        if let Some(t) = some(&m.icao_type) {
+            ui.model += &format!(" ({t})");
+        }
+    }
+    ui.registration = some(&m.registration).map_or(ui.registration.clone(), String::from);
+    ui.route = pair(|a| a.iata.as_ref());
+    ui.cities = pair(|a| a.municipality.as_ref());
+    if let Some(p) = &m.photo {
+        ui.photo = Some(p.clone());
+        ui.credit = match some(&m.photographer) {
+            // Long names are cut here, not elided by Slint: the source must stay visible.
+            Some(by) if by.chars().count() > 22 => {
+                let by: String = by.chars().take(19).collect();
+                format!("Photo \u{a9} {by}... / planespotters.net")
+            }
+            Some(by) => format!("Photo \u{a9} {by} / planespotters.net"),
+            None => "Photo: planespotters.net".to_string(),
         };
     }
 }
@@ -301,8 +365,9 @@ impl App {
     }
 
     /// Recompute the view from the latest snapshot and push only what changed to Slint.
-    /// Returns whether anything changed. `_meta` is the focus aircraft's metadata (RD.7).
-    pub fn update(&mut self, snap: &Snapshot, st: &Status, _meta: Option<&FocusMeta>) -> bool {
+    /// Returns whether anything changed. `meta` belongs to the focus aircraft (the platform looks it
+    /// up); it is ignored while there is no focus.
+    pub fn update(&mut self, snap: &Snapshot, st: &Status, meta: Option<&FocusMeta>) -> bool {
         let n = snap.counters.messages;
         let dt = st.now_ms.saturating_sub(self.rate.since_ms);
         if dt >= 1000 {
@@ -340,6 +405,9 @@ impl App {
                 new.beyond = format!("+{beyond} beyond");
             }
             panel(snap, &mut new);
+            if let (Some(m), true) = (meta, snap.focus.is_some()) {
+                meta_rows(m, &mut new);
+            }
         }
         self.apply(new)
     }
@@ -353,9 +421,23 @@ impl App {
         }
         diff!(wifi_ok => set_wifi_ok, feed_ok => set_feed_ok, counts => set_counts,
             rate => set_rate, clock => set_clock, kind => set_kind, title => set_heading,
-            badge => set_badge, alt => set_alt, gs => set_gs, trk => set_trk, dist => set_dist,
+            badge => set_badge, airline => set_airline, model => set_model,
+            registration => set_registration, route => set_route, cities => set_cities,
+            credit => set_credit, alt => set_alt, gs => set_gs, trk => set_trk, dist => set_dist,
             range_label => set_range_label, half_label => set_half_label,
             beyond => set_beyond);
+        if old.photo.as_ref().map(Rc::as_ptr) != new.photo.as_ref().map(Rc::as_ptr) {
+            ui.set_has_photo(new.photo.is_some());
+            if let Some(p) = &new.photo {
+                ui.set_photo(Image::from_rgb8(
+                    SharedPixelBuffer::<Rgb8Pixel>::clone_from_slice(
+                        &p.rgb,
+                        u32::from(p.width),
+                        u32::from(p.height),
+                    ),
+                ));
+            }
+        }
         if old.radius_ring_px != new.radius_ring_px {
             ui.set_radius_ring(new.radius_ring_px as f32);
         }
@@ -486,6 +568,38 @@ mod tests {
         assert_eq!((ui.range_km, ui.blips.len()), (25, 2));
         assert_eq!(ui.radius_ring_px, 42); // 5 km of 25 km
         assert_eq!(app.blips.row_count(), 2);
+
+        // Metadata of the focus: rows, credit and photo; a repeat changes nothing.
+        let photo = Rc::new(Photo {
+            width: 2,
+            height: 1,
+            rgb: alloc::vec![0, 0, 0, 255, 255, 255],
+        });
+        let meta = FocusMeta {
+            airline: Some("Example Air".into()),
+            manufacturer: Some("Acme".into()),
+            model: Some("X-1".into()),
+            icao_type: Some("AX1".into()),
+            origin: Some(Airport {
+                iata: Some("AAA".into()),
+                municipality: Some("Alpha".into()),
+            }),
+            photographer: Some("Jo".into()),
+            photo: Some(photo),
+            ..Default::default()
+        };
+        assert!(app.update(&snap, &st, Some(&meta)));
+        let ui = app.ui();
+        assert_eq!(ui.airline, "Example Air");
+        assert_eq!(ui.model, "Acme X-1 (AX1)");
+        assert_eq!(ui.registration, "\u{2014}");
+        assert_eq!(ui.route, "AAA \u{2192} \u{2014}");
+        assert_eq!(ui.cities, "Alpha \u{2192} \u{2014}");
+        assert_eq!(ui.credit, "Photo \u{a9} Jo / planespotters.net");
+        assert!(!app.update(&snap, &st, Some(&meta)));
+        assert!(app.ui().photo.is_some());
+        assert!(app.update(&snap, &st, None), "meta gone: back to dashes");
+        assert!(app.ui().photo.is_none() && app.ui().credit.is_empty());
 
         // No focus blip (focus outside the range): panel still shows it, radar has no ring.
         snap.list[1].position.as_mut().unwrap().ground_m = 60_000.0;

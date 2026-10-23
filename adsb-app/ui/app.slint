@@ -96,6 +96,9 @@ export component AppWindow inherits Window {
     // Info panel (focus aircraft).
     in property <string> heading: "—";
     in property <Badge> badge;
+    in property <image> photo;
+    in property <bool> has-photo;
+    in property <string> credit;
     in property <string> airline: "—";
     in property <string> model: "—";
     in property <string> registration: "—";
@@ -107,7 +110,7 @@ export component AppWindow inherits Window {
     in property <string> dist: "—";
 
     // Not shown: its literals make the font embedder bake these non-ASCII glyphs in.
-    out property <string> glyph-seed: "°→↑↓·±×−–—·áàâäãåçéèêëíìîïñóòôöõøúùûüýÿÁÀÂÄÅÇÉÈÊËÍÎÏÑÓÔÖØÚÛÜßœŠšŽžłŁ";
+    out property <string> glyph-seed: "°→↑↓·±×−–—·©’áàâäãåæçéèêëíìîïñóòôöõøúùûüýþÿÁÀÂÄÃÅÆÇÉÈÊËÍÌÎÏÑÓÒÔÖÕØÚÙÛÜÝÞßðÐœŒĀāĂăĄąĆćČčĎďĐđĒēĖėĘęĚěĞğĪīĮįİıŁłŃńŇňŌōŐőŘřŚśŞşŠšŤťŪūŮůŰűŲųŹźŻżŽž";
 
     StatusBar {
         y: 0px;
@@ -190,10 +193,11 @@ export component AppWindow inherits Window {
             width: 336px;
             height: 224px;
             background: #1e232d;
-            Image { x: 134px; y: 62px; width: 68px; height: 68px; source: plane-icon; }
-            Text { y: 136px; width: parent.width; text: "no photo"; font-size: 16px; color: #7b8494; horizontal-alignment: center; }
+            if !has-photo: Image { x: 134px; y: 62px; width: 68px; height: 68px; source: plane-icon; }
+            if !has-photo: Text { y: 136px; width: parent.width; text: "no photo"; font-size: 16px; color: #7b8494; horizontal-alignment: center; }
+            if has-photo: Image { width: 336px; height: 224px; source: photo; }
         }
-        // Photographer credit (RD.7) goes at y = 230.
+        Text { x: 8px; y: 229px; width: 336px; text: credit; font-size: 13px; color: #7b8494; overflow: elide; }
 
         Text { x: 8px; y: 246px; width: 220px; text: heading; font-size: 36px; font-weight: 700; color: #ffffff; overflow: elide; }
         if badge != Badge.none: Rectangle {

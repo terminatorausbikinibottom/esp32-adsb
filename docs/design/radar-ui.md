@@ -729,3 +729,9 @@ app partition size.
   80 MHz DIO (repo root and `firmware/`). **Gate parked for the user** (options: bounce path
   integration (M2), lower PCLK (M3), palette framebuffer (M4), code/rodata from PSRAM). RD.4, RD.5,
   RD.7 continue meanwhile (no dependency on RD.2).
+
+- 2026-10-23, **RD.4 QA PASS** (2ab2847), done ahead of RD.2/RD.3 per the dependency table. Not yet
+  recorded in beads (`fs claim` refuses: `add-step` chained the steps linearly, RD.2 waits on the
+  user); record it with `fs` once RD.2 is unblocked. QA notes for RD.5: `Snapshot.focus` and
+  `primary` are tracked separately (don't rely on equality); the focus aircraft may have no blip
+  (outside range or past 48), so the radar must cope with "no focus blip".

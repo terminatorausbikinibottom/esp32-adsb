@@ -342,3 +342,11 @@ which is its own feature), monitor auto-restart (R3, only if step 6 shows the ne
   `.bench/token` on the bind mount; validated ELF copied to a host temp file before flashing
   (TOCTOU); `/stream.mjpg` made optional (step 8); file spool (T2) named as the transport fallback;
   boot test pattern and launchd deferred.
+- 2026-10-23: plan approved by user. Decisions: B1 = (a) Logitech HD USB webcam, avfoundation
+  device index `1` (default for `--camera`, still configurable); B2 = (a) manual start in a Terminal
+  tab; B3 = (b) boot test pattern deferred; B4 = (a) add `Bash(tools/bench/bench:*)` to
+  `.claude/settings.local.json` in step 7 (user-approved); B5 = port 7777 as the default, configurable
+  (`--port` on the host, `BENCH_URL` in the container). Orchestration change: steps 2-5, 7, 8 are local
+  tooling and go to `senior-engineer`, not `devops-engineer`. Step 2 does not depend on step 1's
+  outcome and runs in parallel with the user's step-1 spike; a fallback forced by step 1 revises this
+  doc before step 3.

@@ -1,0 +1,344 @@
+# Board bench: automated flash, serial log and webcam check from the container
+
+Status: **draft, awaiting user review.** Date: 2026-10-23. Branch: `feature/adsb-display`.
+
+Conventions (same as [adsb-display.md](adsb-display.md) and
+[devcontainer-gh-cli.md](devcontainer-gh-cli.md)):
+
+- **[VERIFY]** marks a fact I could not confirm from inside the container (no Mac, board or camera
+  reachable during design). Confirm it at implementation time. Don't treat it as fact.
+- Step tags: **[devops]** = repo tooling, testable in the container without hardware;
+  **[manual]** = **user-run acceptance step** that needs the real Mac, board and/or camera.
+
+---
+
+## Decisions needed from user
+
+| # | Decision | Options | Recommendation | Blocks |
+|---|----------|---------|----------------|--------|
+| B1 | **Which camera?** | (a) UVC USB webcam on a fixed mount. (b) Mac built-in camera. | **(a)**. A built-in camera means the laptop lid is the camera mount and blocks video calls while the bench runs. The design handles both: the avfoundation device is a host-side setting (`--camera`, name or index). | Step 1 (device name), step 6 |
+| B2 | **How is the host service started?** | (a) Manually in a macOS Terminal tab (`python3 tools/bench/bench_host.py ...`). (b) launchd user agent (`~/Library/LaunchAgents/*.plist`). | **(a) for now.** Camera permission (TCC) is granted to the app that launches ffmpeg (Terminal/iTerm). Under launchd there is no such app and the grant is unreliable [VERIFY]. (b) is documented as a later option. | Step 7 |
+| B3 | **Firmware boot test pattern** (corner markers, colour bars behind a feature flag) in this feature? | (a) Yes. (b) Later, as a firmware step in adsb-display. | **(b).** This feature is host tooling. The existing log lines (`ch422g: backlight on`, `alive 0s`) are good enough boot markers. Revisit once step 6 shows whether photos of the real UI are good enough to judge. | — |
+| B4 | **Claude Code allow-list entry for `tools/bench/bench`?** | (a) Add `Bash(tools/bench/bench:*)` to `.claude/settings.local.json`. (b) Leave as is, so each call is prompted. | Your call. This design doesn't change permission settings. (a) is what makes the loop actually unattended. | Step 7 |
+| B5 | Service port | any free loopback port | `7777` | Step 1 |
+
+---
+
+## Context
+
+Every firmware change in adsb-display Phase 1 has ended in "waiting on user (board)". The agent
+builds an ELF, the user flashes it from the Mac, watches the serial log and the panel, and reports
+back in prose. That round trip is the slowest part of the loop, and the reports are lossy (no full
+log, no picture).
+
+Goal: the Claude harness **inside the container** can flash the board, read the serial log, and
+take a photo of the panel without a human, and then judge the result.
+
+Established facts:
+
+- The podman machine on macOS (applehv/libkrun) **cannot pass USB devices** into containers
+  (README "Flashing"). So serial and camera access must happen on the host.
+- `espflash` has no `rfc2217://` port support as far as known. RFC2217 + esptool was considered
+  and rejected as clunky (two serial stacks, no backtrace decoding, a separate RFC2217 server).
+- The workspace is a **bind mount shared between host and container**. ELFs built in the container
+  (`firmware/target/xtensa-esp32s3-none-elf/release/firmware`, named copies like
+  `firmware/target/fw-D-stock.elf`) appear on the host at the same repo-relative path. So the
+  host never needs an upload, only a path.
+- The board enumerates two ports on macOS: native USB-Serial-JTAG `/dev/cu.usbmodem101` (VID
+  303A, the one to use) and a CH343 UART bridge. `esp-println` is in `auto` mode: while a host is
+  attached to the native port, logs go there. Anything printed while no host has the port open is
+  dropped, so **who holds the port, and when, matters for capturing the first boot lines.**
+- `firmware/.cargo/config.toml` already uses `espflash flash --monitor --chip esp32s3` as the runner.
+  The user's manual flow (README) is `espflash flash --monitor --port /dev/cu.usbmodem101 <elf>`.
+- Container: Debian trixie with python 3.13 (`devcontainers/features/python`). No pyserial or
+  other Python packages are installed, and none are needed by this design.
+- Existing log lines that make good markers: `Embassy initialized!` (early), `ch422g: backlight
+  on` (panel visible), `alive 0s` (main loop running). Panics come from `esp-backtrace`.
+
+## Options
+
+### Transport: how the container reaches the host
+
+| # | Option | Trade-off |
+|---|--------|-----------|
+| T1 | **Host HTTP service on 127.0.0.1 + bearer token**, reached at `host.containers.internal:7777` (gvproxy forwards the host gateway address to host loopback [VERIFY]). | Natural request/response, long-polling for logs, a browser stream for the human is free. Depends on an unverified gvproxy behaviour. Opens a loopback port that every local process (and every container on the podman machine) can reach, so a token is required. |
+| T2 | **File spool over the bind mount**: the container writes request JSON to `.bench/queue/`, a host daemon polls it and writes the results, log file and JPEGs to `.bench/out/`. | No network or token at all; the trust boundary is "can write to the repo", which the container already has. But it's slower (polling), and tailing a growing file across virtiofs may see stale sizes or metadata [VERIFY]. It also needs its own little protocol (ids, atomic rename, cleanup). |
+| T3 | **SSH from the container to the Mac** (Remote Login on), and run `espflash`/`ffmpeg` remotely. | No custom service. But it gives the container a **full shell on the Mac**: a much bigger capability than "flash this ELF". It also needs a new key and macOS Remote Login enabled. Rejected. |
+| T4 | RFC2217 server on the host + esptool in the container. | Already rejected (see Context). It also doesn't cover the camera. |
+
+### Serial ownership on the host
+
+| # | Option | Trade-off |
+|---|--------|-----------|
+| S1 | **Run `espflash` for everything**: `espflash flash` (no app reset) then a long-running `espflash monitor --non-interactive --elf <elf>` subprocess whose stdout the service buffers. | One serial stack, and the same tool the user already uses. espflash decodes backtraces against the ELF, and the monitor resets the chip when it attaches, so the first boot lines are captured [VERIFY reset-on-attach and that `--non-interactive` works with stdout piped]. The text output may contain ANSI codes. |
+| S2 | **Stdlib raw serial reader** (`os.open` + `termios`/`tty.setraw` on `/dev/cu.usbmodem*`) after `espflash flash` exits. | No dependence on espflash monitor behaviour, but the native port re-enumerates on reset, so it needs reopen/retry logic, and boot lines printed before the reopen are lost. No backtrace decoding. |
+| S3 | `espflash flash --monitor` as a single process, splitting "flash done" from "monitor running" by matching espflash's progress text. | Closest to the manual flow, but the flash exit code is only known on failure, and success detection depends on espflash's wording. |
+
+### Camera capture
+
+| # | Option | Trade-off |
+|---|--------|-----------|
+| C1 | **One-shot ffmpeg per snapshot** (`-f avfoundation -i "<camera>:none"`), discarding the first N frames so auto-exposure settles, then writing a single JPEG. | Simple and stateless; the camera is only on while a snapshot is taken. Each snapshot costs about 1–2 s for camera start and warm-up [VERIFY]. |
+| C2 | **Persistent ffmpeg** emitting MJPEG, with the service keeping the latest frame and serving both snapshots and a stream. | Instant snapshots, but the camera stays on (LED, blocks other apps with a built-in camera), and needs frame parsing, staleness handling and idle shutdown. More code for a gain we don't need. |
+
+## Decision (ADR)
+
+- **Context:** as above. The agent needs flash + log + photo from inside the container. USB can't
+  enter the container, and the host has to stay safe even though the service can flash hardware
+  and run processes.
+- **Options considered:** transport T1–T4, serial S1–S3, camera C1–C2 (tables above).
+- **Decision:**
+  1. **T1, host HTTP service**, Python **stdlib only** (`http.server.ThreadingHTTPServer`,
+     `subprocess`, `threading`, `json`, `hmac`, `secrets`). It binds to `127.0.0.1:7777` only.
+     The container reaches it at `http://host.containers.internal:7777`. **T2 is the fallback** if
+     step 1 shows that gvproxy doesn't forward to host loopback. To make that switch cheap, the
+     host code is split into a transport-independent `Bench` core (flash, monitor, log buffer,
+     snapshot) and a thin HTTP front end. Only the front end and the CLI's client would change.
+  2. **S1, espflash owns the port.** `POST /flash` stops any running monitor and runs
+     `espflash flash --chip esp32s3 --port <port> --after no-reset <copy-of-elf>` (exact
+     no-reset flag [VERIFY]). It reports that process's exit code and output. On success it
+     starts `espflash monitor --chip esp32s3 --port <port> --non-interactive --elf <copy-of-elf>`
+     [VERIFY flags]. That monitor resets the chip, so the log buffer starts at the first boot line.
+     `POST /reset` = restart the monitor (= reboot and capture a fresh boot log, without
+     flashing). **S3 is the fallback** if the monitor doesn't reset on attach, and **S2** if
+     `espflash monitor` refuses to run without a TTY. Step 1 decides.
+  3. **C1, one-shot ffmpeg** with configurable warm-up frames. A `GET /stream.mjpg` for a human in
+     a browser on the Mac is an **optional last step** (step 8), with one ffmpeg per connected
+     client. The human can also just open Photo Booth or `ffplay`.
+  4. **Container CLI `tools/bench/bench`** (Python stdlib, `urllib`). Regex matching for
+     `--until`/`--fail-on` runs **in the container, on the CLI side**. The host only serves lines by
+     sequence number with long-polling. That keeps regex evaluation (and any ReDoS) out of the host
+     process and keeps the host API dumb.
+  5. **Shared secret via the bind mount:** at startup the host writes a random token to
+     `.bench/token` (mode 0600, `.bench/` gitignored). The CLI reads it from the same repo path. No
+     copy/paste, and only the host user (and so the container user, via `keep-id`) can read it.
+  6. **Project skill `.claude/skills/board-verify/SKILL.md`** encodes the agent procedure:
+     health → flash → wait for marker / fail on panic → snapshot → judge → report with evidence.
+  7. The boot test pattern (B3) and launchd (B2) are **deferred**.
+- **Why:**
+  - T1 has the best ergonomics (synchronous flash result, long-polled logs, browser stream for
+    free), and its one unknown is a 2-minute check. T2 has two unknowns of its own (virtiofs
+    freshness, spool protocol) and is slower, so it's the fallback, not the default. T3's
+    capability is far too broad.
+  - S1 reuses the tool the user already trusts, gets backtrace decoding for free, and the
+    flash/monitor split gives a clean exit code for "did flashing work" and a full boot log for
+    "did it boot".
+  - C1 is the least code and the least intrusive (camera off between snapshots).
+  - Client-side regex keeps the host's attack surface (and code) minimal.
+- **Consequences:**
+  - New host prerequisites: `python3` (3.9+ if using the Xcode CLT python, see R7), `espflash`
+    (already required), `ffmpeg` (`brew install ffmpeg`), and macOS Camera permission for the
+    terminal app that starts the service.
+  - **A process in the container can now flash the board and take photos of the room** in front
+    of the camera without a human in the loop. Mitigations: the security section and B4.
+  - Webcam images and serial logs may show live traffic (adsb-display privacy note) and the room.
+    They go to the gitignored `.bench/` and must not be committed or shared.
+  - The manual README flow keeps working. The service is optional and must be stopped (or
+    `POST /monitor/stop`) before the user runs `espflash` by hand, because only one process can
+    hold the port.
+
+### Host service API (all JSON unless noted)
+
+All requests need `Authorization: Bearer <token>`. The token is compared with
+`hmac.compare_digest`. Only `GET /stream.mjpg` also accepts `?token=`, for the browser.
+
+| Endpoint | Behaviour |
+|----------|-----------|
+| `GET /health` | `{ok, service_version, port, port_present, espflash_version, ffmpeg_present, camera, monitor:{running, exit_code}, busy}`. `port_present` = the configured device node exists. |
+| `POST /flash` `{"elf": "<repo-relative path>"}` | Validate (see Security) → copy to a host temp file → stop the monitor → run `espflash flash` (timeout 300 s) → on exit 0, start the monitor with a new `session` id. Returns `{ok, exit_code, output_tail, session, log_seq}`. `log_seq` = first sequence number of this session. **409** if another flash or reset is running (one global lock), **400** on bad path, **502** with `output_tail` if espflash failed. |
+| `POST /reset` | Restart the monitor (= reset the chip) with the last flashed ELF. Returns `{ok, session, log_seq}`. 409 if busy, 409 if nothing has been flashed since startup. |
+| `POST /monitor/stop` | Release the serial port (for manual use by the user). |
+| `GET /log?since=N&wait=S&max=M` | Lines with `seq > N`, long-polled up to `S` seconds (cap 30). Returns `{session, lines:[{seq, t, text}], next, dropped, monitor:{running, exit_code}}`. `dropped=true` if `N` is older than the oldest buffered line. Ring buffer: 20 000 lines. Lines are UTF-8 decoded with `errors="replace"`, with ANSI escapes and trailing `\r` stripped. |
+| `GET /snapshot.jpg?warmup=N` | One-shot ffmpeg (timeout 20 s), returns `image/jpeg`. The output is checked for JPEG magic (`FF D8`). **503** if ffmpeg fails (the body has the stderr tail, which is where TCC denials show up). The camera lock is separate from the flash lock, so a snapshot can run during a flash. |
+| `GET /stream.mjpg` | Step 8, optional. |
+
+Host config (CLI flags of `bench_host.py`, with env var equivalents): `--port` (default: the
+single `/dev/cu.usbmodem*` match; if there are zero or several, it errors and lists them),
+`--camera` (avfoundation name or index, default `0`), `--video-size`/`--framerate`, `--listen`
+(default `127.0.0.1:7777`), `--elf-prefix` (default `firmware/target/`), `--espflash`/`--ffmpeg`
+(binary paths, which is also how the tests inject fakes). Startup fails fast if a binary is
+missing. **It refuses any `--listen` address that isn't loopback.**
+
+### Container CLI
+
+`tools/bench/bench` (executable Python script). It finds the repo root from its own location,
+reads `.bench/token`, and uses `BENCH_URL` (default `http://host.containers.internal:7777`).
+
+| Command | Behaviour / exit code |
+|---------|-----------------------|
+| `bench health` | Prints the health JSON. Exit 0 only if ok, the port is present and the tools are present. |
+| `bench flash <elf> [--until RE] [--fail-on RE] [--timeout S]` | `<elf>` is taken relative to the repo root (an absolute path inside the repo is converted). It prints the espflash output tail. With `--until`, it then behaves like `bench log --until` from the returned `log_seq`. |
+| `bench log [--since SEQ\|--session] [--until RE] [--fail-on RE] [--timeout S] [--follow]` | Prints lines. **Exit codes: 0** = `--until` matched, **1** = `--fail-on` matched, **2** = timeout, **3** = monitor died, **4** = transport/auth error. Default `--fail-on`: `panic|Guru Meditation|abort\(\)|Exception` (overridable, `--fail-on ''` disables it). |
+| `bench reset [--until ...]` | Same as flash, without flashing. |
+| `bench snap [OUT] [--warmup N] [--delay S]` | Writes the JPEG (default `.bench/snaps/<UTC timestamp>.jpg`) and prints the path, so the agent can `Read` it. |
+
+### Security
+
+- **No `shell=True` anywhere.** Commands are argv lists built by pure functions (unit-tested). The
+  only caller-controlled argv element is the ELF path, and that is the validated host temp copy,
+  never the raw string.
+- **ELF path validation** (host side, which is the only side that matters): reject absolute paths
+  and NUL bytes; `realpath(repo_root / elf)` must lie under `realpath(repo_root / elf_prefix)`
+  (`os.path.commonpath`, which also resolves symlinks); it must be a regular file under 64 MiB
+  whose first 4 bytes are `\x7fELF`. Then **copy it to a host temp dir and flash the copy**, so the
+  file can't be swapped between check and use (TOCTOU).
+- Bind address hard-limited to loopback. Bearer token of 32 random bytes (`secrets.token_urlsafe`),
+  regenerated on every service start, file mode 0600.
+- Requests that carry an `Origin` header are rejected, except `GET /stream.mjpg`. That blocks
+  browser-based CSRF/DNS-rebinding attempts against the loopback port even before the token check.
+- Request bodies are capped at 4 KiB, and unknown JSON keys are rejected. Every subprocess has a
+  timeout. Child processes are killed on shutdown (SIGINT/SIGTERM handler, `atexit`).
+- Residual risk: anything that can read `.bench/token`, meaning anything running as the user on
+  the Mac or in the container, can flash arbitrary ELFs from `firmware/target/` and take photos.
+  That's the intended capability. Stop the service when you're not using it.
+
+### Layout
+
+```
+tools/bench/
+  bench_host.py        # host service: Bench core + HTTP front end (single file, stdlib)
+  bench                # container CLI (stdlib)
+  tests/
+    fake_espflash.py   # canned flash output / exit code / monitor lines, driven by env vars
+    fake_ffmpeg.py     # writes a tiny valid JPEG, or fails like a TCC denial
+    test_host_core.py  # path validation, argv builders, ring buffer, ANSI strip
+    test_host_http.py  # server on an ephemeral 127.0.0.1 port with the fakes
+    test_cli.py        # CLI against the in-container server (end to end, no hardware)
+.claude/skills/board-verify/SKILL.md
+.bench/                # gitignored: token, snaps/
+```
+
+Tests: `python3 -m unittest discover -s tools/bench/tests -t tools/bench` inside the container.
+
+## Plan
+
+Each step is one commit, and its verification runs green before the next starts.
+
+1. **[manual] Spike: verify the three host assumptions.** No repo code. The user runs these and
+   pastes the output. Results go into the revision log and pick the fallbacks.
+   - a. Transport: on the Mac `python3 -m http.server --bind 127.0.0.1 7777`. In the container
+     `curl -sS -o /dev/null -w '%{http_code}\n' http://host.containers.internal:7777/` → `200`.
+     If not: try `getent hosts host.containers.internal` and `curl http://192.168.127.254:7777/`
+     [VERIFY gvproxy host address]. If neither works → **switch to T2** (revise this doc first).
+   - b. Serial: `espflash flash --chip esp32s3 --port /dev/cu.usbmodem101 --after no-reset
+     firmware/target/xtensa-esp32s3-none-elf/release/firmware; echo exit=$?`, then
+     `espflash monitor --chip esp32s3 --port /dev/cu.usbmodem101 --non-interactive --elf
+     <same elf> | cat`. Check: (i) the flags exist in the host espflash version
+     (`espflash --version`, `espflash monitor --help`); (ii) the monitor runs with stdout piped;
+     (iii) the board boots when the monitor attaches, and the first lines include
+     `Embassy initialized!`; (iv) output with ANSI codes, if any. Outcome → S1 confirmed, or
+     S3/S2 (revise doc).
+   - c. Camera: `ffmpeg -f avfoundation -list_devices true -i ""` (device name/index, B1). Then
+     `ffmpeg -f avfoundation -framerate 30 -video_size 1280x720 -i "<cam>:none" -vf
+     "select=gte(n\,30)" -frames:v 1 -y /tmp/bench.jpg` run from the terminal that will host the
+     service. Grant the Camera permission prompt. Check: a non-black, sharp photo of the panel.
+     Note the supported framerate/size (avfoundation rejects unsupported combinations [VERIFY])
+     and how many warm-up frames give stable exposure.
+   - *Verify:* all three outcomes recorded in the revision log. Fallback decisions, if any, made
+     with the user before step 2.
+
+2. **[devops] Host service skeleton.** `bench_host.py`: arg parsing, loopback-only bind check,
+   token generation to `.bench/token` (0600), auth middleware (bearer, `compare_digest`, Origin
+   rejection, body cap), `GET /health` (binary presence, port presence), ELF path validation +
+   temp copy as a pure function, argv builders as pure functions. Add `.bench/` to `.gitignore`.
+   - *Verify (container):* unit tests for path validation (accepts a fake ELF under
+     `firmware/target/`; rejects `../`, absolute, symlink escaping the prefix, non-ELF, oversize,
+     directory, NUL), argv builders (exact lists, no shell), non-loopback `--listen` refused. HTTP
+     test: 401 without/with wrong token, 403 with `Origin`, 200 `/health` with token.
+
+3. **[devops] Flash, monitor, log buffer.** `Bench` core: global flash lock, monitor subprocess with
+   a reader thread → ring buffer + `threading.Condition` for long-poll, sessions, ANSI strip,
+   `POST /flash`, `POST /reset`, `POST /monitor/stop`, `GET /log`, child cleanup on shutdown,
+   timeouts.
+   - *Verify (container), with `--espflash tests/fake_espflash.py`:* flash success → monitor lines
+     appear in `/log` with increasing `seq`; flash failure → 502 with the output tail and no
+     monitor; concurrent flash → 409; `since` older than the buffer → `dropped`; long-poll returns
+     early when a line arrives and returns empty after `wait`; monitor exit → `running=false`
+     with its exit code; reset starts a new session; ANSI/`\r` stripped; no orphaned fake
+     processes after server shutdown.
+
+4. **[devops] Snapshot.** `GET /snapshot.jpg` with C1 argv (`-f avfoundation -framerate F
+   -video_size WxH -i "<cam>:none" -vf select=gte(n\,W) -frames:v 1 -f image2 -c:v mjpeg pipe:1`
+   [VERIFY that the mjpeg-to-pipe form works on the Mac in step 6; otherwise use a temp file]),
+   camera lock, timeout, JPEG magic check.
+   - *Verify (container), with `--ffmpeg tests/fake_ffmpeg.py`:* 200 + `image/jpeg` + bytes start
+     with `FF D8`; fake failure → 503 with the stderr tail; timeout → 503 and the fake is killed;
+     the argv builder test checks the camera/warm-up values.
+
+5. **[devops] Container CLI.** `tools/bench/bench` with `health`, `flash`, `log`, `reset`, `snap`,
+   the exit-code contract, and repo-root/token discovery.
+   - *Verify (container):* end-to-end tests start `bench_host.py` on an ephemeral port with both
+     fakes and `BENCH_URL` pointed at it, then check: `bench flash <fake elf> --until 'alive 0s'`
+     → exit 0; a fake panic line → exit 1; no marker → exit 2 within the timeout; monitor dies →
+     3; wrong token → 4; `bench snap` writes a JPEG and prints its path; an absolute in-repo path is
+     converted to repo-relative.
+
+6. **[manual] Acceptance on the real bench.** The user starts
+   `python3 tools/bench/bench_host.py --camera "<B1 device>"` in a Mac Terminal, then the agent (or
+   user) runs in the container:
+   - `tools/bench/bench health` → exit 0;
+   - `tools/bench/bench flash firmware/target/xtensa-esp32s3-none-elf/release/firmware --until
+     'alive 0s' --timeout 60` → exit 0, and the log shows the boot from the first line;
+   - `tools/bench/bench reset --until 'ch422g: backlight on'` → exit 0;
+   - `tools/bench/bench snap` → Claude `Read`s the JPEG and describes the panel correctly;
+   - deliberately flash a bad path (`../README.md`) → rejected; stop the service → `bench health`
+     exit 4.
+   - Tune the camera mount, angle (avoid reflections and moiré), warm-up and size, and record the
+     settings in the revision log.
+   - *Verify:* all of the above pass, and the times for flash→marker and snapshot are recorded.
+
+7. **[devops] Skill and docs.**
+   - `.claude/skills/board-verify/SKILL.md` covers:
+     - when to use it (after any firmware change that would otherwise wait on the user);
+     - preconditions (`bench health`; if it fails, fall back to asking the user, and say so);
+     - procedure: build → `bench flash ... --until <marker> --timeout N` → on exit 1/2/3, report
+       the log excerpt and stop → `bench snap --delay 1` → `Read` the image → judge it against an
+       explicit expectation stated *before* looking (and, when available, a sim reference
+       screenshot provided by the user, since there's no headless browser in the container);
+     - report format: PASS/FAIL, ELF path + git rev, log excerpt, snapshot path;
+     - rules: never claim a visual PASS without having read an image; don't commit `.bench/`;
+       don't share images (privacy).
+   - README "Flashing" gets a "Bench service (automated)" subsection: prerequisites
+     (`brew install ffmpeg`), how to start it, the Camera permission note, the one-port-holder rule
+     (`bench`/`POST /monitor/stop` before manual `espflash`), the security note, and the launchd
+     option as "not recommended yet (TCC)" (B2). If B4 = (a), add the allow-list entry with the
+     user's explicit OK.
+   - *Verify:* a fresh agent session that is only given the skill completes step 6's flash→snap
+     sequence unaided; the README commands match what was run in step 6.
+
+8. **[devops] [optional] `GET /stream.mjpg`** for a human in a Mac browser: one ffmpeg per client
+   (`-f mpjpeg`), `multipart/x-mixed-replace`, killed on client disconnect, `?token=` accepted.
+   - *Verify (container):* with the fake ffmpeg emitting two frames, the response has two
+     multipart parts and the fake is gone after the client closes. **[manual]** The stream renders
+     in Safari/Chrome at `http://127.0.0.1:7777/stream.mjpg?token=...`.
+
+## Risks
+
+| # | Risk | Likelihood / impact | Mitigation |
+|---|------|---------------------|------------|
+| R1 | `host.containers.internal` doesn't reach host loopback under applehv/libkrun | Medium / high | Step 1a checks it first. The fallback is T2 (file spool), and the `Bench` core / front-end split keeps the rewrite to the transport layer. Not opening a non-loopback port is a hard rule. |
+| R2 | `espflash monitor` won't run without a TTY, or doesn't reset on attach, so early boot lines are lost | Medium / medium | Step 1b checks it. Fallbacks S3 (single `flash --monitor` process) or S2 (stdlib termios reader). The CLI's `--until` default uses `alive 0s`, which shows up even if the first lines are missed. |
+| R3 | Native USB-Serial-JTAG re-enumerates on reset (device node disappears briefly) and the monitor exits | Medium / medium | The monitor exit is visible (`running=false`, CLI exit 3). `POST /reset` restarts it. If it happens often, add a bounded restart-on-exit (3 tries) in step 3 after step 6 shows the need. |
+| R4 | macOS Camera permission (TCC) denied or attributed to the wrong app; under launchd no prompt at all | High on first run / medium | Grant in step 1c from the same terminal app that runs the service. The 503 body carries ffmpeg's stderr. launchd is deferred (B2). |
+| R5 | Photos of an LCD are hard to judge: auto exposure/white balance drift, moiré, reflections, focus | High / medium | Fixed mount and angle, warm-up frames, and a judging rubric of structural checks ("backlight on, no full-screen noise, layout regions present") rather than pixel-exact comparison. ffmpeg's avfoundation input can't lock exposure/WB [VERIFY]. A UVC control tool or the boot test pattern (B3) are follow-ups if needed. |
+| R6 | The service and the user's manual `espflash` fight over the port | Medium / low | Documented one-holder rule, `POST /monitor/stop`. espflash's "port busy" error is clear. |
+| R7 | Host python version: the Xcode CLT `python3` may be 3.9; the container tests run on 3.13 and wouldn't catch newer syntax | Medium / low | Code `bench_host.py` to 3.9 (no `match`, `from __future__ import annotations`, no `tomllib`). The startup check prints the version. Or require Homebrew python and say so in the README. |
+| R8 | The capability itself: anything that can read `.bench/token` can flash the board and photograph the room | Certain (by design) / medium | Loopback only, token, Origin rejection, ELF prefix allowlist, temp copy, no shell, the service runs only while started by hand. Images and logs live in gitignored `.bench/`. B4 keeps the user in control of unattended use. |
+| R9 | Host and container espflash versions differ (flag names, output format) | Medium / low | `/health` reports the host espflash version. The argv builders sit in one place. Step 1b records the version and flags. |
+| R10 | Privacy: snapshots/logs show live traffic and the room | Medium / medium | `.bench/` is gitignored. The skill forbids sharing or committing them. Same rule as the README simulator note. |
+
+Open questions: B1–B5; the [VERIFY] items in steps 1, 4 and 6.
+
+Deliberately deferred: boot test pattern (B3), launchd agent (B2), exposure/WB locking, automatic
+comparison against a sim reference render (needs a headless browser and a capture of the wasm sim,
+which is its own feature), monitor auto-restart (R3, only if step 6 shows the need).
+
+## Revision log
+
+- 2026-10-23: initial draft. Changes from the earlier proposal: regex matching moved from the host
+  to the CLI (host serves sequence-numbered lines with long-polling); flash split into
+  `espflash flash --after no-reset` + a long-running `espflash monitor` that resets on attach,
+  for a clean flash exit code and a complete boot log; token distributed via the gitignored
+  `.bench/token` on the bind mount; validated ELF copied to a host temp file before flashing
+  (TOCTOU); `/stream.mjpg` made optional (step 8); file spool (T2) named as the transport fallback;
+  boot test pattern and launchd deferred.

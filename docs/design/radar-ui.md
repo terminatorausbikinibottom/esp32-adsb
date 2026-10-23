@@ -748,3 +748,7 @@ app partition size.
   board load while K4 is open. The per-second sweep in `sim/tests/snapshots.rs` fails in a debug
   build without the patch. RD.5 host numbers: full draw 0.95 ms, busy 1 Hz tick 0.37 ms average
   (host only, not the board).
+
+- 2026-10-23, **RD.5 QA PASS** (2c55d18), ahead of RD.2/RD.3 (beads entry pending, as RD.4). Radar
+  label overlap in crowded scenes is the deferred "label collision avoidance" (Risks/deferred);
+  suggestion for later: draw the focus label last.

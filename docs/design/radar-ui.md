@@ -824,3 +824,9 @@ app partition size.
     (M2/M3/M4); not touched here.
   - Not verified unattended: AP power cycle and fr24feed stop/start (reconnect paths are untested on
     the board), flightradar24 cross-check.
+
+- 2026-10-23, **RD.3 QA PASS** (d3dfea6), ahead of the RD.2 display gate (beads entry pending).
+  QA observations for later: feed stats line only logs when data arrives; a WiFi drop reaches the
+  feed task only via the 60 s idle timeout; wifi backoff resets on each association (a flapping
+  AP retries every 1–2 s). Reconnect paths reviewed by reading only (AP power cycle and fr24feed
+  stop/start need the user). Live radar redraws ~450 rows/s → K4 glitches much more frequent.

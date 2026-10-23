@@ -1,0 +1,278 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""Board bench CLI (stdlib only): flash, log, reset and snapshot via the host service.
+
+See docs/design/board-bench.md. Exit codes for flash/log/reset: 0 --until matched, 1 --fail-on
+matched or boot loop, 2 timeout, 3 monitor died, 4 transport/auth/request error, 5 flash failed.
+Env: BENCH_URL (default http://host.containers.internal:7777), BENCH_SNAP_BACKOFF (seconds).
+"""
+import argparse
+import datetime
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+BASE = os.environ.get("BENCH_URL", "http://host.containers.internal:7777").rstrip("/")
+DEFAULT_FAIL_ON = r"panic|Guru Meditation|abort\(\)|Exception"
+DEFAULT_UNTIL = "alive 0s"
+# Must exceed the host's FLASH_TIMEOUT (300 s) plus its kill/cleanup, or the CLI would give up
+# before the host can report 504 (test_cli checks this against bench_host.FLASH_TIMEOUT).
+FLASH_REQUEST_TIMEOUT = 330
+SNAP_TRIES = 5
+OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # never via an env proxy
+
+
+class Exit(Exception):
+    def __init__(self, code, message=None):
+        super().__init__(message)
+        self.code = code
+
+
+def die(code, message):
+    raise Exit(code, message)
+
+
+def token():
+    try:
+        with open(os.path.join(ROOT, ".bench", "token")) as f:
+            return f.read().strip()
+    except OSError as e:
+        die(4, f"cannot read {ROOT}/.bench/token ({e.strerror}); is bench_host.py running?")
+
+
+def api(method, path, body=None, timeout=30):
+    """-> (status, raw bytes). HTTP error statuses are returned, transport errors exit 4."""
+    data = json.dumps(body).encode() if body is not None else None
+    headers = {"Authorization": f"Bearer {token()}"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(BASE + path, data=data, method=method, headers=headers)
+    try:
+        with OPENER.open(req, timeout=timeout) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+    except OSError as e:  # URLError, timeouts, refused
+        die(4, f"cannot reach {BASE}: {getattr(e, 'reason', e)}")
+
+
+def jsonish(raw):
+    try:
+        d = json.loads(raw)
+        return d if isinstance(d, dict) else {"error": str(d)}
+    except ValueError:
+        return {"error": raw.decode("utf-8", "replace")[:500]}
+
+
+def call_json(method, path, body=None, timeout=30):
+    status, raw = api(method, path, body, timeout)
+    return status, jsonish(raw)
+
+
+def regex(value, name):
+    try:
+        return re.compile(value) if value else None
+    except re.error as e:
+        die(4, f"bad {name} regex: {e}")
+
+
+def request_error(status, d):
+    """Exit 4 for a failed request, naming the serial candidates of an ambiguous port (503)."""
+    msg = f"HTTP {status}: {d.get('error', d)}"
+    if d.get("candidates") is not None:
+        msg += f"\nserial candidates: {d['candidates']}"
+    die(4, msg)
+
+
+# ---- commands --------------------------------------------------------------------------------
+
+
+def cmd_health(args):
+    status, d = call_json("GET", "/health")
+    if status != 200:
+        request_error(status, d)
+    print(json.dumps(d, indent=2))
+    s = d.get("serial") or {}
+    problems = []
+    if not d.get("ok"):
+        problems.append("service not ok")
+    if not s.get("chosen"):
+        problems.append(f"no serial port chosen; candidates: {s.get('candidates')}")
+    elif not s.get("present"):
+        problems.append(f"serial port {s['chosen']} not present")
+    if not d.get("espflash_version"):
+        problems.append("espflash missing")
+    if not d.get("ffmpeg_present"):
+        problems.append("ffmpeg missing")
+    if problems:
+        die(4, "unhealthy: " + "; ".join(problems))
+    return 0
+
+
+def repo_relative(elf):
+    root = ROOT.rstrip(os.sep) + os.sep
+    return elf[len(root):] if os.path.isabs(elf) and elf.startswith(root) else elf
+
+
+def cmd_flash(args):
+    until, fail_on = regex(args.until, "--until"), regex(args.fail_on, "--fail-on")
+    if args.command == "flash":
+        status, d = call_json("POST", "/flash", {"elf": repo_relative(args.elf)}, FLASH_REQUEST_TIMEOUT)
+    else:
+        status, d = call_json("POST", "/reset", {}, FLASH_REQUEST_TIMEOUT)
+    if status in (502, 504):
+        print("\n".join(d.get("output_tail", [])))
+        die(5, f"flash failed: {d.get('error')} (exit code {d.get('exit_code')})")
+    if status != 200:
+        request_error(status, d)
+    print("\n".join(d["output_tail"]))
+    if until is None:
+        return 0
+    # Only device output after "Flashing has completed!" counts; espflash's own text doesn't.
+    return follow(d["app_seq"], until, fail_on, args, wait_for_it=True)
+
+
+def cmd_log(args):
+    since = args.since
+    if args.session:  # device output of the current session
+        status, d = call_json("GET", "/log?since=0&max=1")
+        if status != 200:
+            request_error(status, d)
+        since = d.get("app_seq") or 0
+    return follow(since or 0, regex(args.until, "--until"), regex(args.fail_on, "--fail-on"), args,
+                  wait_for_it=args.follow or bool(args.until))
+
+
+def follow(since, until, fail_on, args, wait_for_it):
+    """Print lines after `since` until a stop condition. Returns the exit code."""
+    deadline = time.monotonic() + args.timeout
+    boots = 0
+    while True:
+        left = deadline - time.monotonic()
+        wait = min(10, max(left, 0)) if wait_for_it else 0
+        status, d = call_json("GET", f"/log?since={since}&wait={wait:.2f}&max=1000", timeout=wait + 20)
+        if status != 200:
+            request_error(status, d)
+        if d["dropped"]:
+            print("--- warning: older log lines were dropped ---", file=sys.stderr)
+        for line in d["lines"]:
+            text = line["text"]
+            if text.startswith("ESP-ROM:"):
+                boots += 1
+                print(f"--- boot {boots} ---")
+            print(text, flush=True)
+            if fail_on and fail_on.search(text):
+                print(f"bench: --fail-on matched in boot {boots} at seq {line['seq']}", file=sys.stderr)
+                return 1
+            if until and until.search(text):
+                print(f"bench: --until matched in boot {boots} at seq {line['seq']}", file=sys.stderr)
+                return 0
+            if boots > args.max_boots:
+                print(f"bench: boot loop, more than {args.max_boots} boots", file=sys.stderr)
+                return 1
+        since = d["next"]
+        if not d["lines"]:
+            if not wait_for_it:
+                return 0  # a plain dump
+            if d["monitor"]["phase"] == "exited":
+                print(f"bench: monitor exited (code {d['monitor']['exit_code']})", file=sys.stderr)
+                return 3
+        if wait_for_it and time.monotonic() >= deadline:  # also while lines keep flooding in
+            print("bench: timeout", file=sys.stderr)
+            return 2 if until else 0
+
+
+def cmd_snap(args):
+    if args.delay:
+        time.sleep(args.delay)
+    backoff = float(os.environ.get("BENCH_SNAP_BACKOFF", "0.5"))
+    query = f"?warmup={args.warmup}" if args.warmup is not None else ""
+    for attempt in range(SNAP_TRIES):
+        status, raw = api("GET", "/snapshot.jpg" + query, timeout=40)
+        if status != 409:
+            break
+        if attempt < SNAP_TRIES - 1:  # 409 = camera busy with another snapshot
+            time.sleep(backoff * 2 ** attempt)
+    if status != 200:
+        request_error(status, jsonish(raw))
+    if not raw.startswith(b"\xff\xd8"):
+        die(4, "snapshot response is not a JPEG")
+    out = args.out or os.path.join(
+        ROOT, ".bench", "snaps", datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + ".jpg")
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+    with open(out, "wb") as f:
+        f.write(raw)
+    print(out)
+    return 0
+
+
+# ---- entry point -----------------------------------------------------------------------------
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):  # usage errors exit 4; argparse's 2 would read as "timeout"
+        self.print_usage(sys.stderr)
+        self.exit(4, f"{self.prog}: error: {message}\n")
+
+
+def parse_args(argv):
+    p = Parser(prog="bench", description="Flash, log and photograph the bench board.")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    def matching(sp, until_default):
+        sp.add_argument("--until", default=until_default, metavar="RE", help="stop with 0 on a matching line")
+        sp.add_argument("--fail-on", default=DEFAULT_FAIL_ON, metavar="RE", help="stop with 1 on a matching line")
+        sp.add_argument("--max-boots", type=int, default=3, help="more boots than this = boot loop (exit 1)")
+        sp.add_argument("--timeout", type=float, default=60, help="seconds to wait for --until")
+
+    sub.add_parser("health", help="print service health").set_defaults(run=cmd_health)
+    sp = sub.add_parser("flash", help="flash an ELF (repo-relative) and watch the boot")
+    sp.add_argument("elf")
+    matching(sp, DEFAULT_UNTIL)
+    sp.set_defaults(run=cmd_flash)
+    sp = sub.add_parser("reset", help="re-flash the last ELF and watch the boot")
+    matching(sp, DEFAULT_UNTIL)
+    sp.set_defaults(run=cmd_flash)
+    sp = sub.add_parser("log", help="print the device log")
+    g = sp.add_mutually_exclusive_group()
+    g.add_argument("--since", type=int, default=0, metavar="SEQ")
+    g.add_argument("--session", action="store_true", help="device output of the current session")
+    matching(sp, "")
+    sp.add_argument("--follow", action="store_true", help="keep waiting for new lines until --timeout (without --until, a timeout exits 0)")
+    sp.set_defaults(run=cmd_log)
+    sp = sub.add_parser("snap", help="take a webcam photo")
+    sp.add_argument("out", nargs="?", help="output file (default .bench/snaps/<UTC timestamp>.jpg)")
+    sp.add_argument("--warmup", type=int, help="warm-up frames (host default)")
+    sp.add_argument("--delay", type=float, default=0, help="seconds to wait before capturing")
+    sp.set_defaults(run=cmd_snap)
+    return p.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    try:
+        return args.run(args)
+    except Exit as e:
+        if e.args[0]:
+            print(f"bench: {e.args[0]}", file=sys.stderr)
+        return e.code
+    except KeyboardInterrupt:
+        return 130
+    except Exception as e:  # e.g. a malformed 200 body; never let a traceback exit 1 (= --fail-on)
+        if os.environ.get("BENCH_DEBUG"):
+            raise
+        print(f"bench: unexpected response or error: {type(e).__name__}: {e}", file=sys.stderr)
+        return 4
+
+
+if __name__ == "__main__":
+    sys.exit(main())

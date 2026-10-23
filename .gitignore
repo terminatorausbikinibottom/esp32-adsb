@@ -7,3 +7,7 @@ captures/
 *.capture
 
 dist/
+
+# board bench token and snapshots
+.bench/
+__pycache__/

@@ -8,6 +8,8 @@ DOTFILES_REPO="${DOTFILES_REPO:-terminatorausbikinibottom}"
 sudo chown -R "$(id -u):$(id -g)" /usr/local/cargo/registry
 # Same for the Claude Code config volume.
 sudo chown -R "$(id -u):$(id -g)" "$HOME/.claude"
+# And the uv cache/managed-python volume.
+sudo chown -R "$(id -u):$(id -g)" "$HOME/.uv"
 
 # ~/.ssh is root-owned (created by the read-only config/key bind mounts), so ssh can't record
 # host keys. Pin GitHub's published host keys system-wide instead (fetched over verified HTTPS).
@@ -30,3 +32,4 @@ rustup toolchain list
 espflash --version
 esp-generate --version
 claude --version
+uv --version

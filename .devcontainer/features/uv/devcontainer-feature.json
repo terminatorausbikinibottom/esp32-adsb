@@ -1,0 +1,16 @@
+{
+  "id": "uv",
+  "version": "1.0.0",
+  "name": "uv (release binary)",
+  "description": "Installs the official static uv/uvx release binaries into /usr/local/bin.",
+  "options": {
+    "version": {
+      "type": "string",
+      "default": "0.13.5",
+      "description": "uv release tag (no leading v), pinned."
+    }
+  },
+  "installsAfter": [
+    "ghcr.io/devcontainers/features/common-utils"
+  ]
+}

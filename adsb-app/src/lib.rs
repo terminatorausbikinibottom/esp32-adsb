@@ -18,4 +18,4 @@ pub use slint::platform::software_renderer::Rgb565Pixel;
 mod ui {
     slint::include_modules!();
 }
-pub use ui::{CardKind, Screen};
+pub use ui::{Badge, CardKind};

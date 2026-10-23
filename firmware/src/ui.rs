@@ -91,7 +91,7 @@ impl FbUi {
     /// Returns whether anything was drawn.
     pub fn update(&mut self, snap: &Snapshot, st: &Status) -> bool {
         let kind = self.app.ui().kind;
-        self.app.update(snap, st);
+        self.app.update(snap, st, None);
         if self.full_ms.is_none() || kind != self.app.ui().kind {
             info!("ui: card={:?}", self.app.ui().kind);
         }

@@ -30,3 +30,7 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 panic = "abort"
+
+# Slint 1.18.1 scene.rs off-by-one, see vendor/i-slint-renderer-software/VENDORED.md. Drop once fixed upstream.
+[patch.crates-io]
+i-slint-renderer-software = { path = "../vendor/i-slint-renderer-software" }

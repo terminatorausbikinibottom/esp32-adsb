@@ -735,3 +735,16 @@ app partition size.
   user); record it with `fs` once RD.2 is unblocked. QA notes for RD.5: `Snapshot.focus` and
   `primary` are tracked separately (don't rely on equality); the focus aircraft may have no blip
   (outside range or past 48), so the radar must cope with "no focus blip".
+
+- 2026-10-23, **revision 2 (design change, decided by the orchestrator because the user is away):
+  vendored Slint renderer fix** (radar-ui RD.5). The new radar layout hits an off-by-one in
+  `i-slint-renderer-software` 1.18.1 (`scene.rs`, path that skips lines: `<` should be `<=`).
+  When the dirty region has gaps, an expired item stays active: debug builds panic on an assertion,
+  release builds draw wrong frames (10 of 880 per-second frames in busy/edge/overflight differed
+  from the fixed renderer). 1.18.1 is the latest release. Decision: option (a), vendor the crate
+  with that one-line fix in `vendor/i-slint-renderer-software/` (see its `VENDORED.md`) and use it
+  through `[patch.crates-io]` in `sim/`, `adsb-app/` and `firmware/`; drop it when upstream fixes
+  it. Option (b), full repaint on every update (`RepaintBufferType::NewBuffer`), rejected: it adds
+  board load while K4 is open. The per-second sweep in `sim/tests/snapshots.rs` fails in a debug
+  build without the patch. RD.5 host numbers: full draw 0.95 ms, busy 1 Hz tick 0.37 ms average
+  (host only, not the board).

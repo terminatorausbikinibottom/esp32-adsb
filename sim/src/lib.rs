@@ -81,7 +81,7 @@ impl Sim {
 
     fn refresh(&mut self, st: &Status) {
         let snap = self.pipeline.snapshot(st.now_ms, st.radius_km);
-        self.app.update(&snap, st);
+        self.app.update(&snap, st, None);
         self.render();
     }
 

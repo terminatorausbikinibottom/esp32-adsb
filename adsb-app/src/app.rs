@@ -1,16 +1,22 @@
-use crate::{CardKind, HEIGHT, Screen, WIDTH, render_by_line, ui::AppWindow};
+use crate::ui::{self, AppWindow};
+use crate::{Badge, CardKind, HEIGHT, WIDTH, render_by_line};
 use adsb_core::geo::compass_label;
+use adsb_core::meta::FocusMeta;
+use adsb_core::radar::{self, Blip, RangeKm, RangeState};
 use adsb_core::tracker::{AircraftView, Card, Marker, Snapshot};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
-use core::cell::Cell;
+use alloc::vec::Vec;
 use core::ops::Range;
 use core::time::Duration;
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel};
 use slint::platform::{Platform, PointerEventButton, WindowAdapter, WindowEvent};
-use slint::{ComponentHandle, LogicalPosition, PhysicalSize, PlatformError};
+use slint::{
+    ComponentHandle, Image, LogicalPosition, Model, ModelRc, PhysicalSize, PlatformError,
+    Rgba8Pixel, SharedPixelBuffer, VecModel,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PointerPhase {
@@ -33,12 +39,12 @@ pub struct Status {
     /// Milliseconds on the same clock as the snapshot (uptime until SNTP, Phase 5).
     pub now_ms: u64,
     pub wifi_ok: bool,
-    /// False forces the "No data" card (feed known to be down), whatever the tracker says.
+    /// False forces the "No data" overlay (feed known to be down), whatever the tracker says.
     pub feed_ok: bool,
     pub radius_km: f64,
 }
 
-/// Everything the Slint window displays besides the navigation state. Diffed field by field.
+/// Everything the Slint window displays. Diffed field by field.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ui {
     pub wifi_ok: bool,
@@ -47,18 +53,27 @@ pub struct Ui {
     pub rate: String,
     pub clock: String,
     pub kind: CardKind,
+    /// Radar range in km (one of `radar::RANGE_STEPS_KM`).
+    pub range_km: RangeKm,
+    pub range_label: String,
+    pub half_label: String,
+    /// "+k beyond", empty when nothing is outside the range.
+    pub beyond: String,
+    /// Radius in px of the configured-radius ring; 0 when it is not drawn.
+    pub radius_ring_px: i32,
+    pub blips: Vec<Blip>,
+    /// Focus aircraft: callsign or ICAO, an em dash without one.
     pub title: String,
-    pub line1: String,
-    pub line2: String,
-    pub line3: String,
-    pub more: String,
-    pub dim: bool,
-    /// Position decoded against the receiver only (`PositionView::provisional`).
-    pub flagged: bool,
+    pub badge: Badge,
+    pub alt: String,
+    pub gs: String,
+    pub trk: String,
+    pub dist: String,
 }
 
 impl Default for Ui {
     fn default() -> Self {
+        let dash = || "\u{2014}".to_string();
         Self {
             wifi_ok: false,
             feed_ok: false,
@@ -66,13 +81,18 @@ impl Default for Ui {
             rate: String::new(),
             clock: String::new(),
             kind: CardKind::NoData,
-            title: String::new(),
-            line1: String::new(),
-            line2: String::new(),
-            line3: String::new(),
-            more: String::new(),
-            dim: false,
-            flagged: false,
+            range_km: radar::DEFAULT_RANGE_KM,
+            range_label: String::new(),
+            half_label: String::new(),
+            beyond: String::new(),
+            radius_ring_px: 0,
+            blips: Vec::new(),
+            title: dash(),
+            badge: Badge::None,
+            alt: dash(),
+            gs: dash(),
+            trk: dash(),
+            dist: dash(),
         }
     }
 }
@@ -94,107 +114,68 @@ fn km(m: f64) -> String {
     }
 }
 
-fn secs(s: f64) -> String {
-    if s < 90.0 {
-        format!("{:.0} s", s)
-    } else {
-        format!("{:.0} min", s / 60.0)
-    }
-}
-
-/// "7.3 km NE" for an aircraft with a position.
-fn dist_dir(a: &AircraftView) -> Option<String> {
-    let p = a.position.as_ref()?;
-    Some(format!(
-        "{} {}",
-        km(p.ground_m),
-        compass_label(p.bearing_deg)
-    ))
-}
-
-/// The card part of the UI for the tracker's current state. Layout details of the full card
-/// (route, airline, chips) arrive with step 4.3.
-fn card(snap: &Snapshot, radius_km: f64, ui: &mut Ui) {
+/// Tracker card state, with "approaching" when the next aircraft has a CPA inside the radius.
+fn kind(snap: &Snapshot) -> CardKind {
     match snap.card {
-        Card::NoData => card_no_data(ui),
-        Card::Overhead => {
-            ui.kind = CardKind::Overhead;
-            let Some(a) = snap.primary.and_then(|i| snap.list.get(i)) else {
-                return;
-            };
-            ui.title = name(a);
-            let arrow = match a.vertical_rate_fpm {
-                Some(v) if v > 300 => " \u{2191}",
-                Some(v) if v < -300 => " \u{2193}",
-                _ => "",
-            };
-            ui.line1 = match a.altitude_ft {
-                Some(ft) => format!("FL{:03} \u{b7} {} ft{}", ft.max(0) / 100, ft, arrow),
-                None => "altitude unknown".into(),
-            };
-            let gs = a.ground_speed_kt.map(|v| format!("{:.0} kt", v));
-            let trk = a.track_deg.map(|t| format!("track {:03.0}\u{b0}", t));
-            ui.line2 = [gs, trk]
-                .into_iter()
-                .flatten()
-                .collect::<alloc::vec::Vec<_>>()
-                .join(" \u{b7} ");
-            if let Some(p) = &a.position {
-                let mark = match p.marker {
-                    Marker::Exact => "",
-                    Marker::Approx => "~",
-                    Marker::Unknown => "?",
-                };
-                let up = p
-                    .elevation_deg
-                    .map(|e| format!(", {:.0}\u{b0} up", e))
-                    .unwrap_or_default();
-                ui.line3 = format!("{mark}{}{up}", dist_dir(a).unwrap_or_default());
-                ui.flagged = p.provisional;
-            }
-            let n = snap.others().count();
-            if n > 0 {
-                ui.more = format!("+{n} more");
-            }
-        }
-        Card::JustPassed => {
-            ui.kind = CardKind::JustPassed;
-            ui.dim = true;
-            let Some(jp) = snap.just_passed else { return };
-            if let Some(a) = snap.list.get(jp.index) {
-                ui.title = name(a);
-                ui.line2 = dist_dir(a).map(|d| format!("now {d}")).unwrap_or_default();
-            }
-            ui.line1 = format!(
-                "Left the {radius_km} km zone {} ago",
-                secs(jp.left_ago_ms as f64 / 1000.0)
-            );
-        }
+        Card::NoData => CardKind::NoData,
+        Card::Overhead => CardKind::Overhead,
+        Card::JustPassed => CardKind::JustPassed,
         Card::Quiet => {
-            ui.kind = CardKind::Quiet;
-            ui.title = format!("Nothing within {radius_km} km");
             let next = snap
                 .approaching
                 .first()
                 .and_then(|&i| snap.list.get(i as usize));
-            if let Some((a, c)) = next.and_then(|a| Some((a, a.position.as_ref()?.approach?))) {
-                ui.kind = CardKind::Approaching;
-                ui.line1 = format!(
-                    "Approaching: closest {} in ~{}",
-                    km(c.d_m),
-                    secs(c.t_s.max(0.0))
-                );
-                ui.line2 = format!("{} {}", name(a), dist_dir(a).unwrap_or_default());
-                ui.flagged = a.position.is_some_and(|p| p.provisional);
-            } else if let Some(a) = snap.nearest_beyond() {
-                ui.dim = true;
-                ui.line1 = format!("Nearest: {} {}", name(a), dist_dir(a).unwrap_or_default());
-                ui.flagged = a.position.is_some_and(|p| p.provisional);
+            if next.is_some_and(|a| a.position.is_some_and(|p| p.approach.is_some())) {
+                CardKind::Approaching
             } else {
-                ui.dim = true;
-                ui.line1 = "No positioned aircraft".into();
+                CardKind::Quiet
             }
         }
+    }
+}
+
+/// Info panel values of the focus aircraft (the dash placeholders stay when it has none).
+fn panel(snap: &Snapshot, ui: &mut Ui) {
+    let Some((i, a)) = snap.focus.and_then(|i| Some((i, snap.list.get(i)?))) else {
+        return;
+    };
+    ui.title = name(a);
+    let arrow = match a.vertical_rate_fpm {
+        Some(v) if v > 300 => " \u{2191}",
+        Some(v) if v < -300 => " \u{2193}",
+        _ => "",
+    };
+    if let Some(ft) = a.altitude_ft {
+        ui.alt = format!("FL{:03} \u{b7} {} ft{}", ft.max(0) / 100, ft, arrow);
+    }
+    if let Some(v) = a.ground_speed_kt {
+        ui.gs = format!("{:.0} kt", v);
+    }
+    if let Some(t) = a.track_deg {
+        ui.trk = format!("{:03.0}\u{b0}", t);
+    }
+    if let Some(p) = &a.position {
+        let mark = match p.marker {
+            Marker::Exact => "",
+            Marker::Approx => "~",
+            Marker::Unknown => "?",
+        };
+        let up = p
+            .elevation_deg
+            .map(|e| format!(" \u{b7} {:.0}\u{b0} up", e))
+            .unwrap_or_default();
+        ui.dist = format!(
+            "{mark}{} {}{up}",
+            km(p.ground_m),
+            compass_label(p.bearing_deg)
+        );
+        ui.badge = if p.in_radius {
+            Badge::Overhead
+        } else if snap.approaching.contains(&(i as u8)) {
+            Badge::Approaching
+        } else {
+            Badge::Nearest
+        };
     }
 }
 
@@ -204,13 +185,43 @@ struct Rate {
     per_s: u32,
 }
 
-/// View-model plus the Slint window. Owns navigation state and the last values pushed to Slint.
+/// Slint images for the radar sprites, made on first use: index = sprite + 25 * dim + 50 * flag.
+struct Sprites(Vec<Option<Image>>);
+
+impl Sprites {
+    const PER_STYLE: usize = radar::SPRITES as usize + 1;
+
+    fn new() -> Self {
+        Self(alloc::vec![None; 4 * Self::PER_STYLE])
+    }
+
+    fn get(&mut self, b: &Blip) -> Image {
+        let i = usize::from(b.sprite)
+            + Self::PER_STYLE * usize::from(b.dim)
+            + 2 * Self::PER_STYLE * usize::from(b.flag);
+        self.0[i]
+            .get_or_insert_with(|| {
+                let angle = (b.sprite < radar::SPRITES).then(|| f32::from(b.sprite) * 15.0);
+                let px = radar::sprite(angle, b.dim, b.flag);
+                Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                    &px,
+                    radar::SPRITE_PX as u32,
+                    radar::SPRITE_PX as u32,
+                ))
+            })
+            .clone()
+    }
+}
+
+/// View-model plus the Slint window. Owns the last values pushed to Slint.
 pub struct App {
     window: Rc<MinimalSoftwareWindow>,
     ui: AppWindow,
-    screen: Rc<Cell<Screen>>,
     shown: Ui,
     rate: Rate,
+    range: RangeState,
+    blips: Rc<VecModel<ui::Blip>>,
+    sprites: Sprites,
 }
 
 struct SlintPlatform {
@@ -239,26 +250,32 @@ impl App {
         .map_err(|_| PlatformError::Other("platform already set".into()))?;
         window.set_size(PhysicalSize::new(WIDTH as u32, HEIGHT as u32));
         let ui = AppWindow::new()?;
-        let screen = Rc::new(Cell::new(Screen::Card));
-        let s = screen.clone();
-        let weak = ui.as_weak();
-        ui.on_navigate(move |to| {
-            s.set(to);
-            if let Some(ui) = weak.upgrade() {
-                ui.set_screen(to);
-            }
-        });
+        let mut sprites = Sprites::new();
+        // Dim north-up plane for the "no photo" placeholder.
+        ui.set_plane_icon(sprites.get(&Blip {
+            x: 0,
+            y: 0,
+            sprite: 0,
+            label: Default::default(),
+            focus: false,
+            dim: true,
+            flag: false,
+        }));
+        let blips = Rc::new(VecModel::default());
+        ui.set_blips(ModelRc::from(blips.clone()));
         ui.show()?;
         Ok(Self {
             window,
             ui,
-            screen,
             shown: Ui::default(),
             rate: Rate {
                 since_ms: 0,
                 since_n: 0,
                 per_s: 0,
             },
+            range: RangeState::default(),
+            blips,
+            sprites,
         })
     }
 
@@ -267,30 +284,25 @@ impl App {
         &self.shown
     }
 
-    pub fn screen(&self) -> Screen {
-        self.screen.get()
-    }
-
-    /// Back to the start-up state (card screen, rate zeroed) for a restarted feed; the window and
-    /// platform are kept. Slint is returned to its initial properties and a full repaint is forced
-    /// (partial repaints blend anti-aliased edges over stale pixels, so the output would depend on
-    /// history), so the next `update` renders exactly what a new `App` would.
+    /// Back to the start-up state (rate and range memory zeroed) for a restarted feed; the window
+    /// and platform are kept. Slint is returned to its initial properties and a full repaint is
+    /// forced (partial repaints blend anti-aliased edges over stale pixels, so the output would
+    /// depend on history), so the next `update` renders exactly what a new `App` would.
     pub fn reset(&mut self) -> Result<(), PlatformError> {
         self.rate = Rate {
             since_ms: 0,
             since_n: 0,
             per_s: 0,
         };
-        self.screen.set(Screen::Card);
-        self.ui.set_screen(Screen::Card);
+        self.range = RangeState::default();
         self.apply(Ui::default());
         self.ui.hide()?;
         self.ui.show()
     }
 
     /// Recompute the view from the latest snapshot and push only what changed to Slint.
-    /// Returns whether anything changed.
-    pub fn update(&mut self, snap: &Snapshot, st: &Status) -> bool {
+    /// Returns whether anything changed. `_meta` is the focus aircraft's metadata (RD.7).
+    pub fn update(&mut self, snap: &Snapshot, st: &Status, _meta: Option<&FocusMeta>) -> bool {
         let n = snap.counters.messages;
         let dt = st.now_ms.saturating_sub(self.rate.since_ms);
         if dt >= 1000 {
@@ -298,6 +310,7 @@ impl App {
             self.rate.since_ms = st.now_ms;
             self.rate.since_n = n;
         }
+        let range = radar::select_range(snap, st.now_ms, &mut self.range);
         let mut new = Ui {
             wifi_ok: st.wifi_ok,
             feed_ok: st.feed_ok,
@@ -307,12 +320,26 @@ impl App {
                 let s = st.now_ms / 1000;
                 format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
             },
+            range_km: range,
+            range_label: format!("{range} km"),
+            // Steps are 10/25/50/100: only 25 has a half step with a fraction.
+            half_label: format!("{}", f64::from(range) / 2.0),
             ..Ui::default()
         };
         if st.feed_ok {
-            card(snap, st.radius_km, &mut new);
-        } else {
-            card_no_data(&mut new);
+            new.kind = kind(snap);
+        }
+        if new.kind != CardKind::NoData {
+            let ring = st.radius_km / f64::from(range) * radar::RING_PX;
+            if ring < radar::RING_PX / 2.0 {
+                new.radius_ring_px = (ring + 0.5) as i32;
+            }
+            new.blips = radar::blips(snap, range).into_iter().collect();
+            let beyond = radar::beyond(snap, range);
+            if beyond > 0 {
+                new.beyond = format!("+{beyond} beyond");
+            }
+            panel(snap, &mut new);
         }
         self.apply(new)
     }
@@ -326,8 +353,34 @@ impl App {
         }
         diff!(wifi_ok => set_wifi_ok, feed_ok => set_feed_ok, counts => set_counts,
             rate => set_rate, clock => set_clock, kind => set_kind, title => set_heading,
-            line1 => set_line1, line2 => set_line2, line3 => set_line3, more => set_more,
-            dim => set_dim, flagged => set_flagged);
+            badge => set_badge, alt => set_alt, gs => set_gs, trk => set_trk, dist => set_dist,
+            range_label => set_range_label, half_label => set_half_label,
+            beyond => set_beyond);
+        if old.radius_ring_px != new.radius_ring_px {
+            ui.set_radius_ring(new.radius_ring_px as f32);
+        }
+        if old.blips != new.blips {
+            for (i, b) in new.blips.iter().enumerate() {
+                if old.blips.get(i) == Some(b) {
+                    continue;
+                }
+                let row = ui::Blip {
+                    x: b.x as f32,
+                    y: b.y as f32,
+                    sprite: self.sprites.get(b),
+                    label: b.label.as_str().into(),
+                    focus: b.focus,
+                };
+                if i < self.blips.row_count() {
+                    self.blips.set_row_data(i, row);
+                } else {
+                    self.blips.push(row);
+                }
+            }
+            while self.blips.row_count() > new.blips.len() {
+                self.blips.remove(self.blips.row_count() - 1);
+            }
+        }
         let changed = *old != new;
         self.shown = new;
         changed
@@ -355,29 +408,41 @@ impl App {
     }
 }
 
-fn card_no_data(ui: &mut Ui) {
-    ui.kind = CardKind::NoData;
-    ui.title = "No data".into();
-    ui.line1 = "Feed disconnected or silent".into();
-    ui.dim = true;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use adsb_core::pipeline::FeedPipeline;
     use adsb_core::scenario::{RX_LAT_DEG, RX_LON_DEG};
-    use adsb_core::tracker::Config;
+    use adsb_core::tracker::{Config, Counters, PositionView};
 
-    fn tap(app: &App, x: f32, y: f32) {
-        for phase in [PointerPhase::Down, PointerPhase::Up] {
-            app.pointer(PointerEvent { x, y, phase });
+    fn view(icao: u32, ground_m: f64, in_radius: bool) -> AircraftView {
+        AircraftView {
+            icao,
+            callsign: None,
+            category: None,
+            squawk: None,
+            altitude_ft: Some(35_000),
+            vertical_rate_fpm: None,
+            ground_speed_kt: Some(450.0),
+            track_deg: Some(90.0),
+            last_seen_age_ms: 0,
+            position: Some(PositionView {
+                ground_m,
+                bearing_deg: 10.0,
+                height_m: None,
+                elevation_deg: None,
+                marker: Marker::Exact,
+                provisional: false,
+                age_ms: 0,
+                in_radius,
+                approach: None,
+            }),
         }
     }
 
     // One test only: the Slint platform can be installed once per process.
     #[test]
-    fn pointer_events_drive_navigation_and_updates_are_diffed() {
+    fn updates_are_diffed_and_panel_follows_focus() {
         let mut app = App::new(|| Duration::ZERO).unwrap();
         let mut p = FeedPipeline::new(Config {
             rx_lat_deg: RX_LAT_DEG,
@@ -391,82 +456,47 @@ mod tests {
             radius_km: 5.0,
         };
         let snap = p.snapshot(st.now_ms, st.radius_km);
-        assert!(app.update(&snap, &st));
+        assert!(app.update(&snap, &st, None));
         assert!(
-            !app.update(&snap, &st),
+            !app.update(&snap, &st, None),
             "identical input must not change anything"
         );
         assert_eq!(app.ui().kind, CardKind::NoData);
+        assert_eq!(app.ui().range_label, "25 km");
 
-        assert_eq!(app.screen(), Screen::Card);
-        tap(&app, 100.0, 200.0); // empty card area: no navigation
-        assert_eq!(app.screen(), Screen::Card);
-        tap(&app, 724.0, 440.0); // "List" button
-        assert_eq!(app.screen(), Screen::List);
-        // Press on the button but release away from it: not a tap.
-        app.pointer(PointerEvent {
-            x: 724.0,
-            y: 440.0,
-            phase: PointerPhase::Down,
+        // Focus is the far aircraft's neighbour, not `primary`: the panel follows `focus`.
+        let mut snap = Box::new(Snapshot {
+            card: Card::Quiet,
+            list: Default::default(),
+            in_radius: 0,
+            primary: None,
+            focus: Some(1),
+            just_passed: None,
+            approaching: Default::default(),
+            counters: Counters::default(),
         });
-        app.pointer(PointerEvent {
-            x: 100.0,
-            y: 100.0,
-            phase: PointerPhase::Move,
-        });
-        app.pointer(PointerEvent {
-            x: 100.0,
-            y: 100.0,
-            phase: PointerPhase::Up,
-        });
-        assert_eq!(app.screen(), Screen::List);
-        tap(&app, 724.0, 440.0); // "Card" button
-        assert_eq!(app.screen(), Screen::Card);
-    }
+        snap.list.push(view(0x111111, 3000.0, false)).unwrap();
+        snap.list.push(view(0xABCDEF, 20_000.0, false)).unwrap();
+        assert!(app.update(&snap, &st, None));
+        let ui = app.ui();
+        assert_eq!(ui.title, "ABCDEF");
+        assert_eq!(ui.badge, Badge::Nearest);
+        assert_eq!(ui.alt, "FL350 \u{b7} 35000 ft");
+        assert_eq!(ui.dist, "20 km N");
+        assert_eq!((ui.range_km, ui.blips.len()), (25, 2));
+        assert_eq!(ui.radius_ring_px, 42); // 5 km of 25 km
+        assert_eq!(app.blips.row_count(), 2);
 
-    #[test]
-    fn quiet_card_flags_provisional_nearest() {
-        use adsb_core::tracker::{Counters, PositionView};
-        let pos = |provisional| PositionView {
-            ground_m: 23_000.0,
-            bearing_deg: 10.0,
-            height_m: None,
-            elevation_deg: None,
-            marker: Marker::Exact,
-            provisional,
-            age_ms: 0,
-            in_radius: false,
-            approach: None,
-        };
-        let view = |provisional| AircraftView {
-            icao: 0xABCDEF,
-            callsign: None,
-            category: None,
-            squawk: None,
-            altitude_ft: None,
-            vertical_rate_fpm: None,
-            ground_speed_kt: None,
-            track_deg: None,
-            last_seen_age_ms: 0,
-            position: Some(pos(provisional)),
-        };
-        for provisional in [false, true] {
-            let mut snap = Box::new(Snapshot {
-                card: Card::Quiet,
-                list: Default::default(),
-                in_radius: 0,
-                primary: None,
-                focus: None,
-                just_passed: None,
-                approaching: Default::default(),
-                counters: Counters::default(),
-            });
-            snap.list.push(view(provisional)).unwrap();
-            let mut ui = Ui::default();
-            card(&snap, 5.0, &mut ui);
-            assert_eq!(ui.flagged, provisional);
-            assert!(ui.dim);
-            assert_eq!(ui.line1, "Nearest: ABCDEF 23 km N");
-        }
+        // No focus blip (focus outside the range): panel still shows it, radar has no ring.
+        snap.list[1].position.as_mut().unwrap().ground_m = 60_000.0;
+        snap.list[0].position.as_mut().unwrap().ground_m = 60_000.0;
+        app.update(&snap, &st, None);
+        assert_eq!(app.ui().range_km, 100);
+        snap.list.pop();
+        snap.focus = None;
+        app.update(&snap, &st, None);
+        assert_eq!(app.ui().title, "\u{2014}");
+        assert_eq!(app.blips.row_count(), 1);
+        assert_eq!(app.ui().beyond, "");
     }
 }

@@ -7,6 +7,7 @@
 
 pub mod geo;
 pub mod kinematics;
+pub mod meta;
 pub mod pipeline;
 pub mod radar;
 #[cfg(feature = "scenario")]

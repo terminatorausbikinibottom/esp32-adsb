@@ -36,7 +36,11 @@
     "./features/neovim": {
       "version": "stable"
     },
-    "./features/wasm-sim": {}
+    "./features/wasm-sim": {},
+    // uv runs the board-bench tools (PEP 723 scripts) and their tests on python 3.11.
+    "./features/uv": {
+      "version": "0.13.5"
+    }
   },
   "overrideFeatureInstallOrder": [
     "ghcr.io/devcontainers/features/common-utils",
@@ -64,12 +68,16 @@
   "containerEnv": {
     "HOME": "/home/vscode",
     // No anonymous usage telemetry from bd (and other CLIs honouring the convention).
-    "DO_NOT_TRACK": "1"
+    "DO_NOT_TRACK": "1",
+    "UV_CACHE_DIR": "/home/vscode/.uv/cache",
+    "UV_PYTHON_INSTALL_DIR": "/home/vscode/.uv/python"
   },
 
   "mounts": [
     // Persist cargo downloads across container rebuilds.
     "source=esp32-adsb-cargo-registry,target=/usr/local/cargo/registry,type=volume",
+    // Persist uv's cache and managed pythons (bench tests on 3.11) across rebuilds.
+    "source=esp32-adsb-uv,target=/home/vscode/.uv,type=volume",
     // Persist Claude Code login/config across container rebuilds.
     "source=esp32-adsb-claude-config,target=/home/vscode/.claude,type=volume",
     // SSH config and personal key (read-only) for git over SSH.

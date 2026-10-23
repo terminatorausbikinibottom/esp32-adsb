@@ -825,3 +825,8 @@ third-party Python dependencies (stdlib-only stays, Decision 8), test runs on 3.
     R14 (managed-python download offline), R15 (uv interpreter choice drifts).
   - Open questions / deferred: rev-3 VERIFYs added; third-party deps and 3.15 test runs deferred.
   - Step numbering 1-8 unchanged (2a is a sub-part of step 2).
+- 2026-10-23 (step 4, orchestrator note): concurrent `GET /snapshot.jpg` while one is in flight
+  returns **409** (fail-fast, same as the flash lock), not a queue — confirmed by the user. Step 5's
+  `bench snap` must treat 409 as "camera busy": retry a few times with a short back-off before exiting 4.
+  QA minor notes left as is: `warmup` has no upper cap (bounded by the 20 s ffmpeg timeout); full
+  ffmpeg stderr is logged per call.

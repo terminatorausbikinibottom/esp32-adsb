@@ -10,7 +10,7 @@ Start from the repo root: `uv run tools/bench/bench_host.py [--port ...]`
 
 Implemented: config, loopback-only bind, token + auth, GET /health, the pure helpers (ELF
 staging, argv builders, serial port resolution), and (step 3) /flash, /reset, /monitor/stop, /log
-around one espflash process per session. Snapshot and stream come in later steps.
+around one espflash process per session, and (step 4) GET /snapshot.jpg. Stream comes later.
 """
 import atexit
 import argparse
@@ -48,6 +48,8 @@ ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 RING_LINES = 20000
 FLASH_TIMEOUT = 300
 LOG_WAIT_CAP = 30
+SNAPSHOT_TIMEOUT = 20
+JPEG_MAGIC = b"\xff\xd8"
 TAIL_LINES = 20
 
 
@@ -141,7 +143,7 @@ def espflash_argv(espflash, port, elf):
 
 def ffmpeg_argv(ffmpeg, camera, video_size, warmup, framerate=None):
     """One-shot snapshot: skip `warmup` frames, write one JPEG to stdout."""
-    argv = [ffmpeg, "-f", "avfoundation"]
+    argv = [*_cmd(ffmpeg), "-f", "avfoundation"]
     if framerate:
         argv += ["-framerate", str(framerate)]
     argv += ["-video_size", video_size, "-i", f"{camera}:none"]
@@ -185,11 +187,13 @@ class Bench:
     def __init__(self, *, repo_root=REPO_ROOT, port=None, camera="1", video_size="1280x720",
                  framerate=None, warmup=20, elf_prefix="firmware/target/", espflash="espflash",
                  ffmpeg="ffmpeg", candidates=list_candidates, flash_timeout=FLASH_TIMEOUT,
-                 ring_lines=RING_LINES):
+                 ring_lines=RING_LINES, snapshot_timeout=SNAPSHOT_TIMEOUT):
         self.repo_root, self.port, self.camera = repo_root, port, camera
         self.video_size, self.framerate, self.warmup = video_size, framerate, warmup
         self.elf_prefix, self.espflash, self.ffmpeg = elf_prefix, espflash, ffmpeg
         self.candidates, self.flash_timeout = candidates, flash_timeout
+        self.snapshot_timeout = snapshot_timeout
+        self.camera_lock = threading.Lock()  # separate from flash_lock: snapshots work during a flash
         self.espflash_version = tool_version(espflash, "--version")
         self.flash_lock = threading.Lock()  # one flash/reset/stop at a time
         self.cond = threading.Condition()  # guards ring, next_seq and session fields
@@ -227,7 +231,7 @@ class Bench:
             "python_version": sys.version.split()[0],
             "serial": self.serial_status(),
             "espflash_version": self.espflash_version,
-            "ffmpeg_present": shutil.which(self.ffmpeg) is not None,
+            "ffmpeg_present": shutil.which(_cmd(self.ffmpeg)[0]) is not None,
             "camera": self.camera,
             "monitor": self.monitor_status(),
             "busy": self.flash_lock.locked(),
@@ -345,6 +349,45 @@ class Bench:
             shutil.rmtree(self.stage_dir, ignore_errors=True)
             self.stage_dir = self.last_elf = None
 
+    # -- snapshot
+
+    def snapshot(self, warmup=None):
+        """One JPEG from a one-shot ffmpeg. 503 (with the stderr tail) on any failure."""
+        if not self.camera_lock.acquire(blocking=False):
+            raise BenchError(409, "another snapshot is running")
+        try:
+            argv = ffmpeg_argv(self.ffmpeg, self.camera, self.video_size,
+                               self.warmup if warmup is None else warmup, self.framerate)
+            try:
+                proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE)
+            except OSError as e:
+                raise BenchError(503, f"cannot start ffmpeg: {e.strerror}") from None
+            try:
+                out, err = proc.communicate(timeout=self.snapshot_timeout)
+                problem = None
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                out, err = proc.communicate()
+                problem = f"ffmpeg timed out after {self.snapshot_timeout}s; killed"
+            finally:
+                if proc.poll() is None:  # e.g. KeyboardInterrupt during communicate
+                    proc.kill()
+                    proc.wait()
+            text = err.decode("utf-8", errors="replace")
+            # Always logged: an unsupported setting only shows up here (R12), a TCC denial too (R4).
+            sys.stderr.write(f"ffmpeg exit {proc.returncode}:\n{text}\n")
+            if problem is None and proc.returncode != 0:
+                problem = f"ffmpeg exited with {proc.returncode}"
+            elif problem is None and not out.startswith(JPEG_MAGIC):
+                problem = "ffmpeg output is not a JPEG"
+            if problem:
+                tail = text.splitlines()[-TAIL_LINES:]
+                raise BenchError(503, problem, stderr_tail=tail)
+            return out
+        finally:
+            self.camera_lock.release()
+
     # -- log
 
     def log(self, since=0, wait=0, max_lines=1000):
@@ -379,6 +422,13 @@ class Handler(BaseHTTPRequestHandler):
         data = json.dumps(body).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _send_jpeg(self, data):
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -441,6 +491,10 @@ class Handler(BaseHTTPRequestHandler):
                 q = urllib.parse.parse_qs(url.query)
                 self._send(200, bench.log(self._num(q, "since", 0, int, 0), self._num(q, "wait", 0, float, 0),
                                           self._num(q, "max", 1000, int, 1)))
+            elif (method, path) == ("GET", "/snapshot.jpg"):
+                q = urllib.parse.parse_qs(url.query)
+                warmup = self._num(q, "warmup", bench.warmup, int, 0) if "warmup" in q else None
+                self._send_jpeg(bench.snapshot(warmup))
             elif (method, path) == ("POST", "/flash"):
                 self._send(200, bench.flash(self._json_body({"elf"}).get("elf")))
             elif (method, path) == ("POST", "/reset"):

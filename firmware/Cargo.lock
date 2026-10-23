@@ -24,6 +24,8 @@ dependencies = [
  "heapless 0.9.3",
  "libm",
  "modes",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

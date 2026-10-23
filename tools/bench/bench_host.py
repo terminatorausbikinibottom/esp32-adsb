@@ -15,8 +15,10 @@ around one espflash process per session, (step 4) GET /snapshot.jpg and (step 8)
 """
 import atexit
 import argparse
+import contextlib
 import glob
 import hmac
+import http
 import ipaddress
 import json
 import os
@@ -48,6 +50,9 @@ PORT_GLOB = "/dev/cu.usbmodem*"
 COMPLETE = "Flashing has completed!"  # espflash's flash-success line (R9: one constant)
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 RING_LINES = 20000
+MAX_LINE = 4096  # bytes per ring line; longer serial lines are split
+LINE_SPLIT_MARK = " [line split]"
+PARTIAL_LINE_QUIET = 0.5  # seconds of silence before a line without newline is shown
 FLASH_TIMEOUT = 300
 LOG_WAIT_CAP = 30
 SNAPSHOT_TIMEOUT = 20
@@ -168,12 +173,21 @@ def stream_argv(ffmpeg, camera, video_size, framerate=None):
 
 def write_token(bench_dir):
     """Generate a fresh token and write it to <bench_dir>/token with mode 0600."""
+    if os.path.islink(bench_dir):
+        raise OSError(f"{bench_dir} is a symlink; refusing to write the token through it")
     os.makedirs(bench_dir, mode=0o700, exist_ok=True)
     token = secrets.token_urlsafe(32)
-    fd = os.open(os.path.join(bench_dir, "token"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        os.fchmod(f.fileno(), 0o600)  # an existing file keeps its old mode otherwise
-        f.write(token)
+    # temp file + rename: an existing `token` (even a symlink) is replaced, never written through
+    fd, tmp = tempfile.mkstemp(dir=bench_dir, prefix=".token-")  # mode 0600
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(token)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, os.path.join(bench_dir, "token"))
+    except BaseException:
+        os.unlink(tmp)
+        raise
     return token
 
 
@@ -334,14 +348,22 @@ class Bench:
         try:
             if stage is None and self.last_elf is None:
                 raise BenchError(409, "nothing has been flashed since startup")
-            new = stage() if stage else None
+            if self.closed:
+                raise BenchError(503, "service is shutting down")
+            try:
+                new = stage() if stage else None
+            except OSError:
+                if self.closed:  # close() removed the stage dir under us
+                    raise BenchError(503, "service is shutting down") from None
+                raise
             try:
                 port = resolve_port(self.port, self.candidates())  # re-resolved every time
                 self._stop_process()
                 s = self._spawn(espflash_argv(self.espflash, port, new or self.last_elf))
             except BaseException:
                 if new:
-                    os.unlink(new)
+                    with contextlib.suppress(FileNotFoundError):  # close() may have removed the stage dir
+                        os.unlink(new)
                 raise
             if new:  # the previous copy is only dropped once the new one is in use
                 old, self.last_elf = self.last_elf, new
@@ -352,32 +374,59 @@ class Bench:
             self.flash_lock.release()
 
     def _spawn(self, argv):
-        try:
-            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, start_new_session=True)
-        except OSError as e:
-            raise BenchError(500, f"cannot start espflash: {e.strerror}") from None
-        with self.cond:
-            self.sessions += 1
-            s = self.session = Session(self.sessions, proc, self.next_seq)
-        s.reader = threading.Thread(target=self._read, args=(s,), daemon=True)
-        s.reader.start()
+        with self.streams_lock:  # close() sets `closed` under it, so nothing spawns after close()
+            if self.closed:
+                raise BenchError(503, "service is shutting down")
+            try:
+                proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, start_new_session=True)
+            except OSError as e:
+                raise BenchError(500, f"cannot start espflash: {e.strerror}") from None
+            with self.cond:  # still under streams_lock: close() then always sees this session
+                self.sessions += 1
+                s = self.session = Session(self.sessions, proc, self.next_seq)
+            s.reader = threading.Thread(target=self._read, args=(s,), daemon=True)
+            s.reader.start()
         return s
 
     def _read(self, s):
-        for raw in s.proc.stdout:
-            text = ANSI_RE.sub("", raw.decode("utf-8", errors="replace")).rstrip("\r\n")
+        fd, buf = s.proc.stdout.fileno(), b""
+        while True:
+            # a pending partial line (a prompt, a panic cut short) is flushed after a quiet period
+            if not select.select([fd], [], [], PARTIAL_LINE_QUIET if buf else None)[0]:
+                self._add_line(s, buf)
+                buf = b""
+                continue
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            *lines, buf = (buf + chunk).split(b"\n")
+            for line in lines:
+                self._add_line(s, line)
+            while len(buf) > MAX_LINE:  # no newline in sight: bounded memory
+                self._add_line(s, buf[:MAX_LINE], truncated=True)
+                buf = buf[MAX_LINE:]
+        if buf:
+            self._add_line(s, buf)
+        s.proc.stdout.close()
+        code = s.proc.wait()
+        with self.cond:
+            s.exit_code, s.phase = code, "exited"
+            self.cond.notify_all()
+
+    def _add_line(self, s, raw, truncated=False):
+        """Append one ring line; a line over MAX_LINE becomes several, all but the last marked."""
+        pieces = [raw[i:i + MAX_LINE] for i in range(0, len(raw), MAX_LINE)] or [raw]
+        for n, piece in enumerate(pieces):
+            text = ANSI_RE.sub("", piece.decode("utf-8", errors="replace")).rstrip("\r\n")
+            if truncated or n < len(pieces) - 1:
+                text += LINE_SPLIT_MARK
             with self.cond:
                 seq, self.next_seq = self.next_seq, self.next_seq + 1
                 self.ring.append({"seq": seq, "t": round(time.time(), 3), "text": text})
                 if s.phase == "flashing" and COMPLETE in text:
                     s.phase, s.app_seq = "running", seq
                 self.cond.notify_all()
-        s.proc.stdout.close()
-        code = s.proc.wait()
-        with self.cond:
-            s.exit_code, s.phase = code, "exited"
-            self.cond.notify_all()
 
     def _tail(self, s):
         return [l["text"] for l in self.ring if l["seq"] >= s.log_seq][-TAIL_LINES:]
@@ -550,6 +599,14 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         # command/path are unset when the request line itself was malformed (e.g. 414).
         command, path = getattr(self, "command", None), getattr(self, "path", "")
+        if fmt.startswith("code "):  # log_error(code, message): message quotes the request line, query included
+            code = args[0] if args and isinstance(args[0], int) else 0
+            reason = http.HTTPStatus(code).phrase if code in set(http.HTTPStatus) else ""
+            sys.stderr.write(f"error -> {code} {reason}\n")
+            return
+        if command is None:  # malformed request line: nothing trustworthy to print but the status
+            sys.stderr.write(f"bad request -> {args[1] if len(args) > 1 else '?'}\n")
+            return
         if command == "GET" and path.startswith("/log") and str(args[1]).startswith("2"):
             return  # long-poll noise; only failures are logged
         # The peer address is always 127.0.0.1 (gvproxy), so it says nothing about the caller.

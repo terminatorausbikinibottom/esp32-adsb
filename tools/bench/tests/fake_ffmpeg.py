@@ -6,6 +6,7 @@ Env: FAKE_FFMPEG_MODE  ok | fail | hang | fallback | notjpeg
      FAKE_FFMPEG_DEVICES  video device names for -list_devices, separated by "|" (default: MacBook Pro-Kamera|HD Pro Webcam C920)
      FAKE_FFMPEG_STREAM_FRAMES  with `-f mpjpeg`: parts to emit (default 3), then exit; 0 = emit until killed
      FAKE_FFMPEG_STREAM_STALL  1 = after the frames, sleep instead of exiting
+     FAKE_FFMPEG_FIRST_FRAME_DELAY  seconds to stay alive and silent before the first part (stream mode)
      FAKE_FFMPEG_CHILD  1 = stream mode also starts a sleeping child (logged) to test group kills
      FAKE_FFMPEG_LOG   file that gets one JSON line {pid, argv} per invocation
 """
@@ -43,6 +44,7 @@ if "mpjpeg" in sys.argv:  # stream mode: like ffmpeg's mpjpeg muxer, with -bound
         with open(os.environ["FAKE_FFMPEG_LOG"], "a") as f:
             f.write(json.dumps({"pid": child.pid, "argv": ["child"]}) + "\n")
     n = int(os.environ.get("FAKE_FFMPEG_STREAM_FRAMES", "3"))
+    time.sleep(float(os.environ.get("FAKE_FFMPEG_FIRST_FRAME_DELAY", "0")))
     out = sys.stdout.buffer
     out.write(f"--{tag}\r\n".encode())
     i = 0

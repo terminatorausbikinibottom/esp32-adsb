@@ -68,6 +68,12 @@ class StreamTest(unittest.TestCase):
         while time.time() < end and any(pid_alive(i["pid"]) for i in self.invocations()):
             time.sleep(0.02)
 
+    def wait_slots_free(self, timeout=4):
+        end = time.time() + timeout
+        while self.bench.streams and time.time() < end:
+            time.sleep(0.02)
+        self.assertEqual(self.bench.streams, set())
+
     def assert_no_orphans(self):
         self.bench.close()
         self.wait_dead()
@@ -131,7 +137,7 @@ class StreamTest(unittest.TestCase):
         r.close()
         self.wait_dead()
         self.assertEqual([p for p in pids if pid_alive(p)], [])
-        self.assertEqual(self.bench.streams, set())
+        self.wait_slots_free()
 
     def test_cap_409_and_slot_freed(self):
         self.mode(FAKE_FFMPEG_STREAM_FRAMES="0", FAKE_FFMPEG_CHILD="0")
@@ -249,7 +255,7 @@ class StreamTest(unittest.TestCase):
         r.close()
         self.wait_dead(3)
         self.assertEqual([p for p in pids if pid_alive(p)], [])
-        self.assertEqual(self.bench.streams, set())
+        self.wait_slots_free()
 
     def test_stall_watchdog_ends_stream(self):
         self.mode(FAKE_FFMPEG_STREAM_FRAMES="1", FAKE_FFMPEG_STREAM_STALL="1")
@@ -261,14 +267,19 @@ class StreamTest(unittest.TestCase):
             pass
         self.assertLess(time.time() - t, 5)
         self.wait_dead()
-        self.assertEqual(self.bench.streams, set())
+        self.wait_slots_free()
 
     def test_client_leaves_during_first_frame_wait(self):
-        self.mode(FAKE_FFMPEG_STREAM_FRAMES="1", FAKE_FFMPEG_STREAM_STALL="1")
+        self.mode(FAKE_FFMPEG_FIRST_FRAME_DELAY="30")  # snapshot_timeout is 3: the host is still waiting
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         c.request("GET", "/stream.mjpg")
-        c.close()  # before any frame is read; a frame may already be in, either way the slot must free
         end = time.time() + 4
-        while self.bench.streams and time.time() < end:
-            time.sleep(0.05)
-        self.assertEqual(self.bench.streams, set())
+        while not (self.bench.streams and self.started()) and time.time() < end:
+            time.sleep(0.02)
+        self.assertTrue(self.bench.streams and self.started())
+        t = time.time()
+        c.close()
+        self.wait_slots_free(timeout=2)  # well before the 3 s first-frame timeout
+        self.wait_dead(2)
+        self.assertLess(time.time() - t, 2.5)
+        self.assertEqual([i for i in self.invocations() if pid_alive(i["pid"])], [])

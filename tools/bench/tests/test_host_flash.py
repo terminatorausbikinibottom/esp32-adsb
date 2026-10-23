@@ -302,6 +302,82 @@ class FlashTest(FlashBase):
             self.assertGreater(sum(t.startswith("ESP-ROM:") for t in texts), 3)
             self.assertNotIn("INFO - alive 0s", texts)
 
+class SerialReaderTest(FlashBase):
+    def test_newline_less_flood_is_bounded(self):
+        with mock.patch.dict(os.environ, {"FAKE_ESPFLASH_MODE": "flood"}):
+            _, r = self.flash()
+        deadline = time.time() + 10
+        while time.time() < deadline and sum(len(l["text"]) for l in self.log(r["app_seq"])["lines"]) < (1 << 20):
+            time.sleep(0.1)
+        lines = self.log(r["app_seq"], max=5000)["lines"]
+        self.assertGreaterEqual(sum(len(l["text"].removesuffix(bh.LINE_SPLIT_MARK)) for l in lines), 1 << 20)
+        self.assertTrue(all(len(l["text"]) <= bh.MAX_LINE + len(bh.LINE_SPLIT_MARK) for l in lines))
+        self.assertTrue(lines[0]["text"].endswith(bh.LINE_SPLIT_MARK))
+
+    def test_partial_line_shows_after_quiet_period(self):
+        with mock.patch.dict(os.environ, {"FAKE_ESPFLASH_MODE": "partial"}):
+            _, r = self.flash()
+        t = time.time()
+        lines, _ = self.wait_for_line("Guru Meditation: no newline", since=r["app_seq"])
+        self.assertGreaterEqual(time.time() - t, 0.3)  # not before the quiet period
+        self.assertEqual([l["text"] for l in lines].count("Guru Meditation: no newline"), 1)
+
+    def test_blank_lines_and_split_complete_line(self):
+        s = bh.Session(1, mock.Mock(), 1)
+        self.bench._add_line(s, b"")
+        self.bench._add_line(s, b"a" * (bh.MAX_LINE + 1))
+        texts = [l["text"] for l in self.bench.ring]
+        self.assertEqual(texts, ["", "a" * bh.MAX_LINE + bh.LINE_SPLIT_MARK, "a"])
+
+
+class CloseRaceTest(FlashBase):
+    def test_close_during_stage_spawns_nothing(self):
+        staging, release = threading.Event(), threading.Event()
+        real = bh.stage_elf
+
+        def slow(*a):
+            staging.set()
+            release.wait(5)
+            return real(*a)
+
+        result = []
+        with mock.patch.object(bh, "stage_elf", slow):
+            t = threading.Thread(target=lambda: result.append(self.flash()))
+            t.start()
+            self.assertTrue(staging.wait(5))
+            self.bench.close()
+            release.set()
+            t.join(10)
+        self.assertEqual(result[0][0], 503)
+        self.assertEqual(self.pids(), [])  # espflash was never started
+        self.assertIsNone(self.bench.session)
+
+
+class MalformedRequestLogTest(FlashBase):
+    def test_log_has_no_query_text(self):
+        import contextlib, io, socket
+        lines = [b"GET /health?q=SECRETa b HTTP/1.1\r\n\r\n", b"GET /health?q=SECRETb HTTP/9.9\r\n\r\n",
+                 b"FOO /x?q=SECRETc HTTP/1.1\r\n\r\n", b"GET /x?q=SECRETd\r\n\r\n",
+                 b"GET /" + b"a" * 70000 + b"?q=SECRETe HTTP/1.1\r\n\r\n", b"SECRETf\r\n\r\n"]
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            for raw in lines:
+                with socket.create_connection(("127.0.0.1", self.port), timeout=5) as c:
+                    try:
+                        c.sendall(raw)
+                    except OSError:
+                        pass
+                    try:
+                        while c.recv(4096):
+                            pass
+                    except OSError:
+                        pass
+            time.sleep(0.2)
+        out = err.getvalue()
+        self.assertIn("-> 4", out)  # something was logged, with a status
+        self.assertNotIn("SECRET", out)
+        self.assertNotIn("q=", out)
+
+
 FAKE_FFMPEG = str(Path(__file__).resolve().parent / "fake_ffmpeg.py")
 
 

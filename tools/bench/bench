@@ -186,9 +186,9 @@ def follow(since, until, fail_on, args, wait_for_it):
             if d["monitor"]["phase"] == "exited":
                 print(f"bench: monitor exited (code {d['monitor']['exit_code']})", file=sys.stderr)
                 return 3
-            if time.monotonic() >= deadline:
-                print("bench: timeout", file=sys.stderr)
-                return 2 if until else 0
+        if wait_for_it and time.monotonic() >= deadline:  # also while lines keep flooding in
+            print("bench: timeout", file=sys.stderr)
+            return 2 if until else 0
 
 
 def cmd_snap(args):

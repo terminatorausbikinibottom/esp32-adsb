@@ -118,11 +118,11 @@ live traffic or your room: they stay in `.bench/`; don't commit or share them.
 Live stream (demo): on the Mac run `open http://127.0.0.1:7777/stream.mjpg` for a 640x480 @ 30 fps
 live view (`--stream-size`, `--stream-framerate`, `--stream-clients`; at most 2 viewers, then
 409; closing the tab stops ffmpeg). The stream needs no token: while the service runs, anything on
-the Mac and any podman container can view the camera (loopback only, not the LAN). Web pages are
-blocked by a Host check (only `127.0.0.1`, `localhost` and `[::1]` with the service port, which
-stops DNS rebinding). Flashing, logs and snapshots still need the token. A snapshot while
-streaming is untested (R19: if it fails, the design falls back to 409). The access log never
-prints query strings.
+the Mac and any podman container can view the camera (loopback only, not the LAN). The Host check
+(only `127.0.0.1`, `localhost` and `[::1]` with the service port) blocks DNS-rebinding reads; any
+web page can still embed the stream (switching the camera on and occupying the 2 slots) but
+cannot read the pixels. Flashing, logs and snapshots still need the token; a snapshot works
+while streaming. The access log never prints query strings.
 
 Use from the container (uv comes with the devcontainer; until it is rebuilt, prefix with
 `python3`):

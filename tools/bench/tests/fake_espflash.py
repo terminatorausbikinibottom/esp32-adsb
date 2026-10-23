@@ -2,7 +2,7 @@
 """Test imitation of `espflash flash --monitor --non-interactive` (S3). Not a uv script.
 
 Run as [sys.executable, this_file, ...espflash args] or directly (python3 shebang).
-Env: FAKE_ESPFLASH_MODE  ok | flash_fail | flash_hang | panic | die | silent | bootloop
+Env: FAKE_ESPFLASH_MODE  ok | flash_fail | flash_hang | panic | die | silent | bootloop | flood | partial
      FAKE_ESPFLASH_INTERVAL  seconds between `alive N` lines (default 0.05)
      FAKE_ESPFLASH_ANSI=1 / FAKE_ESPFLASH_CRLF=1  colour codes / \\r\\n line endings
      FAKE_ESPFLASH_LOG  file that gets one JSON line {pid, argv} per invocation
@@ -80,6 +80,14 @@ def main():
         for _ in range(6):
             first_boot()
             time.sleep(INTERVAL)
+        time.sleep(3600)
+    if MODE == "flood":  # 1 MiB without a newline
+        sys.stdout.write("x" * (1 << 20))
+        sys.stdout.flush()
+        time.sleep(3600)
+    if MODE == "partial":  # a last line that never gets its newline
+        sys.stdout.write("Guru Meditation: no newline")
+        sys.stdout.flush()
         time.sleep(3600)
     first_boot()
     if MODE == "silent":

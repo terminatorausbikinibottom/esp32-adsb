@@ -180,6 +180,25 @@ class TokenTest(unittest.TestCase):
             self.assertGreaterEqual(len(t2), 43)
 
 
+class TokenSymlinkTest(unittest.TestCase):
+    def test_planted_symlinks_are_not_followed(self):
+        with tempfile.TemporaryDirectory() as d:
+            victim = Path(d, "victim")
+            victim.write_text("keep")
+            bench_dir = Path(d, ".bench")
+            bench_dir.mkdir()
+            (bench_dir / "token").symlink_to(victim)
+            token = bh.write_token(bench_dir)
+            self.assertEqual(victim.read_text(), "keep")
+            self.assertFalse((bench_dir / "token").is_symlink())
+            self.assertEqual((bench_dir / "token").read_text(), token)
+            self.assertEqual(os.listdir(bench_dir), ["token"])  # no temp file left behind
+            linked = Path(d, "linked")
+            linked.symlink_to(bench_dir)
+            with self.assertRaises(OSError):
+                bh.write_token(linked)
+
+
 class BindFailureTest(unittest.TestCase):
     def test_port_in_use_keeps_existing_token(self):
         holder = bh.make_server(bh.Bench(), "127.0.0.1", 0)

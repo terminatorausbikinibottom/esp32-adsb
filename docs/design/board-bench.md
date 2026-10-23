@@ -1497,3 +1497,11 @@ time-based warm-up (only relevant if the snapshot rate changes).
   Manual acceptance on the Mac by the user: stream renders in the browser at 30 fps (640x480), camera
   LED goes off when the tab closes, snapshot during an open stream works (R19 resolved). Snapshots now
   show visible moiré at the current mount (structural judging unaffected; mitigate by angle/distance).
+- 2026-10-23 (review, orchestrator note): reviewer findings 1-5 and 7-11 fixed and re-review confirmed
+  (uv install pins per-arch sha256 for 0.13.5 and no longer trusts the release's own .sha256;
+  write_token via mkstemp + os.replace, refuses a symlinked .bench; close()/flash race closed under
+  streams_lock; malformed request lines log only the status; serial reader with a 4096-byte line cap,
+  `[line split]` marker and a 0.5 s partial-line flush; CLI checks --timeout every iteration; README
+  wording; stream test coverage). Finding 6 (ELF path-walk symlink race) accepted by the user: the
+  container can modify the host script anyway. wasm-sim/install.sh exec bit restored (user). The R19
+  row in Risks still carries [VERIFY]; it is resolved per the step-8 close note above.

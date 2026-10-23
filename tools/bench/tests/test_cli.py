@@ -129,6 +129,12 @@ class FlashTest(CliBase):
         self.assertIn("--fail-on matched", p.stderr)
         self.assertIn("panicked at", p.stdout)
 
+    def test_fail_on_matches_partial_last_line(self):
+        self.mode("partial")
+        p = self.run_cli("flash", ELF, "--until", "never-appears", "--fail-on", "Guru Meditation", "--timeout", "20")
+        self.assertEqual(p.returncode, 1, p.all)
+        self.assertIn("--fail-on matched", p.stderr)
+
     def test_fail_on_disabled(self):
         self.mode("panic")
         p = self.run_cli("flash", ELF, "--until", "never-appears", "--fail-on", "", "--timeout", "1")
@@ -319,6 +325,24 @@ class UsageAndShapeTest(CliBase):
     def test_flash_request_timeout_exceeds_host_flash_timeout(self):
         cli = SourceFileLoader("bench_cli", str(CLI_SRC)).load_module()
         self.assertGreater(cli.FLASH_REQUEST_TIMEOUT, bh.FLASH_TIMEOUT)
+
+
+class FollowTimeoutTest(unittest.TestCase):
+    def test_timeout_checked_while_every_poll_has_lines(self):
+        cli = SourceFileLoader("bench_cli", str(CLI_SRC)).load_module()
+        polls = []
+
+        def flood(method, path, body=None, timeout=30):
+            polls.append(path)
+            time.sleep(0.01)
+            return 200, {"dropped": False, "next": len(polls), "monitor": {"phase": "running"},
+                         "lines": [{"seq": len(polls), "text": "INFO - alive"}]}
+
+        args = mock.Mock(timeout=0.3, max_boots=5)
+        with mock.patch.object(cli, "call_json", flood), mock.patch("builtins.print"):
+            t = time.monotonic()
+            self.assertEqual(cli.follow(0, mock.Mock(search=lambda t: False), None, args, True), 2)
+        self.assertLess(time.monotonic() - t, 2)
 
 
 class ShebangTest(unittest.TestCase):

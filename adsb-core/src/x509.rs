@@ -28,8 +28,11 @@ struct Info<'a> {
     eku_server: Option<bool>,
 }
 
-/// Reads one TLV: (tag, whole TLV, content, rest).
-fn tlv(b: &[u8]) -> Option<(u8, &[u8], &[u8], &[u8])> {
+/// (tag, whole TLV, content, rest)
+type Tlv<'a> = (u8, &'a [u8], &'a [u8], &'a [u8]);
+
+/// Reads one TLV.
+fn tlv(b: &[u8]) -> Option<Tlv<'_>> {
     let (&tag, r) = b.split_first()?;
     let (&l0, r) = r.split_first()?;
     let (len, hdr) = if l0 < 0x80 {

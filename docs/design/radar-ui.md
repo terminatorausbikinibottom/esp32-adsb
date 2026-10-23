@@ -718,3 +718,14 @@ app partition size.
     and its host config is out of scope here; (2) run hot code and font data from RAM or from PSRAM
     (XIP from PSRAM style), large linker work; (3) lower the pixel clock (M3) to give the DMA more
     slack; (4) the SRAM bounce-buffer path (M2) or a palette framebuffer in SRAM (M4).
+
+- 2026-10-23, **RD.2 display gate (orchestrator, after 96e37ea)**: K4 glitches confirmed with a 30 fps
+  burst of the bench stream (frames shifted sideways by up to about half a line width, while the card
+  updates). Tried: flash 80 MHz **QIO** via repo-root `espflash.toml` → boot loop (`TG0WDT_SYS_RST`
+  in the 2nd-stage bootloader), so QIO is not usable on this board as is; flash **80 MHz DIO** → boots
+  (`Boot SPI Speed: 80MHz`, `SPI Mode: DIO`), UI runs, but still 16/111 distinct frames flagged in a
+  6 s burst, worst one clearly shifted → not fixed. `--features bounce` with the UI: no refills, no
+  first UI frame (path not integrated with the UI; only built in RD.2). Kept: `espflash.toml` at
+  80 MHz DIO (repo root and `firmware/`). **Gate parked for the user** (options: bounce path
+  integration (M2), lower PCLK (M3), palette framebuffer (M4), code/rodata from PSRAM). RD.4, RD.5,
+  RD.7 continue meanwhile (no dependency on RD.2).

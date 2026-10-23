@@ -8,7 +8,10 @@ of 2 (camera by name), short acceptance run 3 pending;~~ step 8 (`/stream.mjpg`)
 for a demo, with its own 640x480 @ 30 capture settings (pending user confirmation). rev 6: QA of
 fix loop 2 found the snapshot still used the configured index; camera is now selected by name
 only (numeric `--camera` refused); step 6 in a user-authorised fix loop 3 (budget was 2),
-short acceptance run 3 pending.**
+short acceptance run 3 pending. rev 7: step 8 (`/stream.mjpg`) in fix loop 1 after QA (token
+leak in the access log via URL-encoded `?%74oken=`; stalled ffmpeg kept a slot and the camera);
+user decision: the stream is an **anonymous, read-only local view** (no token; Host-header
+guard against DNS rebinding); `?token=` removed everywhere.**
 Date: 2026-10-23.
 Branch: `feature/adsb-display`.
 
@@ -286,7 +289,10 @@ where its cache and managed pythons live.
     of the camera without a human in the loop. Mitigations: the security section and B4. *Rev 5:*
     with a wrong camera index it could also photograph a person or capture the screen (run 2,
     R17); camera by name, startup check and screen-capture refusal close that (rev 6: by name
-    only, numeric values refused, capture uses the resolved name).
+    only, numeric values refused, capture uses the resolved name). *Rev 7:* while the service
+    runs, **any local process and any podman container can watch the live camera** via the
+    unauthenticated `GET /stream.mjpg` (no token needed); the user accepted this explicitly
+    (Security, R18). Flashing and snapshots still need the token.
   - New container prerequisite (rev 3): uv, installed by the new local feature `./features/uv`;
     needs a container rebuild (user action). Until then the tests run with `python3 -m unittest`
     (3.13) and the CLI is called as `python3 tools/bench/bench ...`.
@@ -299,8 +305,11 @@ where its cache and managed pythons live.
 
 ### Host service API (all JSON unless noted)
 
-All requests need `Authorization: Bearer <token>`. The token is compared with
-`hmac.compare_digest`. Only `GET /stream.mjpg` also accepts `?token=`, for the browser.
+All requests need `Authorization: Bearer <token>`, **except `GET /stream.mjpg`** (rev 7: no
+auth, see Security). The token is compared with `hmac.compare_digest`. ~~Only `GET /stream.mjpg`
+also accepts `?token=`, for the browser.~~ Rev 7: **no endpoint accepts a token in the query
+string**; a `?token=` (in any spelling) is ignored, so a token-protected endpoint called with
+only a query token answers 401. The access log never logs query strings (path only).
 
 | Endpoint | Behaviour |
 |----------|-----------|
@@ -310,7 +319,7 @@ All requests need `Authorization: Bearer <token>`. The token is compared with
 | `POST /monitor/stop` | Kill the espflash process and release the serial port (for manual use by the user). **409** while the session is still in the `flashing` phase (killing mid-write leaves a half-written image). |
 | `GET /log?since=N&wait=S&max=M` | Lines with `seq > N`, long-polled up to `S` seconds (cap 30). Returns `{session, app_seq, lines:[{seq, t, text}], next, dropped, monitor:{running, phase, exit_code}}`. `phase` = `flashing` (before `Flashing has completed!`), `running` (after it, process alive), `exited`. `dropped=true` if `N` is older than the oldest buffered line. Ring buffer: 20 000 lines. Lines are UTF-8 decoded with `errors="replace"`, with ANSI escapes and trailing `\r` stripped. The host does no other parsing; boot counting and marker matching happen in the CLI. Rev 4: successful (2xx) `/log` long-polls are **not** written to the host's access log (log noise seen in acceptance run 1); non-2xx responses still are. |
 | `GET /snapshot.jpg?warmup=N` | One-shot ffmpeg (timeout 20 s), returns `image/jpeg`. The output is checked for JPEG magic (`FF D8`). **503** if ffmpeg fails (the body has the stderr tail, which is where TCC denials show up). ffmpeg's stderr is also logged on the host for **every** snapshot, because unsupported framerate/size settings fall back to the device default with only a log line (spike 1c), or are rejected outright with the supported modes listed in stderr (rev 4, acceptance run 1: 29.97 fps). The camera lock is separate from the flash lock, so a snapshot can run during a flash. |
-| `GET /stream.mjpg` | Step 8, ~~optional~~ in scope since rev 5. `Content-Type: multipart/x-mixed-replace; boundary=<b>`; each part `Content-Type: image/jpeg` + `Content-Length`. One ffmpeg per client (`-f mpjpeg -boundary_tag <b>`, bytes passed through; `--stream-size` 640x480, `--stream-framerate` 30), killed (process group) on client disconnect. Auth: bearer **or** `?token=` (this endpoint only); `Origin` header allowed (this endpoint only). At most **2** concurrent stream clients, **409** beyond. Does not take the snapshot camera lock (concurrent device use [VERIFY], step 8). |
+| `GET /stream.mjpg` | Step 8, ~~optional~~ in scope since rev 5. `Content-Type: multipart/x-mixed-replace; boundary=<b>`; each part `Content-Type: image/jpeg` + `Content-Length`. One ffmpeg per client (`-f mpjpeg -boundary_tag <b>`, bytes passed through; `--stream-size` 640x480, `--stream-framerate` 30), killed (process group) on client disconnect. ~~Auth: bearer **or** `?token=` (this endpoint only);~~ Rev 7: **no auth** (anonymous read-only camera view, user decision; any bearer header or `?token=` is ignored); **Host header must be exactly `127.0.0.1:<port>`, `localhost:<port>` or `[::1]:<port>`, else 403** (DNS-rebinding guard, this endpoint only); `Origin` header allowed (this endpoint only). The pump `select`s on the ffmpeg pipe **and** the client socket (~1 s tick), so a disconnect is noticed even while ffmpeg sends nothing; a **no-frame watchdog** (~10 s without pipe data) ends the response, kills the process group and frees the slot. At most **2** concurrent stream clients, **409** beyond. Does not take the snapshot camera lock (concurrent device use [VERIFY], step 8). |
 
 Host config (CLI flags of `bench_host.py`, with env var equivalents): `--port` (serial device;
 default: **auto-detect** = the single `/dev/cu.usbmodem*` match; if there are zero or several, it
@@ -394,11 +403,21 @@ Rules:
   if it identified the caller; anything that can reach the port but cannot read `.bench/token`
   gets 401, and the token's file permissions and per-start regeneration carry the whole access
   control. Containers in the same podman machine that bind-mount this repo (or the user's home)
-  can read the token, so they count as trusted.
+  can read the token, so they count as trusted. *Rev 7:* this applies to every endpoint except
+  `GET /stream.mjpg`, which has no access control beyond loopback and the Host check (below).
 - Requests that carry an `Origin` header are rejected, except `GET /stream.mjpg`. That blocks
   browser-based CSRF/DNS-rebinding attempts against the loopback port even before the token check.
+  Token-protected endpoints do **not** check the `Host` header (the container calls them as
+  `host.containers.internal:7777`); the token covers them, and a DNS-rebinding page can't read
+  `.bench/token`.
+- **Tokens are accepted only in the `Authorization: Bearer` header** (rev 7). No endpoint reads a
+  token from the query string, so no URL ever carries a token. The access log writes the request
+  path **without the query string**, for every endpoint. (Step 8 QA, fix loop 1, found the
+  earlier `token=` redaction regex missed a URL-encoded key such as `?%74oken=`, which `parse_qs`
+  decoded and accepted, so the token was logged in clear; dropping query tokens and query logging
+  removes that class of bug instead of patching the regex.)
 - **`GET /stream.mjpg` exceptions and their cost** (rev 5, step 8 in scope for a demo: a Teams
-  screen share/recording of a browser window on the Mac). Browsers (`<img>`, address bar) and OBS
+  screen share/recording of a browser window on the Mac). ~~Browsers (`<img>`, address bar) and OBS
   browser/media sources can't send a bearer header, so this endpoint alone accepts `?token=`
   (still `hmac.compare_digest`), and alone tolerates an `Origin` header so `<img>` embedding in a
   local page works. Every other endpoint keeps bearer-only and Origin rejection; a test pins
@@ -409,7 +428,32 @@ Rules:
   shares the screen, not the port); the token **rotates on every service start**, so stop/restart
   the service after a demo and old URLs die; don't show the address bar (open the stream full
   window or in a kiosk/app window); the host's access log **redacts** the `token` query value.
-  The stream is read-only (camera), and the client cap bounds camera/CPU use.
+  The stream is read-only (camera), and the client cap bounds camera/CPU use.~~
+  **Rev 7 (user decision after step 8 QA):** "anonymous public stream view is OK. Auth for
+  everything else is good." Browsers and OBS can't send a bearer header, so instead of a query
+  token the stream is **unauthenticated**: `GET /stream.mjpg` is a **read-only camera view that
+  every local process on the Mac and every container in the podman machine can open** while the
+  service runs (gvproxy delivers container requests as `127.0.0.1`, so they are
+  indistinguishable from local ones). The user was told the risks before deciding — any local
+  process, any podman container, and (without a guard) web pages via DNS rebinding could watch
+  the webcam — and **explicitly accepted the privacy consequence** for the first two. Guards that
+  stay or are added:
+  - **DNS-rebinding guard (stream only):** the `Host` header must be exactly `127.0.0.1:<port>`,
+    `localhost:<port>` or `[::1]:<port>` (`<port>` = the listen port), else **403**. A rebinding
+    page's request carries the attacker's host name, so it is refused; a page on `localhost`
+    itself is a local process and is covered by the accepted risk. Consequence: the container
+    can't open the stream via `host.containers.internal:7777` (not needed; the stream is for the
+    human on the Mac).
+  - `Origin` still tolerated here only (so a local page can embed the `<img>`); every other
+    endpoint keeps bearer-only and Origin rejection; tests pin both exceptions to this one path.
+  - Loopback only, **no LAN exposure** (unchanged; the demo shares the screen, not the port).
+  - Read-only: the stream can't flash, reset, or pick the camera; the camera is the host-configured
+    one (screen capture refused). The client cap (2) bounds camera/CPU use, and the no-frame
+    watchdog and socket-aware pump (step 8) keep a stalled ffmpeg from holding a slot or the
+    camera.
+  - Nothing secret is in the stream URL any more, so browser history, OBS config, embedding pages
+    and a visible address bar during a demo leak nothing; no token rotation is needed after a demo.
+  - Stop the service when the camera should not be watchable (camera LED shows active streams).
 - Request bodies are capped at 4 KiB, and unknown JSON keys are rejected. Every subprocess has a
   timeout. Child processes are killed on shutdown (SIGINT/SIGTERM handler, `atexit`).
 - **Children never get the host's terminal** (rev 4, R16). Acceptance run 1 showed espflash's
@@ -451,7 +495,9 @@ Rules:
   (Decision 8).
 - Residual risk: anything that can read `.bench/token`, meaning anything running as the user on
   the Mac or in the container (or another container with the repo mounted), can flash arbitrary ELFs from `firmware/target/` and take photos.
-  That's the intended capability. Stop the service when you're not using it.
+  That's the intended capability. *Rev 7:* watching the live stream needs no token at all — any
+  local process or podman container can (accepted by the user). Stop the service when you're not
+  using it.
 
 ### Layout
 
@@ -464,7 +510,8 @@ tools/bench/
     fake_espflash.py   # S3 imitation: flash progress, "Flashing has completed!", double boot,
                        # periodic alive lines; failure modes; driven by env vars (see step 3)
     fake_ffmpeg.py     # writes a tiny valid JPEG, or fails like a TCC denial; rev 5: canned
-                       # -list_devices stderr (step 4), N mpjpeg parts for the stream (step 8)
+                       # -list_devices stderr (step 4), N mpjpeg parts for the stream (step 8);
+                       # rev 7: one part then stall without exiting (watchdog/disconnect tests)
     test_host_core.py  # path validation, argv builders, ring buffer, ANSI strip
     test_host_http.py  # server on an ephemeral 127.0.0.1 port with the fakes
     test_cli.py        # CLI against the in-container server (end to end, no hardware)
@@ -885,6 +932,14 @@ Each step is one commit, and its verification runs green before the next starts.
      ffmpeg prints it (case, punctuation such as `„“’` included; quote it in the shell);
      `Capture screen <N>` devices are always refused. The camera
      can only be set on the host, never from the container.
+     Rev 7 additions (written with step 8's README part): the stream URL is the literal
+     `http://127.0.0.1:7777/stream.mjpg` (no token, no `$(...)` substitution — QA found the README
+     showed the URL as a `$(...)` shell string, which doesn't work in a browser address bar or an
+     OBS source); `localhost:7777` and `[::1]:7777` also work, any other host name gets 403; the
+     security note says plainly that **while the service runs, any local process and any podman
+     container can watch the camera without a token** (accepted), and to stop the service when
+     that is not wanted; the old "hide the address bar / restart to rotate the token after a demo"
+     caution is dropped (nothing secret in the URL).
    - *Verify:* a fresh agent session that is only given the skill completes step 6's flash→snap
      sequence unaided; the README commands match what was run in step 6.
 
@@ -923,6 +978,14 @@ Each step is one commit, and its verification runs green before the next starts.
      **process group** (`os.killpg`, pid fallback) and frees the client slot; ffmpeg exiting ends
      the response and logs the stderr tail. No timeout on the stream itself (it runs until the
      client leaves); each `write` uses a socket timeout so a stalled client is dropped.
+     **Rev 7 (step 8 QA, fix loop 1):** QA found that an ffmpeg that stalls after the first frame
+     kept the client slot and the camera after the client disconnected, because the pump blocked
+     on the pipe read and only noticed the disconnect on the next write. Fix: the pump
+     `select`s on the ffmpeg stdout pipe **and** the client socket with a ~1 s tick; the client
+     socket becoming readable with EOF (or an error) ends the stream immediately; a **no-frame
+     watchdog** ends the stream if the pipe delivers no data for ~10 s. Every exit path (client
+     gone, watchdog, ffmpeg exit, write error, shutdown) kills the process group and frees the
+     slot exactly once.
    - **Client cap:** at most `--stream-clients` (default **2**) concurrent streams; beyond that
      **409** ("stream clients busy").
    - **Interaction with `/snapshot.jpg`:** a running stream does **not** take the snapshot camera
@@ -930,12 +993,18 @@ Each step is one commit, and its verification runs green before the next starts.
      clients of one camera [VERIFY on the Mac]). If the Mac shows that a second open fails or
      disturbs the stream, the fallback is: an active stream makes `/snapshot.jpg` return **409**
      (the CLI already retries 409 and then exits 4) — revise the doc before switching.
-   - **Auth:** bearer header **or** `?token=` (this endpoint only); `Origin` tolerated (this
-     endpoint only); access log redacts `token=`. Security and R18 record the consequences.
+   - **Auth:** ~~bearer header **or** `?token=` (this endpoint only); `Origin` tolerated (this
+     endpoint only); access log redacts `token=`.~~ Rev 7: **none** (anonymous read-only view,
+     user decision); `Host` must be exactly `127.0.0.1:<port>`, `localhost:<port>` or
+     `[::1]:<port>`, else 403 (this endpoint only); `Origin` tolerated (this endpoint only); no
+     endpoint accepts `?token=`; the access log never contains query strings. Security and R18
+     record the consequences.
    - README (in this step): how to open the stream on the Mac
-     (`http://127.0.0.1:7777/stream.mjpg?token=$(cat .bench/token)` — with `command cat` on the
-     bench Mac), the demo caution (don't show the address bar; restart the service afterwards to
-     rotate the token), OBS browser/media source setup, the client cap.
+     (~~`http://127.0.0.1:7777/stream.mjpg?token=$(cat .bench/token)` — with `command cat` on the
+     bench Mac~~ rev 7: `http://127.0.0.1:7777/stream.mjpg`, a literal URL), ~~the demo caution
+     (don't show the address bar; restart the service afterwards to rotate the token),~~ (rev 7:)
+     the note that any local process/container can watch while the service runs, OBS
+     browser/media source setup, the client cap.
    - *Verify (container):* ~~with the fake ffmpeg emitting two frames, the response has two
      multipart parts and the fake is gone after the client closes.~~ With `fake_ffmpeg.py`
      extended to emit N mpjpeg parts using the `-boundary_tag` from its argv (and exit 2 if
@@ -943,9 +1012,22 @@ Each step is one commit, and its verification runs green before the next starts.
      `multipart/x-mixed-replace` with a boundary equal to the argv's `-boundary_tag`; a stdlib
      multipart parse yields N parts, each `image/jpeg` with a correct `Content-Length` and
      `FF D8` magic; closing the client kills the fake (no process left, group killed); a third
-     concurrent client → 409 and the first two keep streaming; `?token=` accepted here, and
-     `?token=` on `/health`, `/snapshot.jpg`, `/flash` → 401; `Origin` accepted here and still
-     403 on every other endpoint; the access log line contains no token value; the stream argv
+     concurrent client → 409 and the first two keep streaming; ~~`?token=` accepted here, and
+     `?token=` on `/health`, `/snapshot.jpg`, `/flash` → 401;~~ `Origin` accepted here and still
+     403 on every other endpoint; ~~the access log line contains no token value;~~ rev 7:
+     **anonymous** `GET /stream.mjpg` (no `Authorization`, no query) with `Host: 127.0.0.1:<port>`
+     → 200, and likewise with `localhost:<port>` and `[::1]:<port>`; `Host` `evil.example:<port>`,
+     `host.containers.internal:<port>`, `127.0.0.1` with a wrong or missing port, or no `Host`
+     → 403 and no ffmpeg started; a wrong bearer token on the stream is ignored (still 200);
+     `?token=<valid>` and `?%74oken=<valid>` on `/health`, `/snapshot.jpg`, `/flash` → **401**
+     (query tokens ignored everywhere); token-protected endpoints with a bearer token and
+     `Host: host.containers.internal:<port>` → 200 (no Host check there); the captured access log
+     contains no `?`, no query string and no token value for any of these requests;
+     **disconnect/stall:** with a fake ffmpeg mode that writes one part and then stalls without
+     exiting, closing the client kills the fake's process group and frees the slot within ~1–2 s
+     (a new client then gets 200, not 409); with the client still connected, the no-frame
+     watchdog ends the response after its timeout (test-shortened), kills the fake and frees the
+     slot; no orphaned fake processes after any of these; the stream argv
      builder test pins `-framerate 30 -video_size 640x480` by default, configured
      `--stream-size`/`--stream-framerate` replace them, `0`/empty framerate omits it, and the
      snapshot argv is unchanged (`1280x720`); a snapshot during an active stream succeeds with
@@ -957,7 +1039,9 @@ Each step is one commit, and its verification runs green before the next starts.
      log; closing
      the tab stops ffmpeg (camera LED off); a snapshot during a running stream works or the 409
      fallback is decided (concurrency [VERIFY]); a Teams share of the browser window shows the
-     stream with the address bar hidden.
+     stream ~~with the address bar hidden~~ (rev 7: the address bar may show; the URL
+     `http://127.0.0.1:7777/stream.mjpg` carries no secret); the stream opens without any token;
+     `curl -H 'Host: example.com' http://127.0.0.1:7777/stream.mjpg` → 403.
 
 ## Risks
 
@@ -970,7 +1054,7 @@ Each step is one commit, and its verification runs green before the next starts.
 | R5 | Photos of an LCD are hard to judge: auto exposure/white balance drift, moiré, reflections, focus | High / medium; **mildly materialised (spike 1c)** | Spike 1c photo: sharp and well exposed, the colour-bar image clearly judgeable, but window glare top-left (over the green/blue bars) and room reflections on the right of the panel. Fixed mount and angle (plus shading the window), warm-up frames, and a judging rubric of structural checks ("backlight on, no full-screen noise, layout regions present") rather than pixel-exact comparison. ffmpeg's avfoundation input can't lock exposure/WB [VERIFY]. A UVC control tool or the boot test pattern (B3) are follow-ups if needed. Step 6 records the tuning. *Rev 5 (acceptance run 2):* at the current mount the C920 photo of the colour bars shows **no glare**; the panel is judgeable. Exposure/WB locking stays [VERIFY]/deferred. |
 | R6 | The service and the user's manual `espflash` fight over the port | Medium / low | Documented one-holder rule, `POST /monitor/stop`. espflash's "port busy" error is clear. |
 | R7 | Host python version: the Xcode CLT `python3` may be 3.9; the container tests run on 3.13 and wouldn't catch newer syntax | ~~Medium / low~~ **Low (relaxed after spike)** | Original mitigation, now dropped: "Code `bench_host.py` to 3.9 (no `match`, `from __future__ import annotations`, no `tomllib`)". The bench Mac has python 3.15.0, so the binding constraint is the container's 3.13 that runs the tests. New rule: target **>= 3.11** syntax/stdlib for host service and CLI; the README states host `python3 >= 3.11`; the startup check prints the version and refuses to start below 3.11. Remaining gap: a 3.15 host could behave differently from the 3.13 test run (deprecations/removals); step 6 is the check. *Rev 3:* the lower bound is now exercised (canonical tests on 3.11 via uv, plus 3.13); the upper gap stays, and can optionally be narrowed by also running the suite with `uv run --python 3.15 ...` if uv offers that version (not required). |
-| R8 | The capability itself: anything that can read `.bench/token` can flash the board and photograph the room | Certain (by design) / medium | Loopback only, token, Origin rejection, ELF prefix allowlist, temp copy, no shell, the service runs only while started by hand. Images and logs live in gitignored `.bench/`. B4 keeps the user in control of unattended use. |
+| R8 | The capability itself: anything that can read `.bench/token` can flash the board and photograph the room | Certain (by design) / medium | Loopback only, token, Origin rejection, ELF prefix allowlist, temp copy, no shell, the service runs only while started by hand. Images and logs live in gitignored `.bench/`. B4 keeps the user in control of unattended use. *Rev 7:* watching the live stream needs no token (R18). |
 | R9 | Host and container espflash versions differ (flag names, output format) | Medium / ~~low~~ **medium** (S3 depends on output wording) | `/health` reports the host espflash version (4.6.0 at spike 1b). The argv builders sit in one place. Flash success depends on the literal line `Flashing has completed!`; if an upgrade rewords it, flashes end in 504 (timeout) rather than a false success, and the string is one constant. Observed flag values on 4.6.0: `monitor --before` = `default-reset`, `no-reset`, `no-reset-no-sync`; `flash --after` = `hard-reset`, `no-reset` (list possibly truncated). `flash --after no-reset` without `--monitor` printed a harmless WARN about monitor options being ignored; not used under S3. |
 | R11 | Serial port auto-detect picks the wrong device or none: the name changes with the USB port/hub, or a second `usbmodem` device (e.g. the board's CH343 UART port, if also cabled, or another dev board) is present | Medium / low | Auto mode accepts exactly one `/dev/cu.usbmodem*` match and otherwise errors with the candidate list (startup, `/health`, flash/reset 503). `--port` overrides. Filtering by VID 303A would need `ioreg`/`system_profiler` parsing; deferred until ambiguity actually happens. |
 | R12 | Camera settings silently ignored (spike 1c: `-framerate 30` fell back to the device default ~10 fps; pixel format overridden to `uyvy422`) — or, **rev 4**, hard-rejected: without `-framerate` avfoundation requests 29.97 fps and the webcam refuses it (acceptance run 1: 503, ffmpeg exit 251) | Certain / ~~low~~ **medium** (materialised as a hard failure) | ~~Don't pass `-framerate` by default~~ (rev 4: that was the cause of the failure). Pass `-framerate 30` by default (a rate the device lists as supported), configurable via `--framerate`/`BENCH_FRAMERATE`, `0`/empty omits it; warm-up expressed in frames sized for ~10 fps (default 20 ≈ 2 s; revisit if run 2 shows a true 30 fps); ffmpeg stderr logged on every snapshot so fallbacks are visible, and the 503 body carries the stderr tail (which named the supported modes in run 1); JPEG magic check catches outright failure. *Rev 5 (acceptance run 2):* with `-framerate 30` the C920 captures but still falls back to ~10 fps ("Configuration of video device failed"); `uyvy422` is auto-selected after "Selected pixel format (yuv420p) is not supported". Snapshots work (2.19 s); warm-up stays 20 frames. ~~Hypothesis for the fallback: avfoundation first requests `yuv420p`, which the C920 doesn't support, so the device configuration fails and the device falls back to its default (~10 fps); an explicit `-pixel_format` may give a real 30 fps.~~ **Disproven** by the Mac experiment (`uyvy422`/`nv12`/`yuyv422` at 1280x720 @ 30 all still fall back to 10 fps). The cap is resolution-bound (uncompressed YUV over USB 2.0): 1280x720 ~10 fps (at 30 or 15 requested), 1920x1080 ~4.9 fps, **640x480 @ 30 works (fps=31)**. So: no pixel-format option; snapshots keep 1280x720 (sharpness matters more than rate; ~10 fps, 20-frame warm-up ≈ 2 s, unchanged); the stream uses `--stream-size 640x480 --stream-framerate 30` (step 8a). The "configuration failed" warning at 720p is expected and benign. |
@@ -980,8 +1064,9 @@ Each step is one commit, and its verification runs green before the next starts.
 | R15 | uv's interpreter choice drifts (rev 3): with uv's default "prefer managed" policy, once a managed 3.11 is installed the CLI shebang may run on 3.11 instead of the system 3.13, and on the host a later managed install could shadow Homebrew python | Low / low; **materialised, harmless (acceptance run 1)** | Any interpreter >= 3.11 is supported and tested at both ends of the range we control (3.11, 3.13); `/health` reports the host's `python_version`. Rev 4: on the bench Mac `uv run tools/bench/bench_host.py` picked **python 3.12.12** although the Mac's `python3` is 3.15.0 (presumably a uv-managed or other installed interpreter that uv prefers; not investigated). Harmless, since 3.12 is inside the tested range; it also means the R7 "3.15 upper gap" is not what actually runs on the host today. |
 | R16 | A child tool grabs the controlling terminal (rev 4, **materialised in acceptance run 1**): after the first `/flash`, the Mac terminal running `bench_host.py` went into raw mode (staircase output, Ctrl-C dead); the user had to `pkill -f bench_host.py` from another tab and run `reset`. Cause: espflash's monitor (crossterm) opens the controlling terminal via `/dev/tty`, despite `stdin=DEVNULL`, and enables raw mode | Certain without mitigation / medium (host terminal unusable, service can't be stopped with Ctrl-C) | Fix (implemented in parallel to rev 4, see Security): every child (espflash, ffmpeg) is started with `start_new_session=True`, so it has no controlling terminal and `/dev/tty` can't be opened; stop/kill signal the child's **process group** (`os.killpg`, falling back to the pid); `main()` snapshots the termios state of a tty stdin at startup and restores it on exit, as a backstop. README step 7 documents recovery (`pkill -f bench_host.py` from another tab, then `reset`). ~~**Residual [VERIFY in acceptance run 2]:** espflash's monitor might refuse to run, or behave differently, without a controlling tty; if so, revise this doc (options: a pty for the child, or `flash` + S2) rather than improvising.~~ **Resolved (acceptance run 2, rev 5):** espflash runs and streams the full log without a controlling terminal; the host terminal stays clean and Ctrl-C stops the service cleanly. Accepted residual (fix loop 1 QA): a SIGKILL of the host orphans the children. |
 | R17 | Camera index instability (rev 5, **materialised in acceptance run 2**): avfoundation indices shift when devices appear/disappear (Continuity iPhone cameras, desk-view cameras), so a fixed index selects the wrong camera — a person/room camera, or a screen (`Capture screen N` devices are listed as video devices). Run 2: the default `--camera 1` photographed the room instead of the panel | Certain with indices / **high** (privacy: photo of a person, the room or the screen contents; and wrong-evidence verdicts if the agent judged a non-panel image) | Camera chosen by **name**, default `"HD Pro Webcam C920"`; startup lists the avfoundation video devices and refuses to start if the name is missing (prints the list); ~~an all-digit index is accepted only with a stderr warning naming the device it maps to now, out of range refused; `Capture screen…` refused by name or index;~~ *rev 6:* **name only** — an all-digit value (incl. non-ASCII digits) is refused at startup (exit 2, "use a device name" + list), names compared exactly as ffmpeg prints them, a device named exactly `Capture screen <digits>` refused, and snapshot/stream capture always pass the resolved name (QA of fix loop 2 caught the snapshot still passing the configured index); camera configurable only on the host, never per request (Decision 3, host config, Security). Residual: the name→device mapping is checked only at startup, so if the C920 is unplugged while the service runs, ffmpeg fails (503) rather than picking another device — names don't shift the way indices do. Two devices with the same name (a second C920) would be ambiguous [not handled; refuse if it ever happens]. The run-2 accidental photo was deleted immediately and not described. Acceptance run 3 checks the default, the bogus-name refusal and (rev 6) the `--camera 1` refusal. Residual (rev 6): an avfoundation device whose real name is all digits could not be selected; accepted (not seen). |
-| R18 | Stream token exposure (rev 5, step 8): `?token=` puts the service token into URLs — browser history, OBS scene config, pages embedding the `<img>`, and the screen during a Teams demo if the address bar is visible; Origin tolerance on this endpoint lets any local web page embed the stream if it has the token | Medium during demos / medium (the same token authorises `/flash`) | Query token and Origin tolerance limited to `GET /stream.mjpg` (tested); loopback only, no LAN exposure; token rotates per service start — restart after a demo; hide the address bar while sharing; access log redacts the token; client cap 2. A separate read-only stream token would remove the flash capability from leaked URLs — deferred unless demos become routine. |
+| R18 | ~~Stream token exposure (rev 5, step 8): `?token=` puts the service token into URLs — browser history, OBS scene config, pages embedding the `<img>`, and the screen during a Teams demo if the address bar is visible; Origin tolerance on this endpoint lets any local web page embed the stream if it has the token~~ **Rev 7: anonymous local camera access.** `GET /stream.mjpg` needs no token, so while the service runs **any process on the Mac and any container in the podman machine** (all arrive as `127.0.0.1`) can watch the live webcam — the room, and anyone in it. (The rev-5 token-in-URL risk is gone: no endpoint accepts a query token. It had materialised in step 8 QA as a clear-text token in the access log via `?%74oken=`.) | ~~Medium during demos / medium (the same token authorises `/flash`)~~ Certain while the service runs / medium (privacy); **accepted by the user** after being told the risks | ~~Query token and Origin tolerance limited to `GET /stream.mjpg` (tested); loopback only, no LAN exposure; token rotates per service start — restart after a demo; hide the address bar while sharing; access log redacts the token; client cap 2. A separate read-only stream token would remove the flash capability from leaked URLs — deferred unless demos become routine.~~ Read-only (no flash/reset/camera choice); loopback only, no LAN exposure; DNS rebinding from web pages blocked by the stream-only Host check (exact `127.0.0.1:<port>`/`localhost:<port>`/`[::1]:<port>`, else 403); all other endpoints stay bearer-only with Origin rejection; no tokens in URLs and no query strings in the access log; client cap 2; camera LED shows activity; stop the service when the camera must not be watchable; README states this plainly. Residual: a local web page served from `localhost` itself can embed the stream (it is a local process; covered by the acceptance). |
 | R19 | Concurrent camera use (rev 5, step 8): a snapshot while a stream runs may fail to open the device, or disturb the stream, if avfoundation doesn't share the camera as expected | Low–medium / low | Default: stream doesn't take the snapshot lock [VERIFY on the Mac in step 8]; fallback: an active stream makes `/snapshot.jpg` return 409 (CLI retries, then exit 4); snapshot failures already surface as 503 with ffmpeg's stderr. |
+| R20 | Stalled stream ffmpeg (rev 7, **found in step 8 QA**): an ffmpeg that stops producing data after the first frame (camera hiccup, device grabbed) kept the client slot and the camera after the client disconnected, because the pump blocked on the pipe read and noticed the disconnect only on its next write; two such stalls exhaust the 2-client cap (409 for everyone) until restart | Low–medium / medium (stream unusable, camera LED stays on) | **Mitigated:** the pump `select`s on pipe and client socket (~1 s tick), so a disconnect ends the stream promptly; a no-frame watchdog (~10 s) ends a stalled stream even with the client still attached; every exit path kills the process group and frees the slot once (step 8 lifecycle, tested with a stalling fake). Residual: a camera that delivers frames very slowly but within the watchdog window keeps its slot (by design). |
 
 Open questions: ~~B1–B5~~ (decided, see revision log); ~~the [VERIFY] items in step 1~~ (answered
 by the spike); remaining [VERIFY] items: ~~`image2pipe` snapshot form (step 4/6)~~ (closed in
@@ -1002,7 +1087,8 @@ comparison against a sim reference render (needs a headless browser and a captur
 which is its own feature), monitor auto-restart (R3, only if step 6 shows the need), serial
 auto-detect by USB VID (R11), a deliberate-panic ELF to test backtrace decoding; rev 3:
 third-party Python dependencies (stdlib-only stays, Decision 8), test runs on 3.15 (R7); rev 5:
-a separate read-only stream token (R18), disambiguation of two cameras with the same name (R17),
+~~a separate read-only stream token (R18)~~ (superseded in rev 7: the stream needs no token at
+all), disambiguation of two cameras with the same name (R17),
 LAN exposure of the stream (not needed: the demo shares the screen); compressed capture modes
 from the C920 (MJPEG/H.264 on the device, which would lift the USB 2.0 bandwidth cap) — not
 reachable via avfoundation as far as observed (it delivered only uncompressed YUV); a
@@ -1355,3 +1441,59 @@ time-based warm-up (only relevant if the snapshot rate changes).
   names the common substring `scanout started`. B4 allow-list added to the git-excluded
   `.claude/settings.local.json`: `Bash(tools/bench/bench:*)` and `Bash(python3 tools/bench/bench:*)`
   (the python3 form until the container has uv).
+- 2026-10-23: **rev 7, step 8 QA (fix loop 1) and user decision: anonymous stream view** (doc
+  only; the code fix is implemented in parallel). QA findings: (1) the service token was logged
+  in clear for a URL-encoded key `?%74oken=` — the access-log redaction regex didn't match it,
+  while `parse_qs` decoded and accepted it; (2) an ffmpeg that stalled after the first frame kept
+  the client slot and the camera after the client disconnected (blocking pipe read; the
+  disconnect was only noticed on the next write); (3) the README stream URL was a `$(...)` shell
+  string, unusable in a browser/OBS. The user was told the risks of dropping stream auth (any
+  local process, any podman container, and web pages via DNS rebinding could watch the webcam)
+  and decided: "anonymous public stream view is OK. Auth for everything else is good." Nothing
+  deleted; superseded text is struck through.
+  - Status line: rev-7 note appended.
+  - API intro: "only `/stream.mjpg` also accepts `?token=`" struck through; new rule: bearer
+    header only, no endpoint accepts a query token (a query-only token → 401), stream needs no
+    auth, access log never logs query strings.
+  - API `/stream.mjpg` row: "bearer **or** `?token=`" struck through → no auth; exact Host check
+    (`127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>`, else 403); `select` on pipe + socket
+    (~1 s) and no-frame watchdog (~10 s). Origin exemption unchanged.
+  - Consequences: the "photos of the room" bullet notes that any local process/podman container
+    can watch the stream (accepted).
+  - Security: token-only-discriminator bullet notes the stream exception; Origin bullet adds that
+    token-protected endpoints don't check `Host` (the container uses
+    `host.containers.internal:7777`); **new bullet** "tokens only in the Bearer header, no query
+    strings in the access log" (with the `%74oken` finding); the rev-5 stream-exceptions text
+    (query token, history/OBS/on-screen exposure, rotate after demo, hide the address bar,
+    redaction) **struck through** and replaced by the rev-7 text (unauthenticated read-only view,
+    explicit user acceptance, Host-check DNS-rebinding guard, remaining guards); residual-risk
+    bullet notes the anonymous stream.
+  - Layout: `fake_ffmpeg.py` comment gains a stall mode.
+  - Plan step 7: README rev-7 additions (literal URL `http://127.0.0.1:7777/stream.mjpg`, no
+    `$(...)`; allowed host names; plain statement of the anonymous access; token-rotation/address-bar
+    caution dropped).
+  - Plan step 8: lifecycle gains the rev-7 select/watchdog fix; Auth bullet struck through and
+    replaced; README bullet's `?token=$(cat .bench/token)` URL and the demo caution struck through,
+    replaced by the literal URL and the anonymous-access note; container verify: the `?token=`
+    accepted / token-not-logged items struck through, new items (anonymous 200 for the three
+    allowed Hosts; 403 for other/missing Host incl. `host.containers.internal`; wrong bearer
+    ignored on the stream; `?token=` and `?%74oken=` → 401 on other endpoints; bearer + container
+    Host → 200 elsewhere; no query strings in the access log; disconnect during a stall frees the
+    slot in ~1–2 s; watchdog ends a stalled stream; no orphans); manual verify: "address bar
+    hidden" struck through, no-token open and a Host-403 curl added.
+  - Risks: R8 notes the anonymous stream; **R18 rewritten** (old token-exposure text struck
+    through → anonymous local camera access, accepted by the user, mitigations); **new R20**
+    (stalled stream ffmpeg; mitigated by select + watchdog).
+  - Deferred: "a separate read-only stream token" struck through as superseded.
+  - Step numbering 1-8 unchanged.
+- 2026-10-23 (step 8 close, orchestrator note): the token-free stream was blocked twice by Claude
+  Code's auto-mode safety check ("security weaken") when delegated; after the user's explicit
+  in-session approval ("tokenfree stream approved") the orchestrator made the `_authorized` change
+  itself and reviewed the engineer's test/README follow-up. Re-QA PASS (Host-check bypass attempts,
+  auth matrix, stall/disconnect, SIGTERM, leaks). QA low notes: the access log writes a literal `?...`
+  marker when a query was present (no query content is ever logged — this refines "contains no `?`");
+  `log_message` no longer crashes on malformed request lines (`getattr` for command/path); duplicate
+  Host headers: only the first is checked — browsers can't send duplicates, accepted.
+  Manual acceptance on the Mac by the user: stream renders in the browser at 30 fps (640x480), camera
+  LED goes off when the tab closes, snapshot during an open stream works (R19 resolved). Snapshots now
+  show visible moiré at the current mount (structural judging unaffected; mitigate by angle/distance).

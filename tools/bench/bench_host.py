@@ -10,7 +10,8 @@ Start from the repo root: `uv run tools/bench/bench_host.py [--port ...]`
 
 Implemented: config, loopback-only bind, token + auth, GET /health, the pure helpers (ELF
 staging, argv builders, serial port resolution), and (step 3) /flash, /reset, /monitor/stop, /log
-around one espflash process per session, and (step 4) GET /snapshot.jpg. Stream comes later.
+around one espflash process per session, (step 4) GET /snapshot.jpg and (step 8) GET /stream.mjpg
+(anonymous, loopback Host names only; everything else needs the bearer token).
 """
 import atexit
 import argparse
@@ -21,6 +22,7 @@ import json
 import os
 import re
 import secrets
+import select
 import shutil
 import signal
 import socket
@@ -51,6 +53,9 @@ LOG_WAIT_CAP = 30
 SNAPSHOT_TIMEOUT = 20
 JPEG_MAGIC = b"\xff\xd8"
 TAIL_LINES = 20
+STREAM_BOUNDARY = "benchframe"  # also the Content-Type boundary; ffmpeg writes it via -boundary_tag
+STREAM_WRITE_TIMEOUT = 10  # a client that stops reading is dropped after this many seconds
+STREAM_STALL_TIMEOUT = 10  # no ffmpeg output for this long: the stream is dead, end it
 
 
 class BenchError(Exception):
@@ -152,6 +157,15 @@ def ffmpeg_argv(ffmpeg, camera, video_size, warmup, framerate=None):
     return argv + ["-f", "image2pipe", "-c:v", "mjpeg", "pipe:1"]
 
 
+def stream_argv(ffmpeg, camera, video_size, framerate=None):
+    """Live view: ffmpeg's mpjpeg muxer writes the multipart framing, the host copies bytes."""
+    argv = [*_cmd(ffmpeg), "-hide_banner", "-nostats", "-f", "avfoundation"]  # no \r stats in the stderr file
+    if framerate and str(framerate) != "0":
+        argv += ["-framerate", str(framerate)]
+    argv += ["-video_size", video_size, "-i", f"{camera}:none"]
+    return argv + ["-c:v", "mjpeg", "-f", "mpjpeg", "-boundary_tag", STREAM_BOUNDARY, "pipe:1"]
+
+
 def write_token(bench_dir):
     """Generate a fresh token and write it to <bench_dir>/token with mode 0600."""
     os.makedirs(bench_dir, mode=0o700, exist_ok=True)
@@ -222,6 +236,14 @@ def _signal_group(proc, sig):
             pass
 
 
+def _client_gone(sock):
+    """The client socket is readable: EOF or an error means it left (a GET sends nothing more)."""
+    try:
+        return not sock.recv(4096)
+    except OSError:
+        return True
+
+
 # ---- core ------------------------------------------------------------------------------------
 
 
@@ -237,12 +259,17 @@ class Bench:
     def __init__(self, *, repo_root=REPO_ROOT, port=None, camera="HD Pro Webcam C920", video_size="1280x720",
                  framerate="30", warmup=20, elf_prefix="firmware/target/", espflash="espflash",
                  ffmpeg="ffmpeg", candidates=list_candidates, flash_timeout=FLASH_TIMEOUT,
-                 ring_lines=RING_LINES, snapshot_timeout=SNAPSHOT_TIMEOUT):
+                 ring_lines=RING_LINES, snapshot_timeout=SNAPSHOT_TIMEOUT,
+                 stream_size="640x480", stream_framerate="30", stream_clients=2,
+                 stream_stall_timeout=STREAM_STALL_TIMEOUT):
         self.repo_root, self.port, self.camera = repo_root, port, camera
         self.video_size, self.framerate, self.warmup = video_size, framerate, warmup
         self.elf_prefix, self.espflash, self.ffmpeg = elf_prefix, espflash, ffmpeg
         self.candidates, self.flash_timeout = candidates, flash_timeout
         self.snapshot_timeout = snapshot_timeout
+        self.stream_size, self.stream_framerate, self.stream_clients = stream_size, stream_framerate, stream_clients
+        self.stream_stall_timeout = stream_stall_timeout
+        self.streams, self.streams_lock, self.closed = set(), threading.Lock(), False
         self.camera_name = camera  # resolved device name (main() sets it after validation); the one capture uses
         self.camera_lock = threading.Lock()  # separate from flash_lock: snapshots work during a flash
         self.espflash_version = tool_version(espflash, "--version")
@@ -396,6 +423,10 @@ class Bench:
 
     def close(self):
         """Kill the child and delete staged copies. Idempotent; runs on shutdown and at exit."""
+        with self.streams_lock:
+            self.closed = True
+            for proc in self.streams:  # the handler threads see EOF and clean up
+                _signal_group(proc, signal.SIGKILL)
         self._stop_process()
         if self.stage_dir:
             shutil.rmtree(self.stage_dir, ignore_errors=True)
@@ -440,6 +471,56 @@ class Bench:
         finally:
             self.camera_lock.release()
 
+    # -- stream (no camera_lock: it may run beside a snapshot, R19)
+
+    def stream_start(self, client):
+        """Start one ffmpeg for one client socket; returns (proc, stderr_file, first_chunk), or None if
+        the client left while waiting for the first frame (checked once a second).
+
+        503 before any response header if ffmpeg can't start or yields nothing; 409 over the cap.
+        """
+        argv = stream_argv(self.ffmpeg, self.camera_name, self.stream_size, self.stream_framerate)
+        with self.streams_lock:
+            if self.closed:
+                raise BenchError(503, "service is shutting down")
+            if len(self.streams) >= self.stream_clients:
+                raise BenchError(409, "stream clients busy")
+            err = tempfile.TemporaryFile()
+            try:
+                proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=err,
+                                        bufsize=0, start_new_session=True)
+            except OSError as e:
+                err.close()
+                raise BenchError(503, f"cannot start ffmpeg: {e.strerror}") from None
+            self.streams.add(proc)
+        deadline, ready = time.monotonic() + self.snapshot_timeout, False
+        while not ready and time.monotonic() < deadline:
+            r = select.select([proc.stdout, client], [], [], 1)[0]
+            ready = proc.stdout in r
+            if not ready and client in r and _client_gone(client):
+                self.stream_stop(proc, err)
+                return None
+        first = os.read(proc.stdout.fileno(), 65536) if ready else b""
+        if not first:
+            problem = "ffmpeg exited before the first frame" if ready else f"no frame within {self.snapshot_timeout}s"
+            raise BenchError(503, problem, stderr_tail=self.stream_stop(proc, err))
+        return proc, err, first
+
+    def stream_stop(self, proc, err):
+        """Kill the stream's process group, log and return the stderr tail. Idempotent."""
+        _signal_group(proc, signal.SIGKILL)
+        proc.wait()
+        proc.stdout.close()
+        with self.streams_lock:
+            self.streams.discard(proc)
+        if err.closed:
+            return []
+        err.seek(0)
+        text = err.read().decode("utf-8", errors="replace")
+        err.close()
+        sys.stderr.write(f"ffmpeg stream exit {proc.returncode}:\n{text}\n")
+        return text.splitlines()[-TAIL_LINES:]
+
     # -- log
 
     def log(self, since=0, wait=0, max_lines=1000):
@@ -467,10 +548,14 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "bench-host"
 
     def log_message(self, fmt, *args):
-        if self.command == "GET" and self.path.startswith("/log") and str(args[1]).startswith("2"):
+        # command/path are unset when the request line itself was malformed (e.g. 414).
+        command, path = getattr(self, "command", None), getattr(self, "path", "")
+        if command == "GET" and path.startswith("/log") and str(args[1]).startswith("2"):
             return  # long-poll noise; only failures are logged
         # The peer address is always 127.0.0.1 (gvproxy), so it says nothing about the caller.
-        sys.stderr.write(f"{self.command} {self.path} -> {args[1] if len(args) > 1 else '?'}\n")
+        # Query strings are never logged: they can carry the token in any encoding.
+        url = urllib.parse.urlsplit(path)
+        sys.stderr.write(f"{command} {url.path}{'?...' if url.query else ''} -> {args[1] if len(args) > 1 else '?'}\n")
 
     def _send(self, status, body):
         data = json.dumps(body).encode()
@@ -487,7 +572,46 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _authorized(self):
+    def _stream(self, bench):
+        self.close_connection = True
+        started = bench.stream_start(self.connection)  # raises before any header is sent
+        if started is None:
+            return
+        proc, err, chunk = started
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", f"multipart/x-mixed-replace; boundary={STREAM_BOUNDARY}")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.connection.settimeout(STREAM_WRITE_TIMEOUT)
+            while chunk:
+                self.wfile.write(chunk)
+                chunk = self._next_chunk(bench, proc)
+        except OSError:  # client left (BrokenPipe, reset, stalled)
+            pass
+        finally:
+            bench.stream_stop(proc, err)
+
+    def _next_chunk(self, bench, proc):
+        """Next ffmpeg bytes; b"" when ffmpeg ended, the client left, or ffmpeg went silent too long."""
+        last = time.monotonic()
+        while time.monotonic() - last < bench.stream_stall_timeout:
+            ready = select.select([proc.stdout, self.connection], [], [], 1)[0]
+            if proc.stdout in ready:
+                return os.read(proc.stdout.fileno(), 65536)
+            if ready and _client_gone(self.connection):
+                break
+        return b""
+
+    def _authorized(self, stream):
+        """`stream` (GET /stream.mjpg only) is an anonymous camera view (user decision, design rev 7):
+        no token, Origin allowed for embedding, but the Host must be a loopback name (DNS rebinding)."""
+        if stream:
+            port = self.server.server_address[1]
+            if self.headers.get("Host") not in {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}:
+                self._send(403, {"ok": False, "error": "stream is only served to loopback Host names"})
+                return False
+            return True
         if self.headers.get("Origin") is not None:  # browsers: CSRF / DNS rebinding
             self._send(403, {"ok": False, "error": "Origin header not allowed"})
             return False
@@ -534,10 +658,10 @@ class Handler(BaseHTTPRequestHandler):
         return value
 
     def _route(self, method):
-        if not self._authorized() or not self._body_ok():
-            return
         url = urllib.parse.urlsplit(self.path)
         path, bench = url.path, self.server.bench
+        if not self._authorized((method, path) == ("GET", "/stream.mjpg")) or not self._body_ok():
+            return
         try:
             if (method, path) == ("GET", "/health"):
                 self._send(200, bench.health())
@@ -549,6 +673,8 @@ class Handler(BaseHTTPRequestHandler):
                 q = urllib.parse.parse_qs(url.query)
                 warmup = self._num(q, "warmup", bench.warmup, int, 0) if "warmup" in q else None
                 self._send_jpeg(bench.snapshot(warmup))
+            elif (method, path) == ("GET", "/stream.mjpg"):
+                self._stream(bench)
             elif (method, path) == ("POST", "/flash"):
                 self._send(200, bench.flash(self._json_body({"elf"}).get("elf")))
             elif (method, path) == ("POST", "/reset"):
@@ -589,6 +715,9 @@ def parse_args(argv):
     p.add_argument("--video-size", default=env("BENCH_VIDEO_SIZE", "1280x720"))
     p.add_argument("--framerate", default=env("BENCH_FRAMERATE", "30"),
                    help="avfoundation input framerate (default 30; the camera rejects ffmpeg's 29.97 default); 0 or empty = don't pass")
+    p.add_argument("--stream-size", default=env("BENCH_STREAM_SIZE", "640x480"), help="GET /stream.mjpg capture size (640x480 is what the C920 delivers at 30 fps)")
+    p.add_argument("--stream-framerate", default=env("BENCH_STREAM_FRAMERATE", "30"), help="stream input framerate; 0 or empty = don't pass")
+    p.add_argument("--stream-clients", type=int, default=int(env("BENCH_STREAM_CLIENTS", "2")), help="max concurrent stream clients (409 beyond)")
     p.add_argument("--warmup", type=int, default=int(env("BENCH_WARMUP", "20")), help="warm-up frames")
     p.add_argument("--listen", default=env("BENCH_LISTEN", "127.0.0.1:7777"), help="loopback host:port")
     p.add_argument("--elf-prefix", default=env("BENCH_ELF_PREFIX", "firmware/target/"))
@@ -613,7 +742,8 @@ def main(argv=None, bench_dir=REPO_ROOT / ".bench"):
     restore_tty = _save_termios()
     bench = Bench(port=args.port, camera=args.camera, video_size=args.video_size,
                   framerate=args.framerate, warmup=args.warmup, elf_prefix=args.elf_prefix,
-                  espflash=args.espflash, ffmpeg=args.ffmpeg)
+                  espflash=args.espflash, ffmpeg=args.ffmpeg, stream_size=args.stream_size,
+                  stream_framerate=args.stream_framerate, stream_clients=args.stream_clients)
     bench.camera_name = camera_name
     print(f"python {sys.version.split()[0]}, {bench.espflash_version}, "
           f"{tool_version(args.ffmpeg, '-version')}", file=sys.stderr)

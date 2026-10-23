@@ -123,7 +123,7 @@ class FlashTest(FlashBase):
         out = err.getvalue()
         self.assertIn("GET /health -> 200", out)
         self.assertNotIn("/log?since=0", out)
-        self.assertIn("/log?since=x -> 4", out)
+        self.assertIn("/log?... -> 4", out)
 
     def test_fake_pins_argv(self):
         p = subprocess.run([sys.executable, FAKE, "flash", "--monitor"], capture_output=True, timeout=10)

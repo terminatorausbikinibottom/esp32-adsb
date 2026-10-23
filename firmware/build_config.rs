@@ -16,6 +16,7 @@ pub const VARS: &[&str] = &[
     "ADSB_RADIUS_KM",
     "ADSB_DEMO",
     "ADSB_META_PROXY",
+    "ADSB_HTTP_CONTACT",
 ];
 
 /// Returns the source of `config.rs`. `get` reads one variable (unset or not unicode: `None`).
@@ -88,6 +89,16 @@ pub fn generate(get: impl Fn(&str) -> Option<String>) -> Result<String, String> 
         }
         Some(_) => return Err("ADSB_META_PROXY must be `http://<host>:<port>`".into()),
     };
+    // Goes into the User-Agent header: no white space or control characters (header injection).
+    let contact = match get("ADSB_HTTP_CONTACT") {
+        None => "None".to_string(),
+        Some(c) if (1..=120).contains(&c.len()) && c.bytes().all(|b| b.is_ascii_graphic()) => {
+            format!("Some({c:?})")
+        }
+        Some(_) => {
+            return Err("ADSB_HTTP_CONTACT must be 1 to 120 printable ASCII characters without white space".into());
+        }
+    };
     let host = host.map_or("None".to_string(), |h| format!("Some({h:?})"));
 
     Ok(format!(
@@ -100,7 +111,8 @@ pub fn generate(get: impl Fn(&str) -> Option<String>) -> Result<String, String> 
          pub const RX_ELEV_M: f64 = {elev:?};\n\
          pub const RADIUS_KM: f64 = {radius:?};\n\
          pub const DEMO: Option<Demo> = {demo};\n\
-         pub const META_PROXY: Option<&str> = {proxy};\n"
+         pub const META_PROXY: Option<&str> = {proxy};\n\
+         pub const HTTP_CONTACT: Option<&str> = {contact};\n"
     ))
 }
 
@@ -169,6 +181,9 @@ mod tests {
             ("ADSB_FEED_HOST", "a b"),
             ("ADSB_DEMO", MARK),
             ("ADSB_META_PROXY", MARK),
+            ("ADSB_HTTP_CONTACT", "a b"),
+            ("ADSB_HTTP_CONTACT", "a\r\nX-Evil: 1"),
+            ("ADSB_HTTP_CONTACT", ""),
             ("WIFI_SSID", ""),
             ("WIFI_KEY", "short"),
         ];
@@ -210,5 +225,15 @@ mod tests {
         let out = run(&v).unwrap();
         assert!(out.contains(r#"WIFI_SSID: &str = "a\"b\\c";"#));
         assert!(out.contains(r#"Some("http://192.0.2.5:8080")"#));
+    }
+
+    #[test]
+    fn http_contact_is_optional_and_escaped() {
+        assert!(run(&base()).unwrap().contains("HTTP_CONTACT: Option<&str> = None;"));
+        let out = run(&with("ADSB_HTTP_CONTACT", "mailto:me@example.invalid")).unwrap();
+        assert!(out.contains(r#"HTTP_CONTACT: Option<&str> = Some("mailto:me@example.invalid");"#));
+        let out = run(&with("ADSB_HTTP_CONTACT", "https://x.invalid/\"q")).unwrap();
+        assert!(out.contains(r#"Some("https://x.invalid/\"q")"#));
+        assert!(run(&with("ADSB_HTTP_CONTACT", &"a".repeat(121))).is_err());
     }
 }

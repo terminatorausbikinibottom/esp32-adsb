@@ -2,6 +2,7 @@
 //!
 //! Geo maths, dead reckoning, closest point of approach, and the tracker (aircraft table with
 //! ageing, CPR pairing, known-ICAO filter, vicinity and overhead selection, `Snapshot`), and the radar maths (range, projection, blips, sprites).
+//! `wire`: SNTP and HTTP/1.1 reply parsing for the platform network tasks.
 //! The metadata model (`meta`: parsers, cache, lookup policy, rate limiter) and, with feature `photo`, the JPEG decoder. Time is passed in as `now_ms: u64`.
 #![cfg_attr(not(test), no_std)]
 
@@ -17,3 +18,4 @@ pub mod radar;
 #[cfg(feature = "scenario")]
 pub mod scenario;
 pub mod tracker;
+pub mod wire;

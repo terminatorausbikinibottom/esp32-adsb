@@ -830,3 +830,62 @@ app partition size.
   feed task only via the 60 s idle timeout; wifi backoff resets on each association (a flapping
   AP retries every 1–2 s). Reconnect paths reviewed by reading only (AP power cycle and fr24feed
   stop/start need the user). Live radar redraws ~450 rows/s → K4 glitches much more frequent.
+
+- 2026-10-23, **RD.8 result: embedded-tls verifies all three hosts, gate PASSED** (base 744184a + the RD.8
+  commit, live build on the board; negative build `--features tls-wrong-ca`). mbedtls-rs not needed.
+  - **Stack choice: embedded-tls 0.19 used directly, not through reqwless 0.14.** Mismatch with the
+    design text: reqwless 0.14 depends on embedded-tls **0.18**, builds its verifier with `NoClock` (no
+    certificate validity check) and 0.18 matches the host name against the CN only (the leaf CNs are
+    `www.adsbdb.com` and `planespotters.net`, the names are in the SANs). So `firmware/src/tls.rs` has
+    its own `get()` over `TlsConnection` with the 0.19 `pki::CertVerifier` (features `rustpki`, `p384`,
+    `rsa`; webpki is out because it needs ring), a wall clock from SNTP, SAN host matching, TLS 1.3
+    `TLS_AES_128_GCM_SHA256`. HTTP/1.1 is a few lines plus `adsb_core::wire` (`parse_head`, `dechunk`,
+    host-tested); reqwless is not a dependency. RD.9 reuses `tls::get`.
+  - **CA facts (live, 2026-10-23, all TLS 1.3, AES-256-GCM chosen by openssl):** `api.adsbdb.com`: leaf
+    EC P-256 (SAN api.adsbdb.com), Let's Encrypt YE1, Root YE, last sent entry ISRG Root X2 cross-signed by
+    **ISRG Root X1**. `api.planespotters.net`: leaf EC P-256, Google Trust Services WE1, GTS Root R4, last
+    entry R4 cross-signed by **GlobalSign Root CA** (RSA 2048). `t.plnspttrs.net`: leaf RSA 2048 (server
+    signs with rsa_pss_rsae_sha256), Let's Encrypt YR2, Root YR, last entry **ISRG Root X1** itself. Only
+    two roots are pinned (`firmware/certs/`, README has source, fingerprints, expiry: X1 2035-06-04,
+    GlobalSign 2028-01-28). The embedded-tls verifier checks that the **last sent** certificate is signed by the
+    single pinned CA and each sent certificate is signed by the next one, plus validity time and host
+    name; so the pin is chosen per host, and a changed server chain fails closed (reflash).
+    Limits of this verifier (known, accepted for public metadata): it does not check basicConstraints,
+    keyUsage or issuer names, and the whole chain must fit `CHAIN_BYTES` = 8 KB (4 KB failed for the RSA chain with
+    `OutOfMemory`).
+  - **Numbers (board, 3 runs):** SNTP `pool.ntp.org` via DHCP DNS, rtt 1.0 s, time plausible (logged as UTC).
+    Handshake `hs_ms`: adsbdb 3.6-3.7 s (ECDSA P-384 chain checks in software, 3 of them), planespotters
+    1.6 s, image host 0.9 s; request totals 3.8 s, 1.7-2.1 s, 1.0-1.1 s. Bodies: adsbdb 673 B (status 200,
+    `meta: parse ok route=AMS-LHR` with the RD.7 parser), planespotters 410 B (200, `photo=true`), image
+    first 1 KB through `Range` (206, JPEG magic present). Each handshake blocks the executor for
+    about its `hs_ms` (the crypto does not yield): the feed socket buffer (8 KB) and the UI tick stall for
+    that time, so RD.9 must run lookups rarely (policy: 1 req/s max, focus only) and RD.10 should check the
+    feed after a fetch; the `restart` ISR on core 1 kept `frames/s=39` after the spike.
+  - **Memory (K1):** TLS record buffers 16.6 KB + 2 KB, TCP 8 KB + 1 KB, chain copy 8 KB: all plain allocs,
+    confirmed in PSRAM (`bufs_psram=true`). Internal free before 29,108 B; minimum during the requests
+    **20,588 B** (adsbdb, first request; WiFi/DNS/TCP allocate internally), 22.3-25.7 KB for the others;
+    back to 29,108 B and PSRAM back to the old figure afterwards (no leak). Total heap peak
+    (`esp-alloc` `internal-heap-stats` `max_usage`) 0.90-0.91 MB against about 0.85 MB at idle, so TLS peaks at
+    about 55 KB (PSRAM). Gate >= 10 KB internal: pass.
+  - **K12 (ELF sections, release):** `.text` 1,184,437 B (was 697 KB), `.rodata` 942,872 B (was 886 KB),
+    `.data` 19 KB, `.bss` 69 KB, `.rwtext` 16 KB. The TLS crypto (RSA, P-384, bignum) added about 490 KB of
+    code. The image is about 2.3 MB and flashed fine into the default app partition (about 4 MB).
+  - **Negative test:** `--features tls-wrong-ca` pins the other root for every host: all three handshakes fail
+    with `Tls(InvalidCertificate)` after about 200 ms (chain signature check), no HTTP request is sent.
+    Unsynced clock: the verifier gets time 0, so a certificate is never accepted before SNTP.
+  - **API facts (K7) from this step:** planespotters answered **200 with the photo list for a User-Agent without a
+    contact** (`esp32-adsb/0.1.0`) on the board, and with curl's default, an empty and a browser UA from this
+    network; the RD.7 error message ("must include a contact URL or email") did not reproduce. The contact stays an
+    open point for the user: new optional build variable `ADSB_HTTP_CONTACT` (validated, 1-120 printable ASCII, no
+    white space; tests in `build_config.rs`) makes the User-Agent `esp32-adsb/<version> (+<contact>)`, else
+    `esp32-adsb/<version>`. No contact is committed or logged (`contact=true|false` only). Hex 3C6444 is the
+    fixed example aircraft; the image URL comes from the answer, no photo URL is in the repo.
+  - **Other changes:** `embassy-net` `dns` feature, SNTP task (`sntp_task`, at boot and every 6 h; wall clock
+    in `tls.rs`), `StackResources` 3 -> 5 sockets, `tls_spike_task` (one shot at boot in every networked build;
+    RD.9 replaces it by `meta_task`). `adsb_core::wire` (SNTP packet parse, UTC date, HTTP head, chunked body) with
+    unit tests. A feed host given as a name still needs DNS in `feed_task`: not done (untestable without
+    changing the private `.env`).
+  - **Not verified:** the `.env.example` entry for `ADSB_HTTP_CONTACT` (a deny rule blocks edits to that file in
+    this environment; the line to add is `# ADSB_HTTP_CONTACT=https://example.invalid/contact` with a comment),
+    expired-certificate and host-name-mismatch negative tests on the board (library code, not exercised),
+    behaviour when a server changes its chain, mbedtls-rs (not needed).

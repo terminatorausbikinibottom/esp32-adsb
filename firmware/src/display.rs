@@ -206,3 +206,16 @@ unsafe impl DmaTxBuffer for LoopedFb {
         view
     }
 }
+
+/// Writes the cache lines of rows `y0..y1` of the framebuffer at `fb` back to PSRAM so the scanout
+/// DMA sees them (the single cache-maintenance point of the UI, parent R3). Rows are 1600 B, a
+/// multiple of the 64 B cache line.
+///
+/// # Safety
+/// `fb` must point to the WIDTH x HEIGHT framebuffer.
+pub unsafe fn writeback_rows(fb: *const u16, y0: usize, y1: usize) {
+    assert!(y0 <= y1 && y1 <= HEIGHT);
+    // SAFETY: inside the framebuffer; a shared slice is only used to name the range to write back.
+    let rows = unsafe { core::slice::from_raw_parts(fb.add(y0 * WIDTH), (y1 - y0) * WIDTH) };
+    unsafe { esp_hal::dma::aligned::DmaAlignedRef::new_unchecked(rows) }.writeback();
+}

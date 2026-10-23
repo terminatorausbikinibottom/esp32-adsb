@@ -679,3 +679,42 @@ app partition size.
   stock passes, so `[patch.crates-io]` is commented out in `firmware/Cargo.toml`; the vendor
   directory stays. Also found: build-script binaries under `*/target/` from 2026-10-21 had lost
   their execute bit (host file-mode reset); fixed with `chmod u+x`, no clean needed.
+
+- 2026-10-23, **RD.2 result: code and numbers done, display gate FAILED (flicker)** (bench, base
+  ffacf82 + the RD.2 commit; demo build `ADSB_DEMO=overflight --features demo`).
+  - Memory placement (K1) decided: **PSRAM is the first heap region, the internal region is added
+    second** (plain allocs, Slint, pipeline buffers go to PSRAM; esp-radio uses its own
+    `InternalMemory` allocator by capability [verified in esp-radio `compat/malloc.rs`]; the
+    framebuffer uses `alloc_caps(External)` as before). Measured: after `WifiController::new`
+    `internal_free=29892 psram_free=7617616`; steady state with UI + demo feed for 300 s
+    `internal_free=29892` (constant), `psram_free=7607408`. Gate K1 (>= 10 KB internal): pass for
+    now; WiFi is only initialised, not connected, until RD.3, so re-check there.
+  - Render times (`ui: render full_ms=50`): full redraw 50 ms (first frame, 800x480); 1 Hz partial
+    update 5-21 ms (clock only 5 ms / 18 rows; overhead card text 11-21 ms / 150-190 rows); worst
+    partial in the 460 s scenario 50 ms (card change). All far under the targets (400/80/250 ms);
+    no need for 0.5 Hz. ELF sections: `.text` 650 KB, `.rodata` 726 KB (K12: fits, image loads).
+  - Markers in the 300 s run: `ui: first frame`, `ui: card=` NoData, Quiet, Approaching, Overhead,
+    JustPassed; no panic, no allocation failure; `restart: frames/s=39` throughout, isr_max_us <= 22.
+    Photos show the status bar and card with changing values (callsign, FL, speed, distance).
+  - **Flicker (K4/R2), root cause investigation.** With the UI running, a few percent of photos
+    show a corrupted frame (one scanline garbled, all later rows shifted sideways; severity grows
+    with the amount rendered per tick, worst on the overhead card). Method: 30 to 40 photos per
+    variant, automatic count of photos whose static lower panel area differs from the median
+    (build variants through a temporary `UI_EXP` flag, not committed). Results (glitched photos):
+    UI as designed 4/50 (clock only), 5/20 (demo); UI task idle (no render) 0/30; Slint render but
+    **no write and no writeback to the framebuffer** 3/30 and 4/29 (so not the framebuffer writes,
+    not the cache writeback, not a visible intermediate state); busy-loop CPU only 0/30; reading
+    192 KB of **PSRAM** per second 0/30; read-modify-write plus writeback of 160 rows (256 KB) of
+    the live framebuffer per second 0/30 (identical pixels, heavy PSRAM traffic); reading 192 KB
+    of **flash rodata** per second (no render) 2/30. Conclusion: PSRAM contention from CPU data
+    traffic is **not** the cause; the stall comes from **flash cache refills** (code and font data
+    of Slint run from flash at DIO 40 MHz, boot log `Boot SPI Speed: 40MHz, SPI Mode: DIO`) that
+    block the scanout DMA's PSRAM reads on the shared external-memory path for several us.
+    Tried and not enough: only copying rows inside the blank period (rows part is not the main
+    flash user, 6/30 worse), restart ISR made flash-free (`now_us` was a flash function called 6
+    times inside the ISR; inlined, no measurable change 0/40 then 7/40).
+    Options (user decision, per K4 and parent M3/M4): (1) flash at 80 MHz (and QIO) through the
+    host's espflash settings, about 4x shorter refills; the bench service cannot pass flash flags
+    and its host config is out of scope here; (2) run hot code and font data from RAM or from PSRAM
+    (XIP from PSRAM style), large linker work; (3) lower the pixel clock (M3) to give the DMA more
+    slack; (4) the SRAM bounce-buffer path (M2) or a palette framebuffer in SRAM (M4).

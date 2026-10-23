@@ -6,3 +6,4 @@ pub mod ch422g;
 pub mod config;
 pub mod display;
 pub mod restart;
+pub mod ui;

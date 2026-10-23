@@ -32,6 +32,11 @@ exp-no-burst      = []  # e2: internal burst off (esp-hal default, as 1.5 before
 exp-solid         = []  # e3: two SRAM buffers, buffer 0 solid red, buffer 1 solid blue, once, no refill, no interrupts, no core 1
 exp-solid-noeof   = []  # e4: with exp-solid, no suc_eof on any descriptor
 
+# Replace the boot-time test pattern by the UI's black frame (default) with the old bars/ruler.
+diag-pattern = []
+# Feeds the fictitious `ADSB_DEMO` scenario (adsb-core `scenario`) into the pipeline. Needed when ADSB_DEMO is set.
+demo = ["adsb-core/scenario"]
+
 [dependencies]
 esp-hal = { version = "~1.2.2", features = ["esp32s3", "log-04", "unstable"] }
 # Same PAC esp-hal uses; the GDMA out-EOF and LCD VSYNC interrupt registers are not exposed by esp-hal.
@@ -66,6 +71,7 @@ esp-backtrace = { version = "0.20.0", features = [
 esp-println = { version = "0.18.0", features = ["esp32s3", "log-04"] }
 # for more networking protocol support see https://crates.io/crates/edge-net
 embassy-executor = { version = "0.10.0", features = ["log"] }
+embassy-sync = "0.8"
 embassy-time = { version = "0.5.0", features = ["log"] }
 esp-radio = { version = "1.0.0-beta.1", features = [
   "esp-alloc",

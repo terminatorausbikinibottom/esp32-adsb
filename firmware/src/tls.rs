@@ -8,13 +8,14 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering::Relaxed};
 
-use adsb_core::wire;
+use adsb_core::{wire, x509};
 use embassy_net::dns::DnsQueryType;
 use embassy_net::tcp::{self, TcpSocket};
 use embassy_net::{IpAddress, Stack};
 use embassy_time::{Duration, Instant, with_timeout};
 use embedded_io_async::{ErrorType, Read, Write};
 use embedded_tls::pki::CertVerifier;
+use embedded_tls::{CertificateEntryRef, CertificateRef, CertificateVerifyRef};
 use embedded_tls::{
     Aes128GcmSha256, Certificate, CryptoProvider, TlsClock, TlsConfig, TlsConnection, TlsContext,
     TlsError, TlsVerifier,
@@ -67,9 +68,42 @@ impl TlsClock for WallClock {
 /// host is about 5.5 KB). A longer chain fails the handshake with `OutOfMemory`.
 const CHAIN_BYTES: usize = 8192;
 
+/// embedded-tls checks signatures, validity time and host name only. This adds the structural rules
+/// (`adsb_core::x509`: CA flags, key usage, path length, issuer chaining) before it runs.
+struct Checked<'a> {
+    inner: CertVerifier<'a, Aes128GcmSha256, WallClock, CHAIN_BYTES>,
+    root: &'a [u8],
+}
+
+impl TlsVerifier<Aes128GcmSha256> for Checked<'_> {
+    fn set_hostname_verification(&mut self, hostname: &str) -> Result<(), TlsError> {
+        self.inner.set_hostname_verification(hostname)
+    }
+
+    fn verify_certificate(
+        &mut self,
+        transcript: &<Aes128GcmSha256 as embedded_tls::TlsCipherSuite>::Hash,
+        cert: CertificateRef,
+    ) -> Result<(), TlsError> {
+        let mut chain: Vec<&[u8]> = Vec::new();
+        for e in &cert.entries {
+            match e {
+                CertificateEntryRef::X509(der) => chain.push(der),
+                CertificateEntryRef::RawPublicKey(_) => return Err(TlsError::InvalidCertificate),
+            }
+        }
+        x509::check_chain(&chain, self.root).map_err(|_| TlsError::InvalidCertificate)?;
+        self.inner.verify_certificate(transcript, cert)
+    }
+
+    fn verify_signature(&mut self, verify: CertificateVerifyRef) -> Result<(), TlsError> {
+        self.inner.verify_signature(verify)
+    }
+}
+
 struct Provider<'a> {
     rng: ChaCha8Rng,
-    verifier: CertVerifier<'a, Aes128GcmSha256, WallClock, CHAIN_BYTES>,
+    verifier: Checked<'a>,
 }
 
 impl CryptoProvider for Provider<'_> {
@@ -185,7 +219,7 @@ pub async fn get(
     let mut conn = TlsConnection::<_, Aes128GcmSha256>::new(Sampled(socket), &mut read_buf, &mut write_buf);
     let provider = Provider {
         rng: seeded_rng(),
-        verifier: CertVerifier::new(Certificate::X509(root)),
+        verifier: Checked { inner: CertVerifier::new(Certificate::X509(root)), root },
     };
     let t0 = Instant::now();
     conn.open(TlsContext::new(&config, provider)).await.map_err(Error::Tls)?;

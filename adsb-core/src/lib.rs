@@ -18,4 +18,5 @@ pub mod radar;
 #[cfg(feature = "scenario")]
 pub mod scenario;
 pub mod tracker;
+pub mod x509;
 pub mod wire;

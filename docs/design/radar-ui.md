@@ -850,8 +850,9 @@ app partition size.
     GlobalSign 2028-01-28). The embedded-tls verifier checks that the **last sent** certificate is signed by the
     single pinned CA and each sent certificate is signed by the next one, plus validity time and host
     name; so the pin is chosen per host, and a changed server chain fails closed (reflash).
-    Limits of this verifier (known, accepted for public metadata): it does not check basicConstraints,
-    keyUsage or issuer names, and the whole chain must fit `CHAIN_BYTES` = 8 KB (4 KB failed for the RSA chain with
+    The embedded-tls verifier alone does not check basicConstraints, keyUsage or issuer names (orchestrator
+    finding: a holder of any ordinary leaf could sign a forged leaf; fixed in the RD.8 fix, see below).
+    The whole chain must fit `CHAIN_BYTES` = 8 KB (4 KB failed for the RSA chain with
     `OutOfMemory`).
   - **Numbers (board, 3 runs):** SNTP `pool.ntp.org` via DHCP DNS, rtt 1.0 s, time plausible (logged as UTC).
     Handshake `hs_ms`: adsbdb 3.6-3.7 s (ECDSA P-384 chain checks in software, 3 of them), planespotters
@@ -889,3 +890,17 @@ app partition size.
     this environment; the line to add is `# ADSB_HTTP_CONTACT=https://example.invalid/contact` with a comment),
     expired-certificate and host-name-mismatch negative tests on the board (library code, not exercised),
     behaviour when a server changes its chain, mbedtls-rs (not needed).
+
+- 2026-10-23, **RD.8 fix (security, orchestrator finding): structural chain checks.** `firmware/src/tls.rs`
+  wraps the embedded-tls `CertVerifier` in `Checked`, which first runs `adsb_core::x509::check_chain` (pure,
+  host-tested, own minimal DER reader, every parse problem rejects): leaf is not a CA, its keyUsage (if present)
+  has digitalSignature and its extendedKeyUsage (if present) has serverAuth or anyEKU; every other certificate has
+  basicConstraints cA=TRUE, keyUsage (if present) has keyCertSign, pathLenConstraint holds; each issuer name equals
+  the next subject (byte compare) and the last issuer equals the pinned root's subject; chains over 8 entries
+  and raw public keys are rejected. Host tests use fictitious throw-away fixtures in `adsb-core/tests/x509/`
+  (`gen.sh`): good chains pass; forged leaf under an ordinary leaf, intermediate without basicConstraints, CA leaf,
+  bad leaf keyUsage/EKU, bad CA keyUsage, pathLen 0 above a CA, wrong root, garbage all fail with the matching
+  reason. Board: the real chains of all three hosts still pass (`tls: ok ... verify=on`), handshakes 4.3 s / 1.8 s /
+  0.9 s (before: 3.6-3.7 / 1.6 / 0.9; the checks cost milliseconds, the spread is network and server speed).
+  `tls-wrong-ca` still fails all three with `InvalidCertificate` (~200-235 ms); note it is now rejected by the
+  issuer-name check first, so it no longer exercises the signature check (that is unchanged library code).

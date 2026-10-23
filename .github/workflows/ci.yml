@@ -50,8 +50,8 @@ jobs:
       ESP_TOOLCHAIN_VERSION: 1.97.0.0
       # Dummy build configuration (RFC 5737 TEST-NET host, point in the ocean).
       # Not secrets: CI never connects to anything, and this build is never flashed.
-      ADSB_WIFI_SSID: ci-dummy-ssid
-      ADSB_WIFI_PASSWORD: ci-dummy-password
+      WIFI_SSID: ci-dummy-ssid
+      WIFI_KEY: ci-dummy-password
       ADSB_FEED_HOST: 192.0.2.1
       ADSB_RX_LAT: "0.0"
       ADSB_RX_LON: "0.0"
@@ -68,5 +68,7 @@ jobs:
         with:
           workspaces: firmware -> target
           key: esp-${{ env.ESP_TOOLCHAIN_VERSION }}
+      - name: build_config host tests
+        run: rustc --test --edition 2024 build_config.rs -o "$RUNNER_TEMP/bc_test" && "$RUNNER_TEMP/bc_test"
       - run: cargo build --release
       - run: cargo clippy -- -D warnings

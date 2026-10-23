@@ -1,8 +1,27 @@
+#[path = "build_config.rs"]
+mod build_config;
+
 fn main() {
+    generate_config();
     linker_be_nice();
     check_xtensa_linker_available();
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
+}
+
+fn generate_config() {
+    println!("cargo:rerun-if-changed=build_config.rs");
+    for var in build_config::VARS {
+        println!("cargo:rerun-if-env-changed={var}");
+    }
+    match build_config::generate(|n| std::env::var(n).ok()) {
+        Ok(src) => {
+            let out = std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("config.rs");
+            std::fs::write(out, src).unwrap();
+        }
+        // The message never contains a value.
+        Err(msg) => panic!("firmware config (see firmware/.env.example): {msg}"),
+    }
 }
 
 #[cfg(unix)]

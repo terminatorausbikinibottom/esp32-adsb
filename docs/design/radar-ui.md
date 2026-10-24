@@ -1799,3 +1799,13 @@ transformations.)
   (1.02, round). `PIXEL_ASPECT` = **1.076** is kept (datasheet value; per the approval no ruler
   measurement, so the constant carries a camera-based accuracy of a few percent only). The
   constant is defined in `adsb-core::radar` already in this step.
+
+- 2026-10-24, **RD.14.2 done (radar logic, host)**. `adsb-core::radar`: `PIXEL_ASPECT` 1.076,
+  `project` divides the x offset (25 km at 0/90/180/270 deg -> (224,16), (417,224), (224,432),
+  (31,224)), `in_scope` (shared with `blips`), `sprite` maps `dx` to `dx * aspect`, `background`
+  (448x448 RGB8) and `FOCUS_W_PX` = 28. Internal `project_at`, `sprite_at`, `background_at` take the
+  aspect; the old tests run unchanged at 1.0. Choices: the 1-px ring line sits just inside the
+  nominal radius (like a Slint circle border), ring centre is the continuous point (224, 224), so
+  the image is mirror-symmetric except for the two cross-hair lines (symmetry test skips rows and
+  columns 223/224; "old circle is background" is checked at (432, 223) because row 224 is the
+  cross-hair). Host time of `background(Some(60))` (release): 0.39 ms; board time in RD.14.4.

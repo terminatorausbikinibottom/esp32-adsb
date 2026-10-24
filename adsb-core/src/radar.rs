@@ -1,7 +1,8 @@
 //! Radar screen logic: range selection, projection, blip list and sprite rasteriser.
 //!
 //! Pure functions on a [`Snapshot`]; pixel values are relative to the top-left of the
-//! 448x448 radar box.
+//! 448x448 radar box. Pixels are not square on the panel: horizontal offsets are divided by
+//! [`PIXEL_ASPECT`], vertical ones are not (rings, blips and sprites then look round on the glass).
 
 use heapless::{String, Vec};
 
@@ -29,6 +30,8 @@ pub const MAX_BLIPS: usize = 48;
 /// Only the nearest this many aircraft (and the focus) get a label.
 pub const LABELLED: usize = 12;
 pub const SPRITE_PX: usize = 20;
+/// Width of the focus mark in px: `round(30 / PIXEL_ASPECT)`; its height stays 30.
+pub const FOCUS_W_PX: i32 = 28;
 /// Number of rotated plane sprites; the round "no track" sprite is index `SPRITES`.
 pub const SPRITES: u8 = 24;
 pub type Sprite = [u8; SPRITE_PX * SPRITE_PX * 4];
@@ -84,11 +87,15 @@ pub fn select_range(s: &Snapshot, now_ms: u64, st: &mut RangeState) -> RangeKm {
 
 /// North-up azimuthal projection to radar-box pixels (y grows downwards).
 pub fn project(ground_m: f64, bearing_deg: f64, range: RangeKm) -> (i32, i32) {
+    project_at(PIXEL_ASPECT, ground_m, bearing_deg, range)
+}
+
+fn project_at(aspect: f64, ground_m: f64, bearing_deg: f64, range: RangeKm) -> (i32, i32) {
     let k = RING_PX / (range as f64 * 1000.0);
     let b = bearing_deg.to_radians();
     let r = ground_m * k;
     (
-        CENTRE_PX + libm::round(r * libm::sin(b)) as i32,
+        CENTRE_PX + libm::round(r * libm::sin(b) / aspect) as i32,
         CENTRE_PX - libm::round(r * libm::cos(b)) as i32,
     )
 }
@@ -114,15 +121,25 @@ pub fn sprite_index(track_deg: Option<f32>) -> u8 {
     })
 }
 
+/// Whether aircraft `index` of the (distance-sorted) list is drawn as a blip at `range`: it has a
+/// position, lies inside the range and is among the first [`MAX_BLIPS`].
+pub fn in_scope(s: &Snapshot, index: usize, range: RangeKm) -> bool {
+    index < MAX_BLIPS
+        && s.list
+            .get(index)
+            .and_then(|v| v.position)
+            .is_some_and(|p| p.ground_m <= range as f64 * 1000.0)
+}
+
 /// Blips for the positioned aircraft inside `range`, nearest first, at most [`MAX_BLIPS`].
 /// Use [`beyond`] for the "+k beyond" count.
 pub fn blips(s: &Snapshot, range: RangeKm) -> Vec<Blip, MAX_BLIPS> {
     let mut out = Vec::new();
     for (i, v) in s.list.iter().enumerate() {
-        let Some(p) = v.position else { break };
-        if p.ground_m > range as f64 * 1000.0 {
-            break; // sorted by distance
-        }
+        // Sorted by distance: the first aircraft out of scope ends the list.
+        let Some(p) = v.position.filter(|_| in_scope(s, i, range)) else {
+            break;
+        };
         let focus = s.focus == Some(i);
         let mut label = String::new();
         if focus || i < LABELLED {
@@ -214,6 +231,13 @@ fn in_plane(x: f32, y: f32) -> bool {
 /// RGBA (straight alpha) sprite, anti-aliased by 4x4 supersampling. `angle_deg` turns the
 /// plane clockwise from north-up; `None` gives the round "no track" sprite.
 pub fn sprite(angle_deg: Option<f32>, dim: bool, flag: bool) -> Sprite {
+    sprite_at(PIXEL_ASPECT, angle_deg, dim, flag)
+}
+
+/// `sprite` for a panel whose pixels are `aspect` times wider than tall: the shape is drawn in
+/// physical units, so a pixel offset `dx` counts as `dx * aspect`.
+fn sprite_at(aspect: f64, angle_deg: Option<f32>, dim: bool, flag: bool) -> Sprite {
+    let aspect = aspect as f32;
     let (sin, cos) = angle_deg.map_or((0.0, 1.0), |a| {
         let r = a.to_radians();
         (libm::sinf(r), libm::cosf(r))
@@ -232,7 +256,7 @@ pub fn sprite(angle_deg: Option<f32>, dim: bool, flag: bool) -> Sprite {
                 for sx in 0..SUBSAMPLES {
                     let step = 1.0 / SUBSAMPLES as f32;
                     let (dx, dy) = (
-                        px as f32 + (sx as f32 + 0.5) * step - half,
+                        (px as f32 + (sx as f32 + 0.5) * step - half) * aspect,
                         py as f32 + (sy as f32 + 0.5) * step - half,
                     );
                     // Inverse rotation into the nose-up frame.
@@ -261,10 +285,73 @@ pub fn sprite(angle_deg: Option<f32>, dim: bool, flag: bool) -> Sprite {
     out
 }
 
+const BG: [u8; 3] = [0x0a, 0x0d, 0x12];
+const CROSS: [u8; 3] = [0x1c, 0x24, 0x31];
+const RING: [u8; 3] = [0x2f, 0x3a, 0x4d];
+const RADIUS_RING: [u8; 3] = [0x4a, 0x3b, 0x1c];
+
+/// Radar background, 448x448 RGB8: background colour, 1-px cross-hair, the outer and half ring and,
+/// if given, the dim radius ring (`radius_ring_px` = its vertical radius). Rings are ellipses with
+/// horizontal radius `r / PIXEL_ASPECT`, centred on the radar centre.
+pub fn background(radius_ring_px: Option<u16>) -> alloc::vec::Vec<u8> {
+    background_at(PIXEL_ASPECT, radius_ring_px)
+}
+
+fn background_at(aspect: f64, radius_ring_px: Option<u16>) -> alloc::vec::Vec<u8> {
+    let n = RADAR_SIZE_PX as usize;
+    let mut img = alloc::vec![0u8; n * n * 3];
+    for (i, px) in img.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+        let cross = i % n == CENTRE_PX as usize || i / n == CENTRE_PX as usize;
+        px.copy_from_slice(if cross { &CROSS } else { &BG });
+    }
+    let rings = [
+        (RING_PX as f32, RING),
+        (RING_PX as f32 / 2.0, RING),
+        (radius_ring_px.map_or(0.0, f32::from), RADIUS_RING),
+    ];
+    for (ry, colour) in rings.into_iter().filter(|r| r.0 > 0.0) {
+        // The 1-px line lies inside the nominal radius, like the border of a Slint circle.
+        let (ry, rx) = ((ry - 0.5).max(0.5), (ry / aspect as f32 - 0.5).max(0.5));
+        let lo = (CENTRE_PX as f32 - ry - 2.0).max(0.0) as usize;
+        let hi = ((CENTRE_PX as f32 + ry + 2.0) as usize).min(n - 1);
+        let lx = (CENTRE_PX as f32 - rx - 2.0).max(0.0) as usize;
+        let hx = ((CENTRE_PX as f32 + rx + 2.0) as usize).min(n - 1);
+        let min_r = rx.min(ry);
+        for y in lo..=hi {
+            for x in lx..=hx {
+                let (dx, dy) = (
+                    x as f32 + 0.5 - CENTRE_PX as f32,
+                    y as f32 + 0.5 - CENTRE_PX as f32,
+                );
+                let (ex, ey) = (dx / rx, dy / ry);
+                let f = ex * ex + ey * ey - 1.0;
+                // |f| = |d| * |grad f| <= 2 * sqrt(e) / min_r, so far-away pixels skip the sqrt.
+                if f.abs() * min_r > 3.0 {
+                    continue;
+                }
+                // Distance to the ellipse, first order: f / |grad f|.
+                let g = 2.0 * libm::sqrtf(ex * ex / (rx * rx) + ey * ey / (ry * ry));
+                let c = (1.0 - f.abs() / g.max(1e-6)).clamp(0.0, 1.0);
+                let o = (y * n + x) * 3;
+                for k in 0..3 {
+                    let old = f32::from(img[o + k]);
+                    img[o + k] = (old + (f32::from(colour[k]) - old) * c + 0.5) as u8;
+                }
+            }
+        }
+    }
+    img
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tracker::{AircraftView, Card, Counters, PositionView};
+
+    /// The sprite tests below run on square pixels (aspect 1.0).
+    fn sprite(angle: Option<f32>, dim: bool, flag: bool) -> Sprite {
+        sprite_at(1.0, angle, dim, flag)
+    }
 
     fn view(icao: u32, ground_m: f64) -> AircraftView {
         AircraftView {
@@ -371,11 +458,17 @@ mod tests {
                 "{a:?} vs {b:?}"
             );
         };
-        near(project(25_000.0, 0.0, 25), (224, 16));
-        near(project(25_000.0, 90.0, 25), (432, 224));
-        near(project(25_000.0, 180.0, 25), (224, 432));
-        near(project(25_000.0, 270.0, 25), (16, 224));
+        let p = |b| project_at(1.0, 25_000.0, b, 25);
+        near(p(0.0), (224, 16));
+        near(p(90.0), (432, 224));
+        near(p(180.0), (224, 432));
+        near(p(270.0), (16, 224));
         assert_eq!(project(0.0, 123.0, 25), (224, 224));
+        // With the panel aspect only x shrinks: 208 / 1.076 = 193.
+        near(project(25_000.0, 0.0, 25), (224, 16));
+        near(project(25_000.0, 90.0, 25), (417, 224));
+        near(project(25_000.0, 180.0, 25), (224, 432));
+        near(project(25_000.0, 270.0, 25), (31, 224));
     }
 
     #[test]
@@ -460,5 +553,130 @@ mod tests {
         let f = sprite(None, false, true);
         assert_eq!(rgb(&f, 10, 10), [80, 220, 255]);
         assert_eq!(rgb(&f, 10, 5), [255, 180, 0]);
+    }
+
+    #[test]
+    fn focus_width_matches_aspect() {
+        assert_eq!(FOCUS_W_PX, libm::round(30.0 / PIXEL_ASPECT) as i32);
+    }
+
+    #[test]
+    fn in_scope_agrees_with_blips() {
+        let d: Vec<f64, 60> = (0..60).map(|i| 1000.0 + i as f64 * 1000.0).collect();
+        let mut s = snap(&d);
+        for range in RANGE_STEPS_KM {
+            let n = blips(&s, range).len();
+            assert!(
+                (0..60).all(|i| in_scope(&s, i, range) == (i < n)),
+                "range {range}"
+            );
+        }
+        s.list[3].position = None;
+        assert!(!in_scope(&s, 3, 100) && !in_scope(&s, 60, 100));
+    }
+
+    fn covered_width(sp: &Sprite) -> usize {
+        (0..SPRITE_PX)
+            .filter(|&x| (0..SPRITE_PX).any(|y| alpha(sp, x, y) > 0))
+            .count()
+    }
+
+    #[test]
+    fn sprite_width_follows_aspect() {
+        let e = sprite_at(PIXEL_ASPECT, Some(90.0), false, false);
+        let w = covered_width(&e) as f64;
+        assert!((w - 19.0 / PIXEL_ASPECT).abs() <= 1.5, "width {w}");
+        // 0 deg: still symmetric left/right and nose up.
+        let n = sprite_at(PIXEL_ASPECT, Some(0.0), false, false);
+        for y in 0..SPRITE_PX {
+            for x in 0..SPRITE_PX / 2 {
+                assert_eq!(alpha(&n, x, y), alpha(&n, SPRITE_PX - 1 - x, y), "{x},{y}");
+            }
+        }
+        assert!(alpha(&n, 10, 1) > 0 && alpha(&n, 10, 18) > 0);
+        // The "no track" sprite is round on the glass: wider in the shape test, narrower in px.
+        let r = sprite_at(PIXEL_ASPECT, None, false, false);
+        let wr = covered_width(&r) as f64;
+        assert!((wr - 12.0 / PIXEL_ASPECT).abs() <= 1.5, "round width {wr}");
+    }
+
+    fn px(img: &[u8], x: usize, y: usize) -> [u8; 3] {
+        let o = (y * RADAR_SIZE_PX as usize + x) * 3;
+        [img[o], img[o + 1], img[o + 2]]
+    }
+
+    /// Closeness to `c` against the background, 0.0..=1.0.
+    fn weight(p: [u8; 3], c: [u8; 3]) -> f64 {
+        (f64::from(p[1]) - f64::from(BG[1])) / (f64::from(c[1]) - f64::from(BG[1]))
+    }
+
+    #[test]
+    fn background_rings_are_ellipses() {
+        let img = background(Some(60));
+        assert_eq!(img.len(), 448 * 448 * 3);
+        // Best match within one px of the expected ring pixel.
+        let best = |xs: [usize; 3], ys: [usize; 3], c| {
+            xs.iter()
+                .flat_map(|&x| ys.iter().map(move |&y| (x, y)))
+                .map(|(x, y)| weight(px(&img, x, y), c))
+                .fold(0.0, f64::max)
+        };
+        for (r, c) in [(208.0, RING), (104.0, RING), (60.0, RADIUS_RING)] {
+            let rx = (r / PIXEL_ASPECT) as usize;
+            let r = r as usize;
+            // The 1-px line sits just inside the nominal radius; crossing rows avoid the cross-hair.
+            assert!(
+                best([224 + rx - 2, 224 + rx - 1, 224 + rx], [221, 222, 223], c) > 0.5,
+                "right {r}"
+            );
+            assert!(
+                best([224 - rx - 1, 224 - rx, 224 - rx + 1], [221, 222, 223], c) > 0.5,
+                "left {r}"
+            );
+            assert!(
+                best([220, 221, 222], [224 + r - 2, 224 + r - 1, 224 + r], c) > 0.5,
+                "bottom {r}"
+            );
+            assert!(
+                best([220, 221, 222], [224 - r - 1, 224 - r, 224 - r + 1], c) > 0.5,
+                "top {r}"
+            );
+        }
+        // The old circle (r = 208 px wide) is gone; the cross-hair keeps its colour.
+        assert_eq!(px(&img, 432, 223), BG);
+        assert_eq!(px(&img, 100, 224), CROSS);
+        assert_eq!(px(&img, 224, 100), CROSS);
+        assert_eq!(px(&img, 5, 5), BG);
+    }
+
+    #[test]
+    fn background_is_symmetric_and_optional_ring() {
+        let with = background(Some(40));
+        let without = background(None);
+        assert_eq!(without.len(), 448 * 448 * 3);
+        assert_ne!(with, without);
+        // Radius ring only inside the half ring.
+        assert_eq!(px(&without, 224 + 38, 223), BG);
+        assert!(weight(px(&with, 224 + 36, 223), RADIUS_RING) > 0.3);
+        // Mirror symmetry about the centre (224.0), away from the 1-px cross-hair lines.
+        let n = 448;
+        for img in [&with, &without] {
+            for y in 0..n {
+                for x in 0..n {
+                    if [223, 224].contains(&x) || [223, 224].contains(&y) {
+                        continue;
+                    }
+                    assert_eq!(px(img, x, y), px(img, n - 1 - x, y), "lr {x},{y}");
+                    assert_eq!(px(img, x, y), px(img, x, n - 1 - y), "tb {x},{y}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn background_at_square_pixels_is_a_circle() {
+        let img = background_at(1.0, None);
+        assert!(weight(px(&img, 224 + 207, 223), RING) > 0.7);
+        assert!(weight(px(&img, 223, 224 + 207), RING) > 0.7);
     }
 }

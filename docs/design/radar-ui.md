@@ -1163,3 +1163,15 @@ app partition size.
 - 2026-10-24, **K4 user visual check**: the user looked at the panel running the 12 MHz live build
   (9af2c78) and confirmed "no flickering". Independent QA (16 vs 12 MHz reproduction, TLS/photo
   windows, metric validity) is running.
+
+- 2026-10-24, **user feedback and feature request (queued as RD.14 and RD.15)**:
+  - RD.14: on the panel the radar looks elliptic, not circular (the sim PNG is round, 416×416 px).
+    Hypothesis: non-square panel pixels (a 7" 800×480 active area is about 154.2×85.9 mm, i.e.
+    about 7–8 % wider than tall) [VERIFY against the Waveshare/panel datasheet; the camera angle
+    also distorts]. Fix in the radar projection (rings, blips, labels), not in the scanout.
+  - RD.15 (user request): the board has a touchscreen (GT911, parent step 1.6 never done). Default
+    selected aircraft = closest. A tap on another aircraft overrides the selection, and the info
+    panel shows it. The override ends when the selected aircraft leaves the radar scope (then the
+    next closest is selected) or after a configurable timeout. Needs an architect revision first
+    (GT911 driver, hit-testing on the radar, selection policy in adsb-core, config variable and its
+    default, sim support with the mouse).

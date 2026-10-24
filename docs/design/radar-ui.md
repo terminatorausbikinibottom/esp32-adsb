@@ -1827,3 +1827,26 @@ transformations.)
   (includes scenario seek), 1 Hz tick about 0.5 ms (incl. update and render). PNGs read by eye:
   rings smooth, round in `*-physical.png`, blips on the rings, labels not cut, focus mark around
   the focus blip.
+
+- 2026-10-24, **RD.14.4 partly done; K4 re-check FAILS, step not closed**. Build chain: O7c (one RGB8
+  background image) -> measured on the board, busy demo, `ui: render partial_ms` median 106 (scenario
+  0-40 s) and 99 (40-90 s), p90 115 (gate 100; baseline e24c962 on the same windows: median 82 / 59 / 81;
+  the same build without any ring: 78 / 54 / 79) -> **gate failed, switched to O7d (ring tiles)** as
+  the design says. `radar::ring_tiles` (78 tiles / 20.8k px without, 92 / 24.5k with a radius ring),
+  cross-hair back as two Rectangles. O7d on the board: `radar: bg_ms` 67 / 85 (gate 100; the O7c
+  raster needed 187-205 ms before it was optimised to 60-70 ms), `ui: render full_ms=96` (gate 400),
+  busy partial median 96 (0-40 s) / 84 (40-90 s), p90 102, max 145 at start (gate 100 typical: met).
+  `frame_hash` references changed again (rings are alpha-blended tiles now):
+  97dc8ad2e8364819, 0a8157b59ff42f55, aa11074f8989709e, cd065e85d700844f, b66200524b16dba9,
+  eecb395a39b6111d.
+  **K4 burst (K17), busy demo, 12 MHz, O7d build:** 4 usable 8 s bursts: 0/233 (2 frames glitched by
+  eye, f099/f100: rows shifted horizontally, text doubled), 0/232, 0/232, and a run with about 7 glitched
+  frames in 232 (clusters at 1 Hz render ticks, e.g. f108-f110 clearly shifted rows), i.e. about 1.0
+  per 100 over all runs but with a clear regression: baseline e24c962, 3 bursts, 0 flagged frames.
+  Cause (probable): the longer 1 Hz render (96 vs 82 ms) with more PSRAM reads starves the scanout
+  during the render. **11 MHz fallback tried and does not work:** at `PCLK_MHZ` 11 the panel shows its
+  own solid-colour cycle (no image), so 11 MHz is below the panel's minimum clock; reverted. Open
+  decision for the architect: reduce render load further (fewer or larger tiles, 0.5 Hz radar), or
+  accept ~1 per 100. Not measured yet: K1 heap gate over 10 min, round-radar photo, user check; the
+  bench camera showed something else than the panel at the end of this session (wrong camera, photo
+  deleted), so no board photo of the round radar exists yet.

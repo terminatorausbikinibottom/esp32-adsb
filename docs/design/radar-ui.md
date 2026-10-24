@@ -1048,3 +1048,9 @@ app partition size.
   - K1 gate: 10 min live, `internal_min=20588`, heartbeat `internal_free` 20588-29108 (>= 10 KB), no
     panic, 4 `ui: tick gap` (TLS handshakes, known).
   - Not verified: photo (JPEG) panel on the board (RD.10); night traffic = 1-2 aircraft.
+
+- 2026-10-24, **RD.6 PASS** (fee0864; verified by the orchestrator from the engineer's frames:
+  busy demo on the board matches sim `7-busy` (blip pattern, focus, ring labels, "+10 beyond");
+  live panel callsign equals the logged `radar:` focus, with airline/type/route from adsbdb).
+  Render: full 77–78 ms, busy partial 51–76 ms, live typical 7 ms (max 93 ms once); K1 internal
+  min 20588 B. Beads entry pending.

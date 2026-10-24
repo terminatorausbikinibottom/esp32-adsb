@@ -287,28 +287,6 @@ impl Sprites {
     }
 }
 
-/// Rasterises the ring tiles (`radius_ring_px` 0 = no radius ring) and gives them to Slint. Returns
-/// the time taken and the pixel bytes made.
-fn set_rings(ui: &AppWindow, radius_ring_px: i32, now: fn() -> Duration) -> (Duration, usize) {
-    let t0 = now();
-    let tiles = radar::ring_tiles(u16::try_from(radius_ring_px).ok().filter(|&r| r > 0));
-    let bytes = tiles.iter().map(|t| t.rgba.len()).sum();
-    let rows: Vec<ui::RingTile> = tiles
-        .iter()
-        .map(|t| ui::RingTile {
-            x: f32::from(t.x),
-            y: f32::from(t.y),
-            image: Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
-                &t.rgba,
-                u32::from(t.w),
-                u32::from(t.h),
-            )),
-        })
-        .collect();
-    ui.set_ring_tiles(ModelRc::new(VecModel::from(rows)));
-    (now().saturating_sub(t0), bytes)
-}
-
 /// View-model plus the Slint window. Owns the last values pushed to Slint.
 pub struct App {
     window: Rc<MinimalSoftwareWindow>,
@@ -318,9 +296,6 @@ pub struct App {
     range: RangeState,
     blips: Rc<VecModel<ui::Blip>>,
     sprites: Sprites,
-    now: fn() -> Duration,
-    /// Time and size of the last ring build, until taken.
-    bg_build: Option<(Duration, usize)>,
 }
 
 struct SlintPlatform {
@@ -349,7 +324,7 @@ impl App {
         .map_err(|_| PlatformError::Other("platform already set".into()))?;
         window.set_size(PhysicalSize::new(WIDTH as u32, HEIGHT as u32));
         let ui = AppWindow::new()?;
-        let bg_build = Some(set_rings(&ui, 0, now));
+        ui.set_pixel_aspect(radar::PIXEL_ASPECT as f32);
         let mut sprites = Sprites::new();
         // Dim north-up plane for the "no photo" placeholder.
         ui.set_plane_icon(sprites.get(&Blip {
@@ -376,15 +351,7 @@ impl App {
             range: RangeState::default(),
             blips,
             sprites,
-            now,
-            bg_build,
         })
-    }
-
-    /// Time and byte size of the rings built since the last call (the first one at
-    /// start-up, then one per change of the radius ring), for the platform's log.
-    pub fn take_bg_build(&mut self) -> Option<(Duration, usize)> {
-        self.bg_build.take()
     }
 
     /// The values last pushed to Slint.
@@ -487,7 +454,7 @@ impl App {
             ui.set_no_data(new.kind == CardKind::NoData);
         }
         if old.radius_ring_px != new.radius_ring_px {
-            self.bg_build = Some(set_rings(ui, new.radius_ring_px, self.now));
+            ui.set_radius_ring(new.radius_ring_px as f32);
         }
         if old.blips != new.blips {
             for (i, b) in new.blips.iter().enumerate() {

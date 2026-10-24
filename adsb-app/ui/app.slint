@@ -12,13 +12,6 @@ export struct Blip {
     focus: bool,
 }
 
-// One piece of a ring (`radar::ring_tiles`), straight-alpha RGBA.
-export struct RingTile {
-    x: length,
-    y: length,
-    image: image,
-}
-
 component Dot inherits Rectangle {
     in property <bool> ok;
     width: 14px;
@@ -56,6 +49,22 @@ component StatusBar inherits Rectangle {
     }
 }
 
+// Ring with vertical radius `radius` px; the panel's pixels are `aspect` times wider than tall, so
+// the box is `radius * 2 / aspect` px wide (a stadium, within 2 px of a circle on the glass).
+component Ring inherits Rectangle {
+    in property <length> radius;
+    in property <float> aspect;
+    in property <color> line: #2f3a4d;
+    property <length> w: round(2 * radius / 1px / aspect) * 1px;
+    x: 224px - w / 2;
+    y: 224px - radius;
+    width: w;
+    height: 2 * radius;
+    border-radius: w / 2;
+    border-width: 1px;
+    border-color: line;
+}
+
 // "TRK" + "090°": grey caption, value elided to the cell.
 component Cell inherits Rectangle {
     in property <string> caption;
@@ -83,8 +92,10 @@ export component AppWindow inherits Window {
     in property <string> half-label;
     in property <string> range-label;
     in property <string> beyond;
-    // The elliptic rings, outer to radius ring (the panel's pixels are wider than tall).
-    in property <[RingTile]> ring-tiles;
+    // Radius (vertical px) of the dim configured-radius ring; 0 hides it.
+    in property <length> radius-ring;
+    // `radar::PIXEL_ASPECT`, set once.
+    in property <float> pixel-aspect: 1.0;
     in property <image> plane-icon;
 
     // Info panel (focus aircraft).
@@ -127,7 +138,9 @@ export component AppWindow inherits Window {
 
         Rectangle { x: 0px; y: 224px; width: 448px; height: 1px; background: #1c2431; }
         Rectangle { x: 224px; y: 0px; width: 1px; height: 448px; background: #1c2431; }
-        for t in ring-tiles: Image { x: t.x; y: t.y; width: t.image.width * 1px; height: t.image.height * 1px; source: t.image; }
+        Ring { radius: 208px; aspect: pixel-aspect; }
+        Ring { radius: 104px; aspect: pixel-aspect; }
+        if radius-ring > 0px: Ring { radius: radius-ring; aspect: pixel-aspect; line: #4a3b1c; }
 
         Text { x: 230px; y: 2px; text: "N"; font-size: 16px; font-weight: 700; color: #e6e9ef; }
         Text { x: 230px; y: 122px; text: half-label; font-size: 13px; color: #7b8494; }

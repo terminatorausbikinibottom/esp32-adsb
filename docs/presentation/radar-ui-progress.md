@@ -107,6 +107,14 @@ Design and evidence: `docs/design/radar-ui.md`
 
 ---
 
+## Display glitches: live
+
+<span class="time">2026-10-24 09:36 UTC · 30 fps bench camera, real time, live traffic with photo (RD.10)</span>
+
+![h:430](img/k4-flicker-live.gif)
+
+---
+
 ## Display glitches: plan
 
 1. Lower the pixel clock to 12–13 MHz, together with bigger CPU caches.

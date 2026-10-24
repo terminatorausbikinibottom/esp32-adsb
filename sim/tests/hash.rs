@@ -29,12 +29,12 @@ fn keyframe_hashes_are_stable_and_distinct() {
     }
     print!("{report}");
     const REF: [u64; 6] = [
-        0xe17dac042ff64347,
-        0x3add3e907e624f6f,
-        0x50a6e2223a79619b,
-        0xbf8dc80dbcf77ab9,
-        0x7618ffea8d872a38,
-        0x028cdeacffff413d,
+        0x97dc8ad2e8364819,
+        0x0a8157b59ff42f55,
+        0xaa11074f8989709e,
+        0xcd065e85d700844f,
+        0xb66200524b16dba9,
+        0xeecb395a39b6111d,
     ];
     assert_eq!(hashes, REF, "reference hashes changed");
 

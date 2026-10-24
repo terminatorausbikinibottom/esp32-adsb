@@ -285,62 +285,120 @@ fn sprite_at(aspect: f64, angle_deg: Option<f32>, dim: bool, flag: bool) -> Spri
     out
 }
 
-const BG: [u8; 3] = [0x0a, 0x0d, 0x12];
-const CROSS: [u8; 3] = [0x1c, 0x24, 0x31];
 const RING: [u8; 3] = [0x2f, 0x3a, 0x4d];
 const RADIUS_RING: [u8; 3] = [0x4a, 0x3b, 0x1c];
+/// Height of the row bands the rings are cut into.
+const BAND_PX: usize = 16;
 
-/// Radar background, 448x448 RGB8: background colour, 1-px cross-hair, the outer and half ring and,
-/// if given, the dim radius ring (`radius_ring_px` = its vertical radius). Rings are ellipses with
-/// horizontal radius `r / PIXEL_ASPECT`, centred on the radar centre.
-pub fn background(radius_ring_px: Option<u16>) -> alloc::vec::Vec<u8> {
-    background_at(PIXEL_ASPECT, radius_ring_px)
+/// A piece of a ring: straight-alpha RGBA, `w * h * 4` bytes, at (`x`, `y`) in the radar box.
+pub struct Tile {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+    pub rgba: alloc::vec::Vec<u8>,
 }
 
-fn background_at(aspect: f64, radius_ring_px: Option<u16>) -> alloc::vec::Vec<u8> {
-    let n = RADAR_SIZE_PX as usize;
-    let mut img = alloc::vec![0u8; n * n * 3];
-    for (i, px) in img.as_chunks_mut::<3>().0.iter_mut().enumerate() {
-        let cross = i % n == CENTRE_PX as usize || i / n == CENTRE_PX as usize;
-        px.copy_from_slice(if cross { &CROSS } else { &BG });
-    }
+/// The outer ring, the half ring and, if given, the dim radius ring (`radius_ring_px` = its vertical
+/// radius) as ellipses with horizontal radius `r / PIXEL_ASPECT`, 1 px wide and anti-aliased, cut into
+/// tiles (the software renderer has no paths or transforms, and a full-box background image is
+/// too slow to repaint: RD.14.4). Draw them over the radar background.
+pub fn ring_tiles(radius_ring_px: Option<u16>) -> alloc::vec::Vec<Tile> {
+    ring_tiles_at(PIXEL_ASPECT, radius_ring_px)
+}
+
+fn ring_tiles_at(aspect: f64, radius_ring_px: Option<u16>) -> alloc::vec::Vec<Tile> {
     let rings = [
         (RING_PX as f32, RING),
         (RING_PX as f32 / 2.0, RING),
         (radius_ring_px.map_or(0.0, f32::from), RADIUS_RING),
     ];
-    for (ry, colour) in rings.into_iter().filter(|r| r.0 > 0.0) {
-        // The 1-px line lies inside the nominal radius, like the border of a Slint circle.
-        let (ry, rx) = ((ry - 0.5).max(0.5), (ry / aspect as f32 - 0.5).max(0.5));
-        let lo = (CENTRE_PX as f32 - ry - 2.0).max(0.0) as usize;
-        let hi = ((CENTRE_PX as f32 + ry + 2.0) as usize).min(n - 1);
-        let lx = (CENTRE_PX as f32 - rx - 2.0).max(0.0) as usize;
-        let hx = ((CENTRE_PX as f32 + rx + 2.0) as usize).min(n - 1);
-        let min_r = rx.min(ry);
-        for y in lo..=hi {
-            for x in lx..=hx {
-                let (dx, dy) = (
-                    x as f32 + 0.5 - CENTRE_PX as f32,
-                    y as f32 + 0.5 - CENTRE_PX as f32,
-                );
-                let (ex, ey) = (dx / rx, dy / ry);
-                let f = ex * ex + ey * ey - 1.0;
-                // |f| = |d| * |grad f| <= 2 * sqrt(e) / min_r, so far-away pixels skip the sqrt.
-                if f.abs() * min_r > 3.0 {
+    let n = RADAR_SIZE_PX as usize;
+    let mut tiles = alloc::vec::Vec::new();
+    let mut alpha = alloc::vec![0u8; n * n];
+    for (r, colour) in rings.into_iter().filter(|r| r.0 > 0.0) {
+        alpha.fill(0);
+        let (mut y0, mut y1) = (n, 0);
+        ring_coverage(aspect, r, &mut |x, y, c| {
+            alpha[y * n + x] = (c * 255.0 + 0.5) as u8;
+            (y0, y1) = (y0.min(y), y1.max(y + 1));
+        });
+        // Cut the rows y0..y1 into bands; in each band one tile per run of columns with any alpha.
+        for by in (y0..y1).step_by(BAND_PX) {
+            let rows = by..(by + BAND_PX).min(y1);
+            let used = |x: usize| rows.clone().any(|y| alpha[y * n + x] > 0);
+            let mut x = 0;
+            while x < n {
+                if !used(x) {
+                    x += 1;
                     continue;
                 }
-                // Distance to the ellipse, first order: f / |grad f|.
-                let g = 2.0 * libm::sqrtf(ex * ex / (rx * rx) + ey * ey / (ry * ry));
-                let c = (1.0 - f.abs() / g.max(1e-6)).clamp(0.0, 1.0);
-                let o = (y * n + x) * 3;
-                for k in 0..3 {
-                    let old = f32::from(img[o + k]);
-                    img[o + k] = (old + (f32::from(colour[k]) - old) * c + 0.5) as u8;
+                let x0 = x;
+                while x < n && used(x) {
+                    x += 1;
                 }
+                let mut rgba = alloc::vec::Vec::with_capacity((x - x0) * rows.len() * 4);
+                for y in rows.clone() {
+                    for &a in &alpha[y * n + x0..y * n + x] {
+                        rgba.extend_from_slice(&[colour[0], colour[1], colour[2], a]);
+                    }
+                }
+                tiles.push(Tile {
+                    x: x0 as u16,
+                    y: by as u16,
+                    w: (x - x0) as u16,
+                    h: rows.len() as u16,
+                    rgba,
+                });
             }
         }
     }
-    img
+    tiles
+}
+
+/// Calls `put(x, y, coverage)` for every pixel of the radar box within about a pixel of the ellipse
+/// with vertical radius `r` and horizontal radius `r / aspect`, centred on the radar centre.
+fn ring_coverage(aspect: f64, r: f32, put: &mut impl FnMut(usize, usize, f32)) {
+    let n = RADAR_SIZE_PX as usize;
+    // The 1-px line lies inside the nominal radius, like the border of a Slint circle.
+    let (ry, rx) = ((r - 0.5).max(0.5), (r / aspect as f32 - 0.5).max(0.5));
+    let lo = (CENTRE_PX as f32 - ry - 2.0).max(0.0) as usize;
+    let hi = ((CENTRE_PX as f32 + ry + 2.0) as usize).min(n - 1);
+    let min_r = rx.min(ry);
+    // |f| = |d| * |grad f| <= 2 * sqrt(e) / min_r: only pixels with |f| <= 3 / min_r can be within
+    // a pixel of the ring (and the divide-free loop is what keeps this fast on the FPU).
+    let delta = 3.0 / min_r;
+    let (ix, iy) = (1.0 / rx, 1.0 / ry);
+    let centre = CENTRE_PX as f32;
+    for y in lo..=hi {
+        let ey = (y as f32 + 0.5 - centre) * iy;
+        // Columns where f can be in the band: |dx| between `near` and `far`, plus a px of margin.
+        let rest = 1.0 - ey * ey;
+        let far = libm::sqrtf((rest + delta).max(0.0)) * rx + 1.0;
+        let near = libm::sqrtf((rest - delta).max(0.0)) * rx - 1.0;
+        let right = (centre + near.max(0.0)) as usize..((centre + far) as usize + 1).min(n);
+        let left =
+            ((centre - far).max(0.0) as usize)..((centre - near.max(0.0)) as usize + 1).min(n);
+        // Near the top and bottom the two spans meet: draw the union once.
+        let spans = if near <= 0.0 {
+            [left.start..right.end, 0..0]
+        } else {
+            [left, right]
+        };
+        for x in spans.into_iter().flatten() {
+            let ex = (x as f32 + 0.5 - centre) * ix;
+            let f = ex * ex + ey * ey - 1.0;
+            if f.abs() > delta {
+                continue;
+            }
+            // Distance to the ellipse, first order: f / |grad f|.
+            let g = 2.0 * libm::sqrtf(ex * ex * ix * ix + ey * ey * iy * iy);
+            let c = (1.0 - f.abs() / g.max(1e-6)).clamp(0.0, 1.0);
+            if c > 0.0 {
+                put(x, y, c);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -600,6 +658,39 @@ mod tests {
         assert!((wr - 12.0 / PIXEL_ASPECT).abs() <= 1.5, "round width {wr}");
     }
 
+    const BG: [u8; 3] = [0x0a, 0x0d, 0x12];
+    const CROSS: [u8; 3] = [0x1c, 0x24, 0x31];
+    const N: usize = RADAR_SIZE_PX as usize;
+
+    /// What the screen shows: background, cross-hair lines, then the ring tiles alpha-blended.
+    fn background_at(aspect: f64, radius: Option<u16>) -> std::vec::Vec<u8> {
+        let mut img = std::vec::Vec::new();
+        for y in 0..N {
+            for x in 0..N {
+                let cross = x == CENTRE_PX as usize || y == CENTRE_PX as usize;
+                img.extend_from_slice(if cross { &CROSS } else { &BG });
+            }
+        }
+        for t in ring_tiles_at(aspect, radius) {
+            for ty in 0..t.h as usize {
+                for tx in 0..t.w as usize {
+                    let q = &t.rgba[(ty * t.w as usize + tx) * 4..][..4];
+                    let o = ((t.y as usize + ty) * N + t.x as usize + tx) * 3;
+                    for k in 0..3 {
+                        let old = f32::from(img[o + k]);
+                        img[o + k] =
+                            (old + (f32::from(q[k]) - old) * f32::from(q[3]) / 255.0 + 0.5) as u8;
+                    }
+                }
+            }
+        }
+        img
+    }
+
+    fn background(radius: Option<u16>) -> std::vec::Vec<u8> {
+        background_at(PIXEL_ASPECT, radius)
+    }
+
     fn px(img: &[u8], x: usize, y: usize) -> [u8; 3] {
         let o = (y * RADAR_SIZE_PX as usize + x) * 3;
         [img[o], img[o + 1], img[o + 2]]
@@ -678,5 +769,25 @@ mod tests {
         let img = background_at(1.0, None);
         assert!(weight(px(&img, 224 + 207, 223), RING) > 0.7);
         assert!(weight(px(&img, 223, 224 + 207), RING) > 0.7);
+    }
+
+    #[test]
+    fn ring_tiles_are_few_and_small() {
+        let tiles = ring_tiles(Some(60));
+        let area: usize = tiles
+            .iter()
+            .map(|t| usize::from(t.w) * usize::from(t.h))
+            .sum();
+        assert!((60..=200).contains(&tiles.len()), "{} tiles", tiles.len());
+        // A small part of the box: what the renderer saves against a full-box image.
+        assert!(area < 448 * 448 / 4, "{area} px");
+        assert!(
+            tiles
+                .iter()
+                .all(|t| t.rgba.len() == usize::from(t.w) * usize::from(t.h) * 4
+                    && usize::from(t.x + t.w) <= N
+                    && usize::from(t.y + t.h) <= N)
+        );
+        assert!(ring_tiles(None).len() < tiles.len());
     }
 }

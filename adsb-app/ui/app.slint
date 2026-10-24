@@ -12,6 +12,13 @@ export struct Blip {
     focus: bool,
 }
 
+// One piece of a ring (`radar::ring_tiles`), straight-alpha RGBA.
+export struct RingTile {
+    x: length,
+    y: length,
+    image: image,
+}
+
 component Dot inherits Rectangle {
     in property <bool> ok;
     width: 14px;
@@ -76,8 +83,8 @@ export component AppWindow inherits Window {
     in property <string> half-label;
     in property <string> range-label;
     in property <string> beyond;
-    // Opaque 448 x 448 radar background: cross-hair and the elliptic rings (`radar::background`).
-    in property <image> radar-bg;
+    // The elliptic rings, outer to radius ring (the panel's pixels are wider than tall).
+    in property <[RingTile]> ring-tiles;
     in property <image> plane-icon;
 
     // Info panel (focus aircraft).
@@ -118,7 +125,9 @@ export component AppWindow inherits Window {
         clip: true;
         background: #0a0d12;
 
-        Image { x: 0px; y: 0px; width: 448px; height: 448px; source: radar-bg; }
+        Rectangle { x: 0px; y: 224px; width: 448px; height: 1px; background: #1c2431; }
+        Rectangle { x: 224px; y: 0px; width: 1px; height: 448px; background: #1c2431; }
+        for t in ring-tiles: Image { x: t.x; y: t.y; width: t.image.width * 1px; height: t.image.height * 1px; source: t.image; }
 
         Text { x: 230px; y: 2px; text: "N"; font-size: 16px; font-weight: 700; color: #e6e9ef; }
         Text { x: 230px; y: 122px; text: half-label; font-size: 13px; color: #7b8494; }

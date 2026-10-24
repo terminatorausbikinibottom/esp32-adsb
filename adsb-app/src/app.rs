@@ -287,18 +287,26 @@ impl Sprites {
     }
 }
 
-/// Rasterises the radar background (`radius_ring_px` 0 = no radius ring) and gives it to Slint.
-fn set_background(ui: &AppWindow, radius_ring_px: i32, now: fn() -> Duration) -> (Duration, usize) {
+/// Rasterises the ring tiles (`radius_ring_px` 0 = no radius ring) and gives them to Slint. Returns
+/// the time taken and the pixel bytes made.
+fn set_rings(ui: &AppWindow, radius_ring_px: i32, now: fn() -> Duration) -> (Duration, usize) {
     let t0 = now();
-    let rgb = radar::background(u16::try_from(radius_ring_px).ok().filter(|&r| r > 0));
-    ui.set_radar_bg(Image::from_rgb8(
-        SharedPixelBuffer::<Rgb8Pixel>::clone_from_slice(
-            &rgb,
-            radar::RADAR_SIZE_PX as u32,
-            radar::RADAR_SIZE_PX as u32,
-        ),
-    ));
-    (now().saturating_sub(t0), rgb.len())
+    let tiles = radar::ring_tiles(u16::try_from(radius_ring_px).ok().filter(|&r| r > 0));
+    let bytes = tiles.iter().map(|t| t.rgba.len()).sum();
+    let rows: Vec<ui::RingTile> = tiles
+        .iter()
+        .map(|t| ui::RingTile {
+            x: f32::from(t.x),
+            y: f32::from(t.y),
+            image: Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                &t.rgba,
+                u32::from(t.w),
+                u32::from(t.h),
+            )),
+        })
+        .collect();
+    ui.set_ring_tiles(ModelRc::new(VecModel::from(rows)));
+    (now().saturating_sub(t0), bytes)
 }
 
 /// View-model plus the Slint window. Owns the last values pushed to Slint.
@@ -311,7 +319,7 @@ pub struct App {
     blips: Rc<VecModel<ui::Blip>>,
     sprites: Sprites,
     now: fn() -> Duration,
-    /// Time and size of the last radar background build, until taken.
+    /// Time and size of the last ring build, until taken.
     bg_build: Option<(Duration, usize)>,
 }
 
@@ -341,7 +349,7 @@ impl App {
         .map_err(|_| PlatformError::Other("platform already set".into()))?;
         window.set_size(PhysicalSize::new(WIDTH as u32, HEIGHT as u32));
         let ui = AppWindow::new()?;
-        let bg_build = Some(set_background(&ui, 0, now));
+        let bg_build = Some(set_rings(&ui, 0, now));
         let mut sprites = Sprites::new();
         // Dim north-up plane for the "no photo" placeholder.
         ui.set_plane_icon(sprites.get(&Blip {
@@ -373,7 +381,7 @@ impl App {
         })
     }
 
-    /// Time and byte size of the radar background built since the last call (the first one at
+    /// Time and byte size of the rings built since the last call (the first one at
     /// start-up, then one per change of the radius ring), for the platform's log.
     pub fn take_bg_build(&mut self) -> Option<(Duration, usize)> {
         self.bg_build.take()
@@ -479,7 +487,7 @@ impl App {
             ui.set_no_data(new.kind == CardKind::NoData);
         }
         if old.radius_ring_px != new.radius_ring_px {
-            self.bg_build = Some(set_background(ui, new.radius_ring_px, self.now));
+            self.bg_build = Some(set_rings(ui, new.radius_ring_px, self.now));
         }
         if old.blips != new.blips {
             for (i, b) in new.blips.iter().enumerate() {

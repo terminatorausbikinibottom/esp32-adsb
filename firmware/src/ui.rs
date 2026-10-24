@@ -126,6 +126,9 @@ impl FbUi {
             }
         }
         self.app.update(snap, st, meta);
+        if let Some((d, bytes)) = self.app.take_bg_build() {
+            info!("radar: bg_ms={} bytes={bytes}", d.as_millis());
+        }
         // Every 30 s and on focus change; the focus is what the panel title shows (no coordinates).
         let focus = snap.focus.and_then(|i| snap.list.get(i));
         let focus_icao = focus.map(|a| a.icao);

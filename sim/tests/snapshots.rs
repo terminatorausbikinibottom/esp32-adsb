@@ -55,10 +55,11 @@ fn save(sim: &Sim, dir: &Path, name: &str) -> PathBuf {
 
 /// Extent (first..=last) of ring-coloured pixels along a line of `n` samples; `at(i)` is the RGB.
 fn ring_extent(n: usize, at: impl Fn(usize) -> [u8; 3]) -> usize {
-    // Anti-aliased ring pixels are at least half way from the background to the ring colour.
+    // Anti-aliased (and resampled) ring pixels are at least a quarter of the way from the background
+    // to the ring colour.
     let hit = |i| {
         let [r, g, b] = at(i);
-        (0x16..=0x38).contains(&r) && (0x22..=0x48).contains(&g) && (0x2c..=0x60).contains(&b)
+        (0x12..=0x38).contains(&r) && (0x18..=0x48).contains(&g) && (0x20..=0x60).contains(&b)
     };
     let first = (0..n).find(|&i| hit(i)).expect("no ring");
     let last = (0..n).rev().find(|&i| hit(i)).unwrap();

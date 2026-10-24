@@ -204,6 +204,17 @@ pub fn parse_planespotters(body: &[u8]) -> Result<Option<PhotoRef>, MetaError> {
     }))
 }
 
+impl PhotoRef {
+    /// Request path on the image host. `None` for characters that do not belong into a request line
+    /// (the host is trusted through TLS, the path still must not inject headers).
+    pub fn path(&self) -> Option<&str> {
+        let path = self
+            .src
+            .strip_prefix(PHOTO_HOST_PREFIX.trim_end_matches('/'))?;
+        (path.len() > 1 && path.bytes().all(|b| b.is_ascii_graphic())).then_some(path)
+    }
+}
+
 pub const TTL_ROUTE_MS: u64 = 6 * 3600 * 1000;
 pub const TTL_AIRCRAFT_MS: u64 = 7 * 24 * 3600 * 1000;
 pub const TTL_NEGATIVE_MS: u64 = 3600 * 1000;
@@ -595,6 +606,15 @@ mod tests {
             parse_planespotters(big.as_bytes()),
             Err(MetaError::TooLarge)
         );
+    }
+
+    #[test]
+    fn photo_path_is_safe() {
+        let r = |src: &str| PhotoRef { src: src.into(), photographer: String::new() };
+        assert_eq!(r("https://t.plnspttrs.net/00/1_280.jpg").path(), Some("/00/1_280.jpg"));
+        assert_eq!(r("https://t.plnspttrs.net/a b").path(), None);
+        assert_eq!(r("https://t.plnspttrs.net/a\r\nX: y").path(), None);
+        assert_eq!(r("https://t.plnspttrs.net/").path(), None);
     }
 
     #[test]

@@ -1089,3 +1089,34 @@ app partition size.
   (Rust `std` on ESP-IDF via esp-idf-svc: `esp_lcd` RGB panel with bounce buffers and a static
   Slint frame) to prove glitch-free scanout on the board. No migration of the main firmware
   without the user. Quota: stop cleanly at **90 % of the weekly limit** (notify first).
+
+- 2026-10-24, **RD.10 done: photo on the board** (base c67a182 + the RD.10 commit; live build flashed, `ADSB_HTTP_CONTACT`
+  set by the user, log shows `contact=true` only).
+  - **Code.** `meta_task` (firmware `lookup.rs`) runs the photo flow when no text lookup is missing and the focus has
+    been stable for 3 s (`Plan.photo`), not cached and not recently failed: it closes the adsbdb connection, opens
+    `api.planespotters.net` (JSON), closes it, opens `t.plnspttrs.net` (image), closes it, decodes
+    (`adsb_core::photo::decode`, RD.7) and hands the photo to `ui_task` through `Shared.ready`. One TLS socket at a
+    time, so `SOCKETS = 5` in `net.rs` is enough (no change; a concurrent fetch would use the spare). `ui_task` owns the
+    4-entry `Rc<Photo>` cache (`FbUi.photos`) and keeps its old content until the next tick after the swap.
+    `tls::Conn::get` got a `max_body` argument (JSON 32 KB, image `MAX_JPEG` = 96 KB). New `PhotoRef::path()` (host-tested):
+    only graphic ASCII goes into the request line. A started fetch is marked in `photo_skip` (5 min) so the next tick
+    does not queue it twice; "none" and "too big" skip for 1 h, errors back off through the limiter.
+    The adsbdb keep-alive connection is given up when a photo is pending (costs a new 3.5 s handshake for the next text
+    lookup).
+  - **Numbers (board, 11 min uptime, 7 photos).** planespotters answers 200 with the contact (no 403). Handshakes
+    planespotters 1.56-1.66 s, image host 0.93-0.99 s. `photo: ok ... decode_ms` 477-554 (bytes 14-40 KB; decode and
+    scale together, `scale_ms` is not logged separately). Whole flow about 3.6 s (two handshakes, ~0.55 s decode), one
+    `ui: tick gap` of 3.5-4 s per photo. Decode 0.5 s < 1.5 s: the 336x224 size stays, no thumbnail fallback (K9 closed).
+  - **Verify.** `photo: ok` for the focus aircraft: yes. Feed: `frames/s` never 0 (lowest 1 to 2 in the window with the
+    stall, `max_gap_ms` up to 4.9 s), `reconnects=0` in all 67 feed lines, `crc_fail` 0-1, scanout `frames/s=39` throughout.
+    No panic. Gate K1: `internal_min=20588`, heartbeat `internal_free` 29108 (min seen 20588 during a handshake), PSRAM free
+    falls with the photo cache (4 x 226 KB) and tracker, 6.37 MB at 11 min. Panel (burst frame): photo at the top of the
+    panel, colours right (blue sky, A380 in Emirates livery; not swapped), credit line and metadata below. The camera
+    cannot read the credit text. The screen is glitched in nearly every frame at 5-9 aircraft (K4), so the cleanest frame
+    still shows the panel doubled on its left half.
+  - **K4 and the photo path (record, not a fix).** At 7-9 aircraft almost all frames jump against the previous one in every
+    window (before the fetch 71 %, during the fetch 90 %, in the second after the draw 67 %, steady state 95 %), so no
+    photo-specific burst could be separated from the continuous glitching; with 3-7 aircraft and a static photo
+    33 of 148 distinct frames were glitched (median-based counter). Not measured with an empty sky.
+  - **Not done / not verified:** credit text legibility, photo-less aircraft path on the board (`photo: none` did not occur
+    in this run), `too big`/403/429 paths (code and host tests only), a separate `scale_ms`.

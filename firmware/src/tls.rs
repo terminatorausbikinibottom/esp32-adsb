@@ -145,7 +145,8 @@ const READ_BUF: usize = 16 * 1024 + 640; // largest TLS record the server may se
 const WRITE_BUF: usize = 2048;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const IO_TIMEOUT: Duration = Duration::from_secs(20);
-const MAX_REPLY: usize = 32 * 1024;
+/// Body cap of the JSON lookups; the photo passes its own.
+pub const MAX_JSON: usize = 32 * 1024;
 const MAX_HEAD: usize = 4096;
 
 /// TCP and TLS record buffers, allocated once (PSRAM) and lent to one [`Conn`] at a time.
@@ -213,8 +214,9 @@ impl<'a> Conn<'a> {
     }
 
     /// `GET <path>` on this connection. The reply ends by Content-Length, by the last chunk, or
-    /// (neither given) by the server closing, which makes the connection not reusable.
-    pub async fn get(&mut self, path: &str, user_agent: &str) -> Result<Reply, Error> {
+    /// (neither given) by the server closing, which makes the connection not reusable. A body over
+    /// `max_body` ends the read and the reply is incomplete.
+    pub async fn get(&mut self, path: &str, user_agent: &str, max_body: usize) -> Result<Reply, Error> {
         let reused = self.requests > 0;
         self.requests += 1;
         let host = self.host;
@@ -244,7 +246,7 @@ impl<'a> Conn<'a> {
                     return Err(Error::Http);
                 }
                 let rest = &data[h.body_start..];
-                if matches!(wire::body(h, rest), wire::Body::Done { .. }) || rest.len() > MAX_REPLY {
+                if matches!(wire::body(h, rest), wire::Body::Done { .. }) || rest.len() > max_body {
                     break;
                 }
             }

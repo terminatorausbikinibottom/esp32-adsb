@@ -85,6 +85,7 @@ pub struct FbUi {
     full_ms: Option<u64>,
     ticks: u32,
     policy: Policy,
+    photos: crate::lookup::PhotoCache,
     last_focus: Option<u32>,
 }
 
@@ -102,6 +103,7 @@ impl FbUi {
             full_ms: None,
             ticks: 0,
             policy: Policy::default(),
+            photos: adsb_core::meta::Lru::new(adsb_core::meta::PHOTO_CACHE_ENTRIES),
             last_focus: None,
         }
     }
@@ -193,7 +195,7 @@ pub async fn tick(ui: &mut FbUi, pipeline: &Pipeline) -> bool {
     let st = status();
     let snap = pipeline.lock().await.snapshot(st.now_ms, st.radius_km);
     // The demo scenario has no network; real builds show what `meta_task` found.
-    let meta = if DEMO { None } else { Some(crate::lookup::publish(&mut ui.policy, &snap, st.now_ms).await) };
+    let meta = if DEMO { None } else { Some(crate::lookup::publish(&mut ui.policy, &mut ui.photos, &snap, st.now_ms).await) };
     ui.update(&snap, &st, meta.as_ref())
 }
 

@@ -100,7 +100,7 @@ smoltcp = { version = "0.14.0", default-features = false, features = [
   "socket-udp",
 ] }
 
-adsb-core        = { path = "../adsb-core", features = ["tls"] }
+adsb-core        = { path = "../adsb-core", features = ["tls", "photo"] }
 adsb-app         = { path = "../adsb-app", default-features = false, features = ["single-threaded"] }
 modes             = { path = "../modes" }
 critical-section = "1.2.0"

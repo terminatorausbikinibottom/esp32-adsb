@@ -27,6 +27,9 @@ pub static WIFI_OK: AtomicBool = AtomicBool::new(false);
 const RX_BYTES: usize = 8192; // about 0.5 s of stall at feed rates (JPEG decode later)
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// A connection must last this long (with data, for the feed) before the retry back-off resets: a
+/// peer that accepts and drops at once must not be retried every second.
+const STABLE: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const SOCKETS: usize = 5; // DHCP, DNS, feed, one for SNTP or HTTPS at a time, spare
@@ -71,9 +74,15 @@ async fn wifi_task(mut controller: WifiController<'static>) {
         match controller.connect_async().await {
             Ok(_) => {
                 info!("wifi: associated");
-                backoff = BACKOFF_MIN;
+                let up = Instant::now();
                 let _ = controller.wait_for_disconnect_async().await;
                 warn!("wifi: disconnected");
+                if up.elapsed() >= STABLE {
+                    backoff = BACKOFF_MIN;
+                } else {
+                    Timer::after(backoff).await;
+                    backoff = (backoff * 2).min(BACKOFF_MAX);
+                }
             }
             Err(e) => {
                 warn!("wifi: connect failed ({e:?}), retry in {} s", backoff.as_secs());
@@ -170,13 +179,17 @@ async fn feed_task(stack: Stack<'static>, pipeline: &'static Pipeline) {
         match with_timeout(CONNECT_TIMEOUT, socket.connect((host, config::FEED_PORT))).await {
             Ok(Ok(())) => {
                 info!("feed: connected");
-                backoff = BACKOFF_MIN;
+                let up = Instant::now();
                 pipeline.lock().await.reset_clock();
                 ui::FEED_OK.store(true, Relaxed);
                 stats.reconnects += 1;
                 let why = pump(&mut socket, &mut chunk, pipeline, &mut stats).await;
                 ui::FEED_OK.store(false, Relaxed);
                 warn!("feed: lost ({why})");
+                // Data must have kept arriving for STABLE, else the pause keeps growing.
+                if stats.last_read.checked_duration_since(up).is_some_and(|d| d >= STABLE) {
+                    backoff = BACKOFF_MIN;
+                }
             }
             Ok(Err(e)) => warn!("feed: connect failed ({e:?})"),
             Err(_) => warn!("feed: connect timed out"),

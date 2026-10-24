@@ -132,15 +132,18 @@ async fn serve(mut conn: Conn<'_>, limiter: &mut RateLimiter, ua: &str) {
         let reply = conn.get(&path, ua).await;
         let ms = t0.elapsed().as_millis();
         let usable = match reply {
-            Ok(r) if matches!(r.status, 200 | 404) => {
-                let step = meta::adsbdb_step(kind, &r.body).unwrap_or_else(|e| {
-                    warn!("meta: error body={e:?} icao={:06X}", want.icao);
-                    Step::unknown(kind)
-                });
-                store(&want, step, ms).await;
-                limiter.success();
-                r.reusable
-            }
+            Ok(r) if matches!(r.status, 200 | 404) && r.complete => match meta::adsbdb_step(kind, &r.body) {
+                Ok(step) => {
+                    store(&want, step, ms).await;
+                    limiter.success();
+                    r.reusable
+                }
+                // Only a genuine "unknown ..." answer is cached as negative; garbage is an error.
+                Err(e) => {
+                    failed(limiter, &alloc::format!("body={e:?}"));
+                    false
+                }
+            },
             Ok(r) if r.status == 429 => {
                 limiter.too_many_requests(now_ms());
                 warn!("meta: error status=429");

@@ -1007,3 +1007,19 @@ app partition size.
     waiting for the callsign before asking would save it (not done). adsbdb answers 404 with the "unknown ..."
     body, which `meta_task` treats as an answer. The feed task still closes its connection after 60 s of silence
     (`feed: lost (idle timeout)`, then reconnects): seen several times at night, before any lookup, unrelated.
+
+- 2026-10-24, **RD.9 hardening (QA F1-F5).**
+  - F1: `Conn::get` refuses a reply head longer than 4 KB without CRLFCRLF (`MAX_HEAD`).
+  - F2/F3: `adsb_core::wire::body(head, rest)` cuts the body by Content-Length or chunking and says whether
+    anything followed (`exact`); extra bytes are cut off and the connection is not reused. `Head.bad_framing`
+    flags conflicting or unparsable Content-Length and Content-Length together with chunked; `Conn::get` returns
+    an error for it. Host tests `framing_conflicts_are_flagged`, `body_framing_is_exact`.
+  - F4: `tls::Reply` has `complete`; `meta_task` uses a 200/404 body only when complete and parsable. A truncated
+    or garbage body is an error (back-off, no cache write); only a genuine "unknown aircraft/callsign" answer is
+    cached as negative.
+  - F5: `feed_task` resets its back-off only when data kept arriving for at least 30 s (`STABLE`); `wifi_task`
+    resets it only when the association lasted 30 s, otherwise it waits and doubles (up to 30 s). Reasoned, not
+    reproduced on the board (the host cannot flap the feed).
+  - Checks: adsb-core tests (78, plain and `photo,tls`) and clippy, adsb-app, sim, tls-hostile 7/7, firmware clippy
+    (live and demo), demo build. Board: live build flashed, 7 min, one request path (`combined`, `ok`), no panic,
+    `internal_min=20588`, `internal_free=29108`.

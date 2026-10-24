@@ -133,6 +133,8 @@ pub enum Error {
 pub struct Reply {
     pub status: u16,
     pub body: Vec<u8>,
+    /// The body ended as the framing says (a body without any length ends by the close).
+    pub complete: bool,
     /// The server allows another request on this connection.
     pub reusable: bool,
 }
@@ -144,6 +146,7 @@ const WRITE_BUF: usize = 2048;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const IO_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_REPLY: usize = 32 * 1024;
+const MAX_HEAD: usize = 4096;
 
 /// TCP and TLS record buffers, allocated once (PSRAM) and lent to one [`Conn`] at a time.
 pub struct Bufs {
@@ -229,14 +232,19 @@ impl<'a> Conn<'a> {
         let mut head: Option<wire::Head> = None;
         let mut closed = false;
         loop {
+            if head.is_none() {
+                head = wire::parse_head(&data);
+                // A server that never ends its head must not grow the buffer unchecked.
+                if head.is_none() && data.len() > MAX_HEAD {
+                    return Err(Error::Http);
+                }
+            }
             if let Some(h) = &head {
-                let have = data.len() - h.body_start;
-                let complete = match (h.chunked, h.content_length) {
-                    (true, _) => wire::dechunk(&data[h.body_start..]).1,
-                    (false, Some(n)) => have >= n,
-                    (false, None) => false,
-                };
-                if complete || have > MAX_REPLY {
+                if h.bad_framing {
+                    return Err(Error::Http);
+                }
+                let rest = &data[h.body_start..];
+                if matches!(wire::body(h, rest), wire::Body::Done { .. }) || rest.len() > MAX_REPLY {
                     break;
                 }
             }
@@ -246,7 +254,7 @@ impl<'a> Conn<'a> {
                     break;
                 }
                 Ok(Ok(n)) => data.extend_from_slice(&chunk[..n]),
-                // A reset after the head is a short body, not a failure.
+                // A reset after the head ends the body early: the reply is marked incomplete.
                 _ if head.is_some() => {
                     closed = true;
                     break;
@@ -254,17 +262,19 @@ impl<'a> Conn<'a> {
                 _ if data.is_empty() => return Err(fail(Error::Http)),
                 _ => return Err(Error::Http),
             }
-            head = head.or_else(|| wire::parse_head(&data));
         }
         self.last_used = Instant::now();
         let head = head.ok_or_else(|| fail(Error::Http))?;
-        let body = &data[head.body_start..];
-        let (body, complete) = if head.chunked {
-            wire::dechunk(body)
-        } else {
-            (body.to_vec(), head.content_length.is_some_and(|n| body.len() >= n))
-        };
-        Ok(Reply { status: head.status, body, reusable: complete && !closed && !head.close })
+        let rest = &data[head.body_start..];
+        Ok(match wire::body(&head, rest) {
+            wire::Body::Done { body, exact } => {
+                Reply { status: head.status, body, complete: true, reusable: exact && !closed && !head.close }
+            }
+            // Ended by close (no length) or cut short: the caller must not trust the body.
+            wire::Body::Incomplete => {
+                Reply { status: head.status, body: rest.to_vec(), complete: !head.chunked && head.content_length.is_none() && closed, reusable: false }
+            }
+        })
     }
 
     pub async fn close(self) {

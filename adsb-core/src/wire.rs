@@ -55,6 +55,9 @@ pub struct Head {
     pub content_length: Option<usize>,
     /// The server said `Connection: close`.
     pub close: bool,
+    /// Conflicting or unparsable Content-Length, or Content-Length together with chunked
+    /// (request smuggling shapes): the reply must be refused.
+    pub bad_framing: bool,
 }
 
 /// Parses the status line and headers. `None` while the head is incomplete or malformed.
@@ -64,44 +67,84 @@ pub fn parse_head(buf: &[u8]) -> Option<Head> {
     let mut lines = head.split("\r\n");
     let status_line = lines.next()?;
     let status = status_line.strip_prefix("HTTP/1.")?.get(2..5)?.parse().ok()?;
-    let (mut chunked, mut content_length, mut close) = (false, None, false);
+    let (mut chunked, mut content_length, mut close, mut bad_framing) = (false, None, false, false);
     for (k, v) in lines.filter_map(|l| l.split_once(':')) {
         let (k, v) = (k.trim(), v.trim().to_ascii_lowercase());
         if k.eq_ignore_ascii_case("transfer-encoding") {
             chunked |= v.contains("chunked");
         } else if k.eq_ignore_ascii_case("content-length") {
-            content_length = v.parse().ok();
+            let n = v.parse().ok();
+            bad_framing |= n.is_none() || content_length.is_some_and(|old| Some(old) != n);
+            content_length = n;
         } else if k.eq_ignore_ascii_case("connection") {
             close |= v.contains("close");
         }
     }
-    Some(Head { status, body_start: end + 4, chunked, content_length, close })
+    bad_framing |= chunked && content_length.is_some();
+    Some(Head { status, body_start: end + 4, chunked, content_length, close, bad_framing })
 }
 
 /// Decodes a chunked body. The flag is false when the input ends before the last chunk
 /// (the decoded prefix is still returned).
-pub fn dechunk(mut body: &[u8]) -> (Vec<u8>, bool) {
-    let mut out = Vec::new();
+pub fn dechunk(body: &[u8]) -> (Vec<u8>, bool) {
+    let (out, end) = dechunk_to(body);
+    (out, end.is_some())
+}
+
+/// Like [`dechunk`]; `Some(n)`: the last-chunk line ends at offset `n` of the input.
+fn dechunk_to(body: &[u8]) -> (Vec<u8>, Option<usize>) {
+    let (mut out, mut pos) = (Vec::new(), 0);
     loop {
-        let Some(eol) = body.windows(2).position(|w| w == b"\r\n") else {
-            return (out, false);
+        let rest = &body[pos..];
+        let Some(eol) = rest.windows(2).position(|w| w == b"\r\n") else {
+            return (out, None);
         };
-        let size = core::str::from_utf8(&body[..eol])
+        let size = core::str::from_utf8(&rest[..eol])
             .ok()
             .and_then(|s| usize::from_str_radix(s.split(';').next()?.trim(), 16).ok());
         let Some(size) = size else {
-            return (out, false);
+            return (out, None);
         };
-        body = &body[eol + 2..];
+        let data = &rest[eol + 2..];
         if size == 0 {
-            return (out, true);
+            return (out, Some(pos + eol + 2));
         }
-        let take = size.min(body.len());
-        out.extend_from_slice(&body[..take]);
+        let take = size.min(data.len());
+        out.extend_from_slice(&data[..take]);
         if take < size {
-            return (out, false);
+            return (out, None);
         }
-        body = body.get(size + 2..).unwrap_or(&[]);
+        pos += eol + 2 + size + 2;
+        if pos > body.len() {
+            // The CRLF after the chunk data has not arrived yet.
+            return (out, None);
+        }
+    }
+}
+
+/// A reply body cut out by its framing.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Body {
+    /// More bytes are needed (or the server must close to end it).
+    Incomplete,
+    /// `exact`: nothing followed the framed body, so the connection may be reused.
+    Done { body: Vec<u8>, exact: bool },
+}
+
+/// Cuts the body from `rest` (the bytes after the head) by Content-Length or chunking.
+pub fn body(head: &Head, rest: &[u8]) -> Body {
+    if head.chunked {
+        let (body, Some(end)) = dechunk_to(rest) else { return Body::Incomplete };
+        // The empty line after the last chunk (we do not read trailers).
+        return match &rest[end..] {
+            [] | [b'\r'] => Body::Incomplete,
+            [b'\r', b'\n'] => Body::Done { body, exact: true },
+            _ => Body::Done { body, exact: false },
+        };
+    }
+    match head.content_length {
+        Some(n) if rest.len() >= n => Body::Done { body: rest[..n].to_vec(), exact: rest.len() == n },
+        _ => Body::Incomplete,
     }
 }
 
@@ -168,5 +211,33 @@ mod tests {
         assert_eq!(dechunk(b"5\r\nhello\r\n"), (b"hello".to_vec(), false));
         assert_eq!(dechunk(b"zz\r\nhello"), (Vec::new(), false));
         assert_eq!(dechunk(b""), (Vec::new(), false));
+    }
+
+    #[test]
+    fn framing_conflicts_are_flagged() {
+        let bad = |h: &[u8]| parse_head(h).unwrap().bad_framing;
+        assert!(bad(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\n"));
+        assert!(bad(b"HTTP/1.1 200 OK\r\nContent-Length: x\r\n\r\n"));
+        assert!(bad(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\n"));
+        assert!(!bad(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\ncontent-length: 3\r\n\r\n"));
+        assert!(!bad(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"));
+    }
+
+    #[test]
+    fn body_framing_is_exact() {
+        let cl = |n| parse_head(alloc::format!("HTTP/1.1 200 OK\r\nContent-Length: {n}\r\n\r\n").as_bytes()).unwrap();
+        let done = |b: &[u8], exact| Body::Done { body: b.to_vec(), exact };
+        assert_eq!(body(&cl(3), b"ab"), Body::Incomplete);
+        assert_eq!(body(&cl(3), b"abc"), done(b"abc", true));
+        assert_eq!(body(&cl(3), b"abcd"), done(b"abc", false), "extra bytes: cut, not reusable");
+        let ch = parse_head(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
+        assert_eq!(body(&ch, b"3\r\nabc\r\n0\r\n\r\n"), done(b"abc", true));
+        assert_eq!(body(&ch, b"3\r\nabc\r\n0\r\n\r\nX"), done(b"abc", false));
+        assert_eq!(body(&ch, b"3\r\nabc\r\n0\r\n"), Body::Incomplete);
+        assert_eq!(body(&ch, b"3\r\nabc\r\n0\r\n\r"), Body::Incomplete);
+        assert_eq!(body(&ch, b"3\r\nabc"), Body::Incomplete);
+        assert_eq!(body(&ch, b"3\r\nabc\r\n"), Body::Incomplete);
+        let none = parse_head(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
+        assert_eq!(body(&none, b"abc"), Body::Incomplete, "ends only by close");
     }
 }

@@ -1071,3 +1071,15 @@ app partition size.
   longer run with day traffic. **K4 escalates with traffic:** at 7–9 aircraft most camera frames
   show shifted/ghosted content (scanout itself stays 39–40 fps). `bench log --session` keeps only
   the last 20000 lines, so meta counts are per window.
+
+- 2026-10-24, **user decisions (K4 and review)**: fix the 3 MAJOR findings plus MINOR `ui.rs:74`
+  (bounce build), `net.rs:35` (sockets), `app.slint:87` (no_data bool), `ci.yml:39` (CI features);
+  the other MINORs are deferred. K4: try in order (1) lower PCLK to 12–13 MHz together with
+  (2) larger instruction/data cache if esp-hal 1.2 allows it, then (3) the QIO boot-loop cause.
+  Success = ~0 glitched frames per 100 in a 30 fps burst at day traffic. **Stop rule:** if these
+  fail, or the work becomes highly experimental (bounce-buffer GDMA debugging, XIP from PSRAM,
+  patching esp-hal), stop the K4 work and run an architect review of the platform: is
+  esp-hal + embassy mature enough for a glitch-free 800×480 RGB UI, or is a more mature base
+  better (for example Rust `std` on ESP-IDF via esp-idf-svc/esp-idf-hal with IDF's `esp_lcd` RGB
+  driver, bounce buffers and XIP-from-PSRAM). The user prefers 100 % Rust but does not accept a
+  glitchy UI.

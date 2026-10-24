@@ -20,6 +20,9 @@ pub const STEP_DOWN_MS: u64 = 15_000;
 
 pub const RADAR_SIZE_PX: i32 = 448;
 pub const CENTRE_PX: i32 = 224;
+/// Physical pixel width / height of the 800x480 panel: (154.08 / 800) / (85.92 / 480) from the usual 7"
+/// active area (radar-ui RD.14; the bench border check of RD.14.1 agrees, the user chose not to ruler-measure).
+pub const PIXEL_ASPECT: f64 = 1.076;
 /// Outer ring radius.
 pub const RING_PX: f64 = 208.0;
 pub const MAX_BLIPS: usize = 48;

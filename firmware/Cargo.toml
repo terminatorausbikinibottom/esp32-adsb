@@ -34,6 +34,8 @@ exp-solid-noeof   = []  # e4: with exp-solid, no suc_eof on any descriptor
 
 # Replace the boot-time test pattern by the UI's black frame (default) with the old bars/ruler.
 diag-pattern = []
+# Draws the pixel-aspect check image (border, square + circle, corrected rectangle + ellipse) instead of the UI (RD.14.1).
+diag-aspect = []
 # 1-px white border over the UI after each render (drift check, RD.3).
 diag-border = []
 # Negative test (RD.8): pin the wrong root for every host; every handshake must then fail with a certificate error.

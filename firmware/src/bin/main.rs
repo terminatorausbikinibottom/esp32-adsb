@@ -147,9 +147,17 @@ async fn main(spawner: Spawner) -> ! {
     let fb_px = unsafe {
         core::slice::from_raw_parts_mut(fb_ptr.cast::<u16>(), display::WIDTH * display::HEIGHT)
     };
-    #[cfg(feature = "diag-pattern")]
+    #[cfg(feature = "diag-aspect")]
+    {
+        display::draw_aspect(fb_px, adsb_core::radar::PIXEL_ASPECT);
+        info!(
+            "diag-aspect: pixel_aspect={}",
+            adsb_core::radar::PIXEL_ASPECT
+        );
+    }
+    #[cfg(all(feature = "diag-pattern", not(feature = "diag-aspect")))]
     display::draw_pattern(fb_px);
-    #[cfg(not(feature = "diag-pattern"))]
+    #[cfg(not(any(feature = "diag-pattern", feature = "diag-aspect")))]
     fb_px.fill(0);
     log_heap("psram(fb drawn)");
 
@@ -337,6 +345,7 @@ async fn main(spawner: Spawner) -> ! {
         static PIPELINE: StaticCell<ui::Pipeline> = StaticCell::new();
         let pipeline = &*PIPELINE.init(Mutex::new(ui::new_pipeline()));
         let mut ui = ui::FbUi::new(fb_ptr.cast::<u16>());
+        #[cfg(not(feature = "diag-aspect"))]
         ui::tick(&mut ui, pipeline).await;
 
         // Direct PSRAM ring (1.3) plus a per-VBLANK DMA restart on core 1 (see firmware::restart).
@@ -407,15 +416,21 @@ async fn main(spawner: Spawner) -> ! {
             .expect("backlight on");
         info!("ch422g: backlight on");
 
-        spawner.spawn(ui::ui_task(ui, pipeline).expect("ui_task"));
-        #[cfg(feature = "demo")]
-        if ui::DEMO {
-            spawner.spawn(ui::feed_task(pipeline).expect("feed_task"));
-        } else {
+        // diag-aspect shows the check image only: no UI, no network.
+        #[cfg(feature = "diag-aspect")]
+        let _ = (&mut ui, pipeline, spawner, wifi_controller);
+        #[cfg(not(feature = "diag-aspect"))]
+        {
+            spawner.spawn(ui::ui_task(ui, pipeline).expect("ui_task"));
+            #[cfg(feature = "demo")]
+            if ui::DEMO {
+                spawner.spawn(ui::feed_task(pipeline).expect("feed_task"));
+            } else {
+                firmware::net::start(spawner, wifi_controller, pipeline);
+            }
+            #[cfg(not(feature = "demo"))]
             firmware::net::start(spawner, wifi_controller, pipeline);
         }
-        #[cfg(not(feature = "demo"))]
-        firmware::net::start(spawner, wifi_controller, pipeline);
 
         let mut n = 0u32;
         let mut last = Instant::now();

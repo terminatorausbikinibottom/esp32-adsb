@@ -1788,3 +1788,14 @@ transformations.)
   the info panel returns to the closest; the MANUAL badge replaces the status badge; photo and text
   not aspect-corrected). RD.14.1: **no ruler measurement**; use the datasheet value 1.076
   (154.08 × 85.92 mm) if the bench plausibility check passes (border ratio ≥ 1.70), else stop RD.14.
+
+- 2026-10-24, **RD.14.1 done (bench plausibility passes)**. Build: `diag-aspect` (draws border, a
+  300x300 square + circle left and a 279x300 rectangle + ellipse right instead of the UI; log
+  `diag-aspect: pixel_aspect=1.076`). Flashed from e24c962 + the change, photo
+  `.bench/snaps/20261024T115047.987518Z.jpg` (gitignored). Measured in the photo (camera slightly
+  off-axis: the border is about 635 px wide at the top and 620 px at the bottom, 348 px high):
+  **border ratio about 1.80** (expected 1.79 for aspect 1.076, 1.667 for square pixels; >= 1.75
+  confirms). Left square 234 x 216 px in the photo (1.08, wider), right rectangle 220 x 215 px
+  (1.02, round). `PIXEL_ASPECT` = **1.076** is kept (datasheet value; per the approval no ruler
+  measurement, so the constant carries a camera-based accuracy of a few percent only). The
+  constant is defined in `adsb-core::radar` already in this step.

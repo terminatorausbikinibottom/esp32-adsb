@@ -1023,3 +1023,11 @@ app partition size.
   - Checks: adsb-core tests (78, plain and `photo,tls`) and clippy, adsb-app, sim, tls-hostile 7/7, firmware clippy
     (live and demo), demo build. Board: live build flashed, 7 min, one request path (`combined`, `ok`), no panic,
     `internal_min=20588`, `internal_free=29108`.
+
+- 2026-10-24, **RD.9 QA PASS with gaps** (57b364f, hardening 7aab1e1 for QA F1–F5, reviewed by
+  the orchestrator: feed/wifi back-off reset only after 30 s stable; adsb-core 78 tests). Beads
+  entry pending. Gaps (night traffic, 1 aircraft): "≥ 3 meta: ok in 10 min", no-repeat within TTL,
+  ≥ 1 s spacing, 429/Stale/5xx paths and the panel text on the board are verified by code and host
+  tests only → re-check at day traffic (also the ~3.5–4 s executor stall per handshake, K5).
+  Bench transport timed out every ~10 min during long `--follow` waits (host side; noted for the
+  bench follow-up).

@@ -1782,3 +1782,9 @@ transformations.)
     keeps the selection"; "tap on the closest aircraft does not start an override (and ends a running one)"; "tap on the
     panel returns to the closest"; the cyan mark and the `MANUAL 52 s` badge in place of the
     OVERHEAD/APPROACHING/NEAREST badge; photo and text aspect stay uncorrected.
+
+- 2026-10-24, **revision 3 approved by the user as is**. All proposed RD.15 defaults kept (timeout
+  60 s; tap on empty radar keeps the selection; tap on the closest ends a manual selection; tap on
+  the info panel returns to the closest; the MANUAL badge replaces the status badge; photo and text
+  not aspect-corrected). RD.14.1: **no ruler measurement**; use the datasheet value 1.076
+  (154.08 × 85.92 mm) if the bench plausibility check passes (border ratio ≥ 1.70), else stop RD.14.

@@ -1054,3 +1054,20 @@ app partition size.
   live panel callsign equals the logged `radar:` focus, with airline/type/route from adsbdb).
   Render: full 77–78 ms, busy partial 51–76 ms, live typical 7 ms (max 93 ms once); K1 internal
   min 20588 B. Beads entry pending.
+
+- 2026-10-24, **RD.13 soak (interim, live build after fee0864, started 02:48 UTC)**. Every 30 min:
+  | uptime | internal_free | psram_free | restart fps | aircraft | meta errors |
+  |---|---|---|---|---|---|
+  | 0 h 14 | 29108 | 7524308 | 39 | 2 | 0 |
+  | 0 h 44 | 29108 | 7512536 | 39 | 3 | 0 |
+  | 1 h 14 | 29108 | 7495064 | 39 | 3 | 0 |
+  | 1 h 43 | 29108 | 7464092 | 39 | 3 | 0 |
+  | 2 h 13 | 29108 | 7445564 | 39 | 8 | 0 |
+  | 2 h 42 | 29108 | 7437796 | 39 | 7 | 0 |
+  | 3 h 12 | 29108 | 7419916 | 40 | 9 | 0 |
+  No reboot, no panic, internal heap flat, lookups continue (115+ ok, 0 errors). PSRAM free falls
+  ~105 KB in 3 h (per round −12/−17/−31/−18/−8/−18 KB, with small recoveries): consistent with the
+  metadata cache and tracker filling as traffic grows, but a slow leak is not ruled out → watch a
+  longer run with day traffic. **K4 escalates with traffic:** at 7–9 aircraft most camera frames
+  show shifted/ghosted content (scanout itself stays 39–40 fps). `bench log --session` keeps only
+  the last 20000 lines, so meta counts are per window.

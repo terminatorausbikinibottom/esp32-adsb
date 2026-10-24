@@ -2,6 +2,9 @@
 mod build_config;
 
 fn main() {
+    // Floor for the SNTP time (radar-ui RD.8 fix 2); not a secret.
+    let built = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    println!("cargo:rustc-env=ADSB_BUILD_UNIX={built}");
     generate_config();
     linker_be_nice();
     check_xtensa_linker_available();

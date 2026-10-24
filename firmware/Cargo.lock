@@ -21,9 +21,12 @@ dependencies = [
 name = "adsb-core"
 version = "0.1.0"
 dependencies = [
+ "embedded-io-async 0.7.0",
+ "embedded-tls",
  "heapless 0.9.3",
  "libm",
  "modes",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
 ]

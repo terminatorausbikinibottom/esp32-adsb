@@ -11,8 +11,13 @@ modes = { path = "../modes" }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 zune-jpeg = { version = "=0.5.15", default-features = false, optional = true }
+embedded-io-async = { version = "0.7", optional = true }
+embedded-tls = { version = "0.19", default-features = false, features = ["p384", "rsa", "rustpki"], optional = true }
+rand_core = { version = "0.6", default-features = false, optional = true }
 
 [features]
+# Verified TLS open for the firmware and the host test in tools/tls-hostile (RD.8 fix 2).
+tls = ["dep:embedded-tls", "dep:embedded-io-async", "dep:rand_core"]
 # JPEG decode and scale for the photo (RD.7). Off for builds that never decode (modes, plain tests).
 photo = ["dep:zune-jpeg"]
 # Deterministic seeded scenarios (fictitious receiver) emitting AVR lines; pulls in `modes/encode`.

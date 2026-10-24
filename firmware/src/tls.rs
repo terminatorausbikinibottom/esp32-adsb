@@ -8,21 +8,17 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering::Relaxed};
 
-use adsb_core::{wire, x509};
+use adsb_core::tlsauth::{self, OpenError};
+use adsb_core::wire;
 use embassy_net::dns::DnsQueryType;
 use embassy_net::tcp::{self, TcpSocket};
 use embassy_net::{IpAddress, Stack};
 use embassy_time::{Duration, Instant, with_timeout};
 use embedded_io_async::{ErrorType, Read, Write};
-use embedded_tls::pki::CertVerifier;
-use embedded_tls::{CertificateEntryRef, CertificateRef, CertificateVerifyRef};
-use embedded_tls::{
-    Aes128GcmSha256, Certificate, CryptoProvider, TlsClock, TlsConfig, TlsConnection, TlsContext,
-    TlsError, TlsVerifier,
-};
+use embedded_tls::{Aes128GcmSha256, TlsClock, TlsConnection, TlsError};
 use esp_alloc::MemoryCapability;
 use rand_chacha::ChaCha8Rng;
-use rand_core::{CryptoRngCore, SeedableRng};
+use rand_core::SeedableRng;
 
 /// Pinned public roots (firmware/certs/README.md). Each host's server sends a chain whose last
 /// certificate is signed by exactly one of these, so the pin is chosen per host.
@@ -43,8 +39,22 @@ fn pinned_root(host: &str) -> Option<&'static [u8]> {
 // u32: no 64-bit atomics on Xtensa (good until 2106).
 static UNIX_AT_BOOT: AtomicU32 = AtomicU32::new(0);
 
-pub fn set_unix_time(unix_s: u64) {
+/// Build time (build.rs). SNTP is unauthenticated, so a time before it is refused: the clock stays
+/// unsynced and no certificate is accepted.
+const BUILD_UNIX: u64 = {
+    match u64::from_str_radix(env!("ADSB_BUILD_UNIX"), 10) {
+        Ok(t) => t,
+        Err(_) => panic!("ADSB_BUILD_UNIX"),
+    }
+};
+
+/// Returns false (clock unchanged) for a time before the firmware was built.
+pub fn set_unix_time(unix_s: u64) -> bool {
+    if unix_s < BUILD_UNIX {
+        return false;
+    }
     UNIX_AT_BOOT.store(unix_s.saturating_sub(Instant::now().as_secs()) as u32, Relaxed);
+    true
 }
 
 /// Unix seconds, or `None` before the first SNTP sync.
@@ -61,61 +71,6 @@ impl TlsClock for WallClock {
     // No time: the validity check then fails, so an unsynced clock never accepts a certificate.
     fn now() -> Option<u64> {
         Some(unix_time().unwrap_or(0))
-    }
-}
-
-/// Room for the server's whole certificate chain (the verifier keeps a copy; the RSA chain of the image
-/// host is about 5.5 KB). A longer chain fails the handshake with `OutOfMemory`.
-const CHAIN_BYTES: usize = 8192;
-
-/// embedded-tls checks signatures, validity time and host name only. This adds the structural rules
-/// (`adsb_core::x509`: CA flags, key usage, path length, issuer chaining) before it runs.
-struct Checked<'a> {
-    inner: CertVerifier<'a, Aes128GcmSha256, WallClock, CHAIN_BYTES>,
-    root: &'a [u8],
-}
-
-impl TlsVerifier<Aes128GcmSha256> for Checked<'_> {
-    fn set_hostname_verification(&mut self, hostname: &str) -> Result<(), TlsError> {
-        self.inner.set_hostname_verification(hostname)
-    }
-
-    fn verify_certificate(
-        &mut self,
-        transcript: &<Aes128GcmSha256 as embedded_tls::TlsCipherSuite>::Hash,
-        cert: CertificateRef,
-    ) -> Result<(), TlsError> {
-        let mut chain: Vec<&[u8]> = Vec::new();
-        for e in &cert.entries {
-            match e {
-                CertificateEntryRef::X509(der) => chain.push(der),
-                CertificateEntryRef::RawPublicKey(_) => return Err(TlsError::InvalidCertificate),
-            }
-        }
-        x509::check_chain(&chain, self.root).map_err(|_| TlsError::InvalidCertificate)?;
-        self.inner.verify_certificate(transcript, cert)
-    }
-
-    fn verify_signature(&mut self, verify: CertificateVerifyRef) -> Result<(), TlsError> {
-        self.inner.verify_signature(verify)
-    }
-}
-
-struct Provider<'a> {
-    rng: ChaCha8Rng,
-    verifier: Checked<'a>,
-}
-
-impl CryptoProvider for Provider<'_> {
-    type CipherSuite = Aes128GcmSha256;
-    type Signature = [u8; 0]; // no client certificate
-
-    fn rng(&mut self) -> impl CryptoRngCore {
-        &mut self.rng
-    }
-
-    fn verifier(&mut self) -> Result<&mut impl TlsVerifier<Self::CipherSuite>, TlsError> {
-        Ok(&mut self.verifier)
     }
 }
 
@@ -167,6 +122,8 @@ pub enum Error {
     Dns,
     Connect,
     Tls(TlsError),
+    /// The handshake ended without a verified server Certificate and CertificateVerify.
+    NoServerAuth,
     /// The reply had no complete HTTP head, or the transfer failed before one arrived.
     Http,
 }
@@ -215,14 +172,15 @@ pub async fn get(
 
     let mut read_buf = alloc::vec![0u8; READ_BUF];
     let mut write_buf = alloc::vec![0u8; WRITE_BUF];
-    let config = TlsConfig::new().with_server_name(host);
     let mut conn = TlsConnection::<_, Aes128GcmSha256>::new(Sampled(socket), &mut read_buf, &mut write_buf);
-    let provider = Provider {
-        rng: seeded_rng(),
-        verifier: Checked { inner: CertVerifier::new(Certificate::X509(root)), root },
-    };
     let t0 = Instant::now();
-    conn.open(TlsContext::new(&config, provider)).await.map_err(Error::Tls)?;
+    // Nothing is written before this returns Ok.
+    tlsauth::open_verified::<_, WallClock>(&mut conn, host, root, seeded_rng())
+        .await
+        .map_err(|e| match e {
+            OpenError::Tls(e) => Error::Tls(e),
+            OpenError::NoServerAuth => Error::NoServerAuth,
+        })?;
     let handshake_ms = t0.elapsed().as_millis();
     sample_heap();
 

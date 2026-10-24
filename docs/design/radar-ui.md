@@ -904,3 +904,45 @@ app partition size.
   0.9 s (before: 3.6-3.7 / 1.6 / 0.9; the checks cost milliseconds, the spread is network and server speed).
   `tls-wrong-ca` still fails all three with `InvalidCertificate` (~200-235 ms); note it is now rejected by the
   issuer-name check first, so it no longer exercises the signature check (that is unchanged library code).
+
+- 2026-10-24, **RD.8 fix 2 (QA F1 critical, F3, F4)**: server authentication is now enforced, not assumed.
+  - **F1 (upstream embedded-tls 0.19 security issue):** `process_server_verify` (`src/connection.rs`) calls
+    `verify_certificate` only if a Certificate message arrives and `verify_signature` only if a CertificateVerify
+    arrives; nothing requires either before the server Finished. A man in the middle that sends ServerHello,
+    EncryptedExtensions and Finished (no certificate), or replays the real public chain and omits
+    CertificateVerify, gets `open()` -> `Ok` with the pinned root, SAN and chain checks never run. Reproduced by QA
+    with a hostile server; reproduced again by the new host test with the guard removed (2 of 6 tests fail).
+    Fix: `adsb_core::tlsauth::open_verified` (feature `tls`) is the only open the firmware uses. Its verifier
+    wrapper records `cert` (chain structure + embedded-tls verification passed) and `signature` (verification passed,
+    only accepted after `cert`; a new Certificate resets both). After `open()` it returns `NoServerAuth` unless both
+    are set; the firmware writes no request byte before that and drops the connection (log `tls: failed host=..
+    err=NoServerAuth`). The caller cannot reach the TLS context without the check.
+    Regression test: `tools/tls-hostile/` (own workspace, host only; needs openssl and Python `cryptography`,
+    see its README): no Certificate -> `NoServerAuth`; real chain without CertificateVerify -> `NoServerAuth`;
+    forged chain (with and without proof) and a leaf signed by an ordinary leaf -> `InvalidCertificate`; good flow
+    -> Ok; unsynced clock -> refused.
+    *Draft text for an upstream report (not filed; the user decides):* "embedded-tls 0.19.0, TLS 1.3 client with a
+    `TlsVerifier`: the handshake state machine does not require a Certificate and CertificateVerify message before
+    accepting the server Finished. `process_server_verify` verifies a certificate only when the message is received,
+    so a peer that skips both completes `open()` successfully although a verifier is configured. Expected: when a
+    verifier is configured (not `NoVerify`/PSK), fail with an alert (`unexpected_message`/`certificate_required`) if
+    Finished arrives without a verified Certificate and CertificateVerify, and require CertificateVerify to follow
+    Certificate. Reproducer: a server that sends ServerHello, EncryptedExtensions and Finished only."
+  - **F3:** SNTP is unauthenticated, so `build.rs` stamps the build time (`ADSB_BUILD_UNIX`, set whenever build.rs
+    runs) and `tls::set_unix_time` refuses any time before it (log `sntp: time before the firmware build, ignored`;
+    the clock stays unsynced, so no certificate is accepted). A spoofed time after the build date is still possible
+    (it can accept an expired certificate); full protection needs authenticated time (NTS) and is not planned.
+  - **F4 (info, no fix):** embedded-tls 0.19 contains `unwrap!`/`unwrap()` calls that a malicious server can reach and
+    that panic the device (denial of service): `verify_signature` unwraps the stored transcript and certificate when a
+    CertificateVerify arrives without a preceding Certificate (now blocked by our wrapper, which refuses it first),
+    and the `rsa` path unwraps `RsaPublicKey::from_pkcs1_der` for a leaf with a malformed RSA key (a MITM would
+    need a leaf that passes the chain check first, so it needs a CA-signed bad key; not reachable before verification
+    succeeds). QA's own reproduction details were not available to me beyond the finding text. A panic reboots the
+    board; the attacker already needs to be on the path.
+  - **Board (after the fix):** the three hosts verify; the wrong-CA build still fails all three with
+    `InvalidCertificate` (200-310 ms). planespotters now answers **403 "User-Agent must include a contact URL or
+    email"** for every User-Agent without a contact (curl too), including the image host path `/`; earlier today the
+    same requests got 200, so the contact requirement is enforced intermittently or since a rate/abuse change. The
+    TLS result is unaffected; RD.9/RD.10 need `ADSB_HTTP_CONTACT` from the user. Handshake times: adsb 4.3 s,
+    planespotters 1.8-4.9 s, image 0.9 s (the 4.9 s planespotters run followed a server-side chain change or a
+    slower path; not investigated).

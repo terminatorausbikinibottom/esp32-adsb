@@ -117,8 +117,12 @@ async fn sntp_task(stack: Stack<'static>) {
         stack.wait_config_up().await;
         let t0 = Instant::now();
         match sntp_once(stack).await {
+            Some(unix) if !tls::set_unix_time(unix) => {
+                warn!("sntp: time before the firmware build, ignored, retry in {} s", backoff.as_secs());
+                Timer::after(backoff).await;
+                backoff = (backoff * 2).min(BACKOFF_MAX);
+            }
             Some(unix) => {
-                tls::set_unix_time(unix);
                 let (y, mo, d, h, mi, s) = wire::utc(unix);
                 info!(
                     "sntp: time={y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z rtt_ms={}",

@@ -52,6 +52,9 @@ pub struct Head {
     /// Offset of the first body byte.
     pub body_start: usize,
     pub chunked: bool,
+    pub content_length: Option<usize>,
+    /// The server said `Connection: close`.
+    pub close: bool,
 }
 
 /// Parses the status line and headers. `None` while the head is incomplete or malformed.
@@ -61,12 +64,18 @@ pub fn parse_head(buf: &[u8]) -> Option<Head> {
     let mut lines = head.split("\r\n");
     let status_line = lines.next()?;
     let status = status_line.strip_prefix("HTTP/1.")?.get(2..5)?.parse().ok()?;
-    let chunked = lines.any(|l| {
-        l.split_once(':').is_some_and(|(k, v)| {
-            k.trim().eq_ignore_ascii_case("transfer-encoding") && v.to_ascii_lowercase().contains("chunked")
-        })
-    });
-    Some(Head { status, body_start: end + 4, chunked })
+    let (mut chunked, mut content_length, mut close) = (false, None, false);
+    for (k, v) in lines.filter_map(|l| l.split_once(':')) {
+        let (k, v) = (k.trim(), v.trim().to_ascii_lowercase());
+        if k.eq_ignore_ascii_case("transfer-encoding") {
+            chunked |= v.contains("chunked");
+        } else if k.eq_ignore_ascii_case("content-length") {
+            content_length = v.parse().ok();
+        } else if k.eq_ignore_ascii_case("connection") {
+            close |= v.contains("close");
+        }
+    }
+    Some(Head { status, body_start: end + 4, chunked, content_length, close })
 }
 
 /// Decodes a chunked body. The flag is false when the input ends before the last chunk
@@ -142,7 +151,11 @@ mod tests {
         let h = parse_head(b"HTTP/1.1 206 Partial\r\nContent-Length: 4\r\nTransfer-Encoding: Chunked\r\n\r\nabcd").unwrap();
         assert_eq!((h.status, h.chunked, h.body_start), (206, true, 71));
         let h = parse_head(b"HTTP/1.0 403 Forbidden\r\nServer: x\r\n\r\n").unwrap();
-        assert_eq!((h.status, h.chunked), (403, false));
+        assert_eq!((h.status, h.chunked, h.content_length, h.close), (403, false, None, false));
+        let h = parse_head(b"HTTP/1.1 200 OK\r\ncontent-length: 454\r\nConnection: Close\r\n\r\n").unwrap();
+        assert_eq!((h.content_length, h.close), (Some(454), true));
+        let h = parse_head(b"HTTP/1.1 200 OK\r\nContent-Length: x\r\nConnection: keep-alive\r\n\r\n").unwrap();
+        assert_eq!((h.content_length, h.close), (None, false));
         assert_eq!(parse_head(b"HTTP/1.1 200 OK\r\nServer: x\r\n"), None, "incomplete");
         assert_eq!(parse_head(b"garbage\r\n\r\n"), None);
         assert_eq!(parse_head(b"HTTP/1.1 2x0 OK\r\n\r\n"), None);

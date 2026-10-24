@@ -15,7 +15,6 @@ use esp_radio::wifi::sta::StationConfig;
 use esp_radio::wifi::{AuthenticationMethodConfig, Config as WifiConfig, Interface, WifiController};
 use log::{info, warn};
 
-use adsb_core::meta;
 use adsb_core::wire;
 
 use crate::config;
@@ -55,7 +54,7 @@ pub fn start(
     spawner.spawn(link_task(stack).expect("link_task"));
     spawner.spawn(feed_task(stack, pipeline).expect("feed_task"));
     spawner.spawn(sntp_task(stack).expect("sntp_task"));
-    spawner.spawn(tls_spike_task(stack).expect("tls_spike_task"));
+    spawner.spawn(crate::lookup::meta_task(stack).expect("meta_task"));
 }
 
 #[embassy_executor::task]
@@ -153,91 +152,6 @@ async fn sntp_once(stack: Stack<'static>) -> Option<u64> {
     (from.endpoint.addr == server).then(|| wire::parse_sntp(&reply[..n])).flatten()
 }
 
-/// One-shot at boot (RD.8 spike; RD.9 replaces it by `meta_task`): a verified HTTPS GET to each of
-/// the three metadata hosts, logging handshake time, status and heap.
-#[embassy_executor::task]
-async fn tls_spike_task(stack: Stack<'static>) {
-    while tls::unix_time().is_none() {
-        Timer::after(Duration::from_secs(1)).await;
-    }
-    Timer::after(Duration::from_secs(2)).await; // let the feed settle first
-    let ua = match config::HTTP_CONTACT {
-        Some(contact) => alloc::format!("esp32-adsb/{} (+{contact})", env!("CARGO_PKG_VERSION")),
-        None => alloc::format!("esp32-adsb/{}", env!("CARGO_PKG_VERSION")),
-    };
-    info!("tls: spike start contact={} wrong_ca={}", config::HTTP_CONTACT.is_some(), cfg!(feature = "tls-wrong-ca"));
-
-    let adsbdb = probe(stack, &ua, "api.adsbdb.com", "/v0/callsign/KLM1023", None, usize::MAX).await;
-    if let Some(r) = adsbdb.filter(|r| r.status == 200) {
-        match meta::parse_adsbdb(&r.body) {
-            Ok((_, route)) => {
-                let iata = |a: Option<&meta::Airport>| a.and_then(|a| a.iata.clone()).unwrap_or_default();
-                let route = route.map(|r| alloc::format!("{}-{}", iata(r.origin.as_ref()), iata(r.destination.as_ref())));
-                info!("meta: parse ok kind=adsbdb route={}", route.as_deref().unwrap_or("-"));
-            }
-            Err(e) => warn!("meta: parse failed kind=adsbdb err={e:?}"),
-        }
-    }
-    Timer::after(Duration::from_secs(1)).await; // at most 1 request/s
-
-    // A fixed public example aircraft (design: "a fixed public example").
-    let ps = probe(stack, &ua, "api.planespotters.net", "/pub/photos/hex/3C6444", None, usize::MAX).await;
-    let photo = ps.and_then(|r| match meta::parse_planespotters(&r.body) {
-        Ok(photo) => {
-            info!("meta: parse ok kind=planespotters photo={}", photo.is_some());
-            photo
-        }
-        Err(e) => {
-            // Without a contact the API answers with an error object; the TLS part is still proven.
-            warn!("meta: parse failed kind=planespotters status={} err={e:?}", r.status);
-            None
-        }
-    });
-    Timer::after(Duration::from_secs(1)).await;
-
-    // The image URL comes from the answer; if there is none, any path proves the handshake.
-    let path = photo.as_ref().and_then(|p| p.src.strip_prefix(meta::PHOTO_HOST_PREFIX)).unwrap_or("");
-    let path = alloc::format!("/{path}");
-    if let Some(r) = probe(stack, &ua, "t.plnspttrs.net", &path, Some(1023), 1024).await {
-        info!("img: first_bytes_jpeg={}", r.body.starts_with(&[0xFF, 0xD8]));
-    }
-    info!("tls: spike done");
-}
-
-/// One HTTPS GET with log lines: `tls: ok|failed host=..`, `http: ..`, `tls: heap ..`.
-async fn probe(
-    stack: Stack<'static>,
-    ua: &str,
-    host: &str,
-    path: &str,
-    range_to: Option<usize>,
-    stop_after: usize,
-) -> Option<tls::Reply> {
-    tls::MIN_INTERNAL_FREE.store(usize::MAX, Relaxed);
-    let t0 = Instant::now();
-    let result = tls::get(stack, host, path, ua, range_to, stop_after).await;
-    let total_ms = t0.elapsed().as_millis();
-    let stats = esp_alloc::HEAP.stats();
-    let reply = match result {
-        Ok(r) => {
-            info!("tls: ok host={host} stack=embedded-tls verify=on hs_ms={} bufs_psram={}", r.handshake_ms, r.bufs_in_psram);
-            info!("http: host={host} status={} body_bytes={} total_ms={total_ms}", r.status, r.body.len());
-            Some(r)
-        }
-        Err(e) => {
-            warn!("tls: failed host={host} err={e:?} total_ms={total_ms}");
-            None
-        }
-    };
-    info!(
-        "tls: heap host={host} internal_min={} internal_free={} peak_used={}",
-        tls::MIN_INTERNAL_FREE.load(Relaxed),
-        tls::internal_free(),
-        stats.max_usage
-    );
-    reply
-}
-
 #[embassy_executor::task]
 async fn feed_task(stack: Stack<'static>, pipeline: &'static Pipeline) {
     let Some(host) = config::FEED_HOST.and_then(|h| Ipv4Addr::from_str(h).ok()) else {
@@ -286,6 +200,7 @@ async fn pump(
             Ok(Ok(0)) => return "closed by peer",
             Ok(Err(_)) => return "read error",
             Ok(Ok(n)) => {
+                stats.note_read();
                 pipeline.lock().await.feed(&chunk[..n], Instant::now().as_millis());
                 stats.log_if_due(pipeline).await;
             }
@@ -298,11 +213,19 @@ struct Stats {
     accepted: u32,
     undecoded: u32,
     reconnects: u32,
+    last_read: Instant,
+    /// Longest pause between two reads in the window: an executor stall (TLS handshake) shows here.
+    max_gap_ms: u64,
 }
 
 impl Stats {
     fn new() -> Self {
-        Self { last: Instant::now(), accepted: 0, undecoded: 0, reconnects: 0 }
+        Self { last: Instant::now(), accepted: 0, undecoded: 0, reconnects: 0, last_read: Instant::now(), max_gap_ms: 0 }
+    }
+
+    fn note_read(&mut self) {
+        self.max_gap_ms = self.max_gap_ms.max(self.last_read.elapsed().as_millis());
+        self.last_read = Instant::now();
     }
 
     /// Every 10 s: frames/s (accepted AVR frames), CRC/DF rejects in the window, aircraft count.
@@ -313,12 +236,14 @@ impl Stats {
         }
         let c = pipeline.lock().await.counters();
         info!(
-            "feed: frames/s={} crc_fail={} aircraft={} reconnects={}",
+            "feed: frames/s={} crc_fail={} aircraft={} reconnects={} max_gap_ms={}",
             c.source.accepted.wrapping_sub(self.accepted) / secs as u32,
             c.undecoded.wrapping_sub(self.undecoded),
             ui::AIRCRAFT.load(Relaxed),
             self.reconnects.saturating_sub(1),
+            self.max_gap_ms,
         );
+        self.max_gap_ms = 0;
         (self.accepted, self.undecoded, self.last) = (c.source.accepted, c.undecoded, Instant::now());
     }
 }

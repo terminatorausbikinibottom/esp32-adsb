@@ -1,4 +1,4 @@
-//! Verified HTTPS GET over embassy-net for the metadata lookups (docs/design/radar-ui.md RD.8).
+//! Verified HTTPS requests over embassy-net for the metadata lookups (docs/design/radar-ui.md RD.8, RD.9).
 //! TLS 1.3 by embedded-tls with the chain checked against a pinned root; there is no unverified path.
 //! Record buffers and the HTTP body live in PSRAM (plain allocations land there, see `main.rs`).
 //! Logs name the public API hosts only, never the User-Agent contact.
@@ -126,14 +126,15 @@ pub enum Error {
     NoServerAuth,
     /// The reply had no complete HTTP head, or the transfer failed before one arrived.
     Http,
+    /// A reused connection failed before the first reply byte: the server had closed it while idle.
+    Stale,
 }
 
 pub struct Reply {
     pub status: u16,
     pub body: Vec<u8>,
-    pub handshake_ms: u64,
-    /// The TLS record buffers sit in PSRAM (K1).
-    pub bufs_in_psram: bool,
+    /// The server allows another request on this connection.
+    pub reusable: bool,
 }
 
 /// Data-bus window the S3 maps external RAM into.
@@ -144,78 +145,129 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const IO_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_REPLY: usize = 32 * 1024;
 
+/// TCP and TLS record buffers, allocated once (PSRAM) and lent to one [`Conn`] at a time.
+pub struct Bufs {
+    tcp_rx: Vec<u8>,
+    tcp_tx: Vec<u8>,
+    read: Vec<u8>,
+    write: Vec<u8>,
+}
+
+impl Default for Bufs {
+    fn default() -> Self {
+        Self {
+            tcp_rx: alloc::vec![0; 8192],
+            tcp_tx: alloc::vec![0; 1024],
+            read: alloc::vec![0; READ_BUF],
+            write: alloc::vec![0; WRITE_BUF],
+        }
+    }
+}
+
+impl Bufs {
+    /// The TLS record buffers sit in PSRAM (K1).
+    pub fn in_psram(&self) -> bool {
+        PSRAM_VADDR.contains(&(self.read.as_ptr() as usize))
+    }
+}
+
 pub async fn resolve(stack: Stack<'_>, host: &str) -> Option<IpAddress> {
     let found = with_timeout(Duration::from_secs(5), stack.dns_query(host, DnsQueryType::A)).await;
     found.ok()?.ok()?.first().copied()
 }
 
-/// `GET https://<host><path>`. Reads until the server closes or `stop_after` body bytes arrived
-/// (then the connection is closed early; pair it with a `Range` header). A chunked body is decoded.
-pub async fn get(
-    stack: Stack<'_>,
-    host: &str,
-    path: &str,
-    user_agent: &str,
-    range_to: Option<usize>,
-    stop_after: usize,
-) -> Result<Reply, Error> {
-    let root = pinned_root(host).ok_or(Error::Connect)?;
-    let ip = resolve(stack, host).await.ok_or(Error::Dns)?;
+/// An authenticated TLS connection to one host; several requests may follow each other on it
+/// (HTTP keep-alive), so that the slow handshake (seconds of CPU, it blocks the executor) is rare.
+pub struct Conn<'a> {
+    conn: TlsConnection<'a, Sampled<'a>, Aes128GcmSha256>,
+    host: &'static str,
+    pub handshake_ms: u64,
+    pub requests: u32,
+    pub last_used: Instant,
+}
 
-    let mut tcp_rx = alloc::vec![0u8; 8192];
-    let mut tcp_tx = alloc::vec![0u8; 1024];
-    let mut socket = TcpSocket::new(stack, &mut tcp_rx, &mut tcp_tx);
-    match with_timeout(CONNECT_TIMEOUT, socket.connect((ip, 443))).await {
-        Ok(Ok(())) => {}
-        _ => return Err(Error::Connect),
-    }
-
-    let mut read_buf = alloc::vec![0u8; READ_BUF];
-    let mut write_buf = alloc::vec![0u8; WRITE_BUF];
-    let mut conn = TlsConnection::<_, Aes128GcmSha256>::new(Sampled(socket), &mut read_buf, &mut write_buf);
-    let t0 = Instant::now();
-    // Nothing is written before this returns Ok.
-    tlsauth::open_verified::<_, WallClock>(&mut conn, host, root, seeded_rng())
-        .await
-        .map_err(|e| match e {
-            OpenError::Tls(e) => Error::Tls(e),
-            OpenError::NoServerAuth => Error::NoServerAuth,
-        })?;
-    let handshake_ms = t0.elapsed().as_millis();
-    sample_heap();
-
-    let mut request = alloc::format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: {user_agent}\r\nAccept: */*\r\nConnection: close\r\n"
-    );
-    if let Some(last) = range_to {
-        request.push_str(&alloc::format!("Range: bytes=0-{last}\r\n"));
-    }
-    request.push_str("\r\n");
-    conn.write_all(request.as_bytes()).await.map_err(|_| Error::Http)?;
-    conn.flush().await.map_err(|_| Error::Http)?;
-
-    let mut data: Vec<u8> = Vec::new();
-    let mut chunk = alloc::vec![0u8; 1024];
-    let mut head = None;
-    loop {
-        let n = match with_timeout(IO_TIMEOUT, conn.read(&mut chunk)).await {
-            Ok(Ok(0)) | Ok(Err(TlsError::ConnectionClosed)) => break,
-            Ok(Ok(n)) => n,
-            // A reset after the head is a short body, not a failure.
-            _ if head.is_some() => break,
-            _ => return Err(Error::Http),
-        };
-        data.extend_from_slice(&chunk[..n]);
-        head = head.or_else(|| wire::parse_head(&data));
-        if head.as_ref().is_some_and(|h| data.len() - h.body_start >= stop_after) || data.len() > MAX_REPLY {
-            break;
+impl<'a> Conn<'a> {
+    pub async fn open(stack: Stack<'a>, host: &'static str, bufs: &'a mut Bufs) -> Result<Conn<'a>, Error> {
+        let root = pinned_root(host).ok_or(Error::Connect)?;
+        let ip = resolve(stack, host).await.ok_or(Error::Dns)?;
+        let Bufs { tcp_rx, tcp_tx, read, write } = bufs;
+        let mut socket = TcpSocket::new(stack, tcp_rx, tcp_tx);
+        match with_timeout(CONNECT_TIMEOUT, socket.connect((ip, 443))).await {
+            Ok(Ok(())) => {}
+            _ => return Err(Error::Connect),
         }
+        let mut conn = TlsConnection::<_, Aes128GcmSha256>::new(Sampled(socket), read, write);
+        let t0 = Instant::now();
+        // Nothing is written before this returns Ok.
+        tlsauth::open_verified::<_, WallClock>(&mut conn, host, root, seeded_rng())
+            .await
+            .map_err(|e| match e {
+                OpenError::Tls(e) => Error::Tls(e),
+                OpenError::NoServerAuth => Error::NoServerAuth,
+            })?;
+        sample_heap();
+        Ok(Conn { conn, host, handshake_ms: t0.elapsed().as_millis(), requests: 0, last_used: Instant::now() })
     }
-    let _ = conn.close().await;
 
-    let head = head.ok_or(Error::Http)?;
-    let body = &data[head.body_start..];
-    let body = if head.chunked { wire::dechunk(body).0 } else { body.to_vec() };
-    let bufs_in_psram = PSRAM_VADDR.contains(&(read_buf.as_ptr() as usize));
-    Ok(Reply { status: head.status, body, handshake_ms, bufs_in_psram })
+    /// `GET <path>` on this connection. The reply ends by Content-Length, by the last chunk, or
+    /// (neither given) by the server closing, which makes the connection not reusable.
+    pub async fn get(&mut self, path: &str, user_agent: &str) -> Result<Reply, Error> {
+        let reused = self.requests > 0;
+        self.requests += 1;
+        let host = self.host;
+        let request = alloc::format!(
+            "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: {user_agent}\r\nAccept: */*\r\n\r\n"
+        );
+        // After a failure on a reused connection nothing tells a stale connection from a dead network
+        // until a whole reply is missing: `Stale` lets the caller retry on a fresh one.
+        let fail = |e| if reused { Error::Stale } else { e };
+        self.conn.write_all(request.as_bytes()).await.map_err(|_| fail(Error::Http))?;
+        self.conn.flush().await.map_err(|_| fail(Error::Http))?;
+
+        let mut data: Vec<u8> = Vec::new();
+        let mut chunk = alloc::vec![0u8; 1024];
+        let mut head: Option<wire::Head> = None;
+        let mut closed = false;
+        loop {
+            if let Some(h) = &head {
+                let have = data.len() - h.body_start;
+                let complete = match (h.chunked, h.content_length) {
+                    (true, _) => wire::dechunk(&data[h.body_start..]).1,
+                    (false, Some(n)) => have >= n,
+                    (false, None) => false,
+                };
+                if complete || have > MAX_REPLY {
+                    break;
+                }
+            }
+            match with_timeout(IO_TIMEOUT, self.conn.read(&mut chunk)).await {
+                Ok(Ok(0)) | Ok(Err(TlsError::ConnectionClosed)) => {
+                    closed = true;
+                    break;
+                }
+                Ok(Ok(n)) => data.extend_from_slice(&chunk[..n]),
+                // A reset after the head is a short body, not a failure.
+                _ if head.is_some() => {
+                    closed = true;
+                    break;
+                }
+                _ if data.is_empty() => return Err(fail(Error::Http)),
+                _ => return Err(Error::Http),
+            }
+            head = head.or_else(|| wire::parse_head(&data));
+        }
+        self.last_used = Instant::now();
+        let head = head.ok_or_else(|| fail(Error::Http))?;
+        let body = &data[head.body_start..];
+        let (body, complete) = if head.chunked {
+            wire::dechunk(body)
+        } else {
+            (body.to_vec(), head.content_length.is_some_and(|n| body.len() >= n))
+        };
+        Ok(Reply { status: head.status, body, reusable: complete && !closed && !head.close })
+    }
+
+    pub async fn close(self) {
+        let _ = self.conn.close().await;
+    }
 }

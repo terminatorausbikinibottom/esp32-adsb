@@ -136,7 +136,7 @@ struct AdsbDbBody {
 
 /// Parses `/v0/aircraft/<icao>[?callsign=]` and `/v0/callsign/<cs>` replies. Note: with the
 /// combined query an unknown callsign makes the whole reply "unknown callsign", even when the
-/// aircraft is known, so callers retry without the callsign.
+/// aircraft is known, so callers retry without the callsign (see [`adsbdb_step`]).
 pub fn parse_adsbdb(body: &[u8]) -> Result<(Option<AircraftInfo>, Option<RouteInfo>), MetaError> {
     if body.len() > MAX_BODY {
         return Err(MetaError::TooLarge);
@@ -219,11 +219,12 @@ pub struct Lru<K, V> {
 }
 
 impl<K: PartialEq, V> Lru<K, V> {
-    pub fn new(cap: usize) -> Self {
+    /// `const` so that the firmware can keep the cache in a `static`; the vector grows on demand.
+    pub const fn new(cap: usize) -> Self {
         Self {
             cap,
             tick: 0,
-            items: Vec::with_capacity(cap),
+            items: Vec::new(),
         }
     }
 
@@ -265,7 +266,7 @@ impl<K: PartialEq, V> Lru<K, V> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Want {
     pub icao: u32,
-    /// `None` when the callsign is missing, empty or contains `?` (unreliable decode).
+    /// `None` when the callsign is missing or not `[A-Z0-9]{1,8}` (empty, `?` from an unreliable decode).
     pub callsign: Option<HString<8>>,
 }
 
@@ -307,7 +308,7 @@ impl Policy {
             callsign: a
                 .callsign
                 .as_ref()
-                .filter(|c| !c.trim().is_empty() && !c.contains('?'))
+                .filter(|c| valid_callsign(c.trim()))
                 .map(|c| HString::try_from(c.trim()).unwrap()),
         };
         let _ = plan.text.push(want(f));
@@ -322,6 +323,126 @@ impl Policy {
         }
         debug_assert!(plan.text.len() <= 1 + PREFETCH);
         plan
+    }
+}
+
+/// Which adsbdb query to send.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// `/v0/aircraft/<icao>?callsign=<cs>`: aircraft and route in one reply.
+    Combined,
+    /// `/v0/aircraft/<icao>`
+    Aircraft,
+    /// `/v0/callsign/<cs>`
+    Route,
+}
+
+/// `[A-Z0-9]{1,8}`: the only callsigns that are looked up (they go into a URL).
+pub fn valid_callsign(c: &str) -> bool {
+    (1..=8).contains(&c.len()) && c.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
+impl Kind {
+    /// Request path. The callsign is checked to be `[A-Z0-9]{1,8}` (it goes into the URL); `None`
+    /// if the kind needs one and it is missing or malformed.
+    pub fn path(self, icao: u32, callsign: Option<&str>) -> Option<String> {
+        let cs = callsign.filter(|c| valid_callsign(c));
+        Some(match (self, cs) {
+            (Kind::Aircraft, _) => alloc::format!("/v0/aircraft/{icao:06X}"),
+            (Kind::Combined, Some(cs)) => alloc::format!("/v0/aircraft/{icao:06X}?callsign={cs}"),
+            (Kind::Route, Some(cs)) => alloc::format!("/v0/callsign/{cs}"),
+            _ => return None,
+        })
+    }
+}
+
+/// What one adsbdb reply taught us. `Some(None)` = the service says "unknown" (negative entry),
+/// `None` = not learned from this reply.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Step {
+    pub aircraft: Option<Option<AircraftInfo>>,
+    pub route: Option<Option<RouteInfo>>,
+}
+
+impl Step {
+    /// Everything `kind` asks for is unknown (also used for a reply that cannot be parsed).
+    pub fn unknown(kind: Kind) -> Self {
+        Self {
+            aircraft: (kind != Kind::Route).then_some(None),
+            route: (kind != Kind::Aircraft).then_some(None),
+        }
+    }
+}
+
+/// Interprets the reply body (status 200 or 404) of a `kind` query. `Err`: unusable body.
+pub fn adsbdb_step(kind: Kind, body: &[u8]) -> Result<Step, MetaError> {
+    Ok(match (parse_adsbdb(body), kind) {
+        (Ok((a, r)), Kind::Combined) => Step { aircraft: Some(a), route: Some(r) },
+        (Ok((a, _)), Kind::Aircraft) => Step { aircraft: Some(a), ..Step::default() },
+        (Ok((_, r)), Kind::Route) => Step { route: Some(r), ..Step::default() },
+        (Err(MetaError::NotFound), Kind::Combined) => {
+            // Which half is unknown? The reply text says (verified live, RD.7).
+            let has = |t: &[u8]| body.windows(t.len()).any(|w| w == t);
+            // The half that is not named is asked for next: `TextCache::needs` still misses it.
+            if has(b"unknown callsign") {
+                Step { route: Some(None), ..Step::default() }
+            } else if has(b"unknown aircraft") {
+                Step { aircraft: Some(None), ..Step::default() }
+            } else {
+                Step::unknown(kind)
+            }
+        }
+        (Err(MetaError::NotFound), Kind::Aircraft) => Step { aircraft: Some(None), ..Step::default() },
+        (Err(MetaError::NotFound), Kind::Route) => Step { route: Some(None), ..Step::default() },
+        (Err(e), _) => return Err(e),
+    })
+}
+
+/// The text cache: aircraft by ICAO, route by callsign (a route belongs to the flight, not the
+/// airframe, and expires sooner).
+pub struct TextCache {
+    aircraft: Lru<u32, Option<AircraftInfo>>,
+    route: Lru<HString<8>, Option<RouteInfo>>,
+}
+
+impl Default for TextCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TextCache {
+    pub const fn new() -> Self {
+        Self { aircraft: Lru::new(TEXT_CACHE_ENTRIES), route: Lru::new(TEXT_CACHE_ENTRIES) }
+    }
+
+    /// The query still needed for `want`, `None` when everything is cached (positive or negative).
+    pub fn needs(&mut self, want: &Want, now_ms: u64) -> Option<Kind> {
+        let ac = self.aircraft.get(&want.icao, now_ms).is_none();
+        let route = want.callsign.as_ref().is_some_and(|c| self.route.get(c, now_ms).is_none());
+        match (ac, route) {
+            (true, true) => Some(Kind::Combined),
+            (true, false) => Some(Kind::Aircraft),
+            (false, true) => Some(Kind::Route),
+            (false, false) => None,
+        }
+    }
+
+    pub fn apply(&mut self, want: &Want, step: Step, now_ms: u64) {
+        let ttl = |known: bool, ttl| if known { ttl } else { TTL_NEGATIVE_MS };
+        if let Some(a) = step.aircraft {
+            self.aircraft.insert(want.icao, a.clone(), ttl(a.is_some(), TTL_AIRCRAFT_MS), now_ms);
+        }
+        if let (Some(r), Some(cs)) = (step.route, want.callsign.clone()) {
+            self.route.insert(cs, r.clone(), ttl(r.is_some(), TTL_ROUTE_MS), now_ms);
+        }
+    }
+
+    /// The panel text for `want` (empty fields where nothing is known yet).
+    pub fn focus_meta(&mut self, want: &Want, now_ms: u64) -> FocusMeta {
+        let a = self.aircraft.get(&want.icao, now_ms).cloned().flatten();
+        let r = want.callsign.as_ref().and_then(|c| self.route.get(c, now_ms).cloned().flatten());
+        FocusMeta::from_parts(a.as_ref(), r.as_ref())
     }
 }
 
@@ -596,6 +717,63 @@ mod tests {
         let t = Policy::default().plan(&s, 0).text;
         let cs: Vec<Option<&str>> = t.iter().map(|w| w.callsign.as_deref()).collect();
         assert_eq!(cs, [Some("ZQ9"), None, None]);
+    }
+
+    #[test]
+    fn kind_paths_validate_the_callsign() {
+        assert_eq!(Kind::Combined.path(0x3C6444, Some("KLM1023")).as_deref(), Some("/v0/aircraft/3C6444?callsign=KLM1023"));
+        assert_eq!(Kind::Aircraft.path(0xABC, Some("bad cs")).as_deref(), Some("/v0/aircraft/000ABC"));
+        assert_eq!(Kind::Route.path(1, Some("KLM1023")).as_deref(), Some("/v0/callsign/KLM1023"));
+        for bad in [None, Some(""), Some("klm1"), Some("A B"), Some("A?B"), Some("A/../B"), Some("TOOLONG99")] {
+            assert_eq!(Kind::Combined.path(1, bad), None, "{bad:?}");
+            assert_eq!(Kind::Route.path(1, bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn steps_split_the_combined_reply() {
+        let s = adsbdb_step(Kind::Combined, COMBINED.as_bytes()).unwrap();
+        assert!(s.aircraft.flatten().is_some() && s.route.flatten().is_some());
+        // Unknown callsign hides a known aircraft: ask for the aircraft alone.
+        let s = adsbdb_step(Kind::Combined, br#"{"response":"unknown callsign"}"#).unwrap();
+        assert_eq!((s.aircraft, s.route), (None, Some(None)));
+        // Unknown aircraft: the route may still exist.
+        let s = adsbdb_step(Kind::Combined, br#"{"response":"unknown aircraft"}"#).unwrap();
+        assert_eq!((s.aircraft, s.route), (Some(None), None));
+        let s = adsbdb_step(Kind::Combined, br#"{"response":"strange"}"#).unwrap();
+        assert_eq!((s.aircraft, s.route), (Some(None), Some(None)));
+        let s = adsbdb_step(Kind::Aircraft, AIRCRAFT_ONLY.as_bytes()).unwrap();
+        assert!(s.aircraft.flatten().is_some() && s.route.is_none());
+        let s = adsbdb_step(Kind::Aircraft, br#"{"response":"unknown aircraft"}"#).unwrap();
+        assert_eq!((s.aircraft, s.route), (Some(None), None));
+        let s = adsbdb_step(Kind::Route, CALLSIGN_ONLY.as_bytes()).unwrap();
+        assert!(s.aircraft.is_none() && s.route.flatten().is_some());
+        assert_eq!(adsbdb_step(Kind::Route, b"<html>"), Err(MetaError::Malformed));
+        assert_eq!(Step::unknown(Kind::Aircraft), Step { aircraft: Some(None), route: None });
+        assert_eq!(Step::unknown(Kind::Combined), Step { aircraft: Some(None), route: Some(None) });
+    }
+
+    #[test]
+    fn text_cache_asks_only_for_what_is_missing() {
+        let want = Want { icao: 7, callsign: Some(HString::try_from("ZQJ123").unwrap()) };
+        let mut c = TextCache::default();
+        assert_eq!(c.needs(&want, 0), Some(Kind::Combined));
+        // The unknown-callsign path of the live API: two requests, then everything is cached.
+        let s = adsbdb_step(Kind::Combined, br#"{"response":"unknown callsign"}"#).unwrap();
+        c.apply(&want, s, 0);
+        assert_eq!(c.needs(&want, 1), Some(Kind::Aircraft));
+        let s = adsbdb_step(Kind::Aircraft, AIRCRAFT_ONLY.as_bytes()).unwrap();
+        c.apply(&want, s, 1);
+        assert_eq!(c.needs(&want, 2), None);
+        assert_eq!(c.focus_meta(&want, 2).model.as_deref(), Some("Testliner 100"));
+        // The negative route expires after an hour, the aircraft stays.
+        assert_eq!(c.needs(&want, TTL_NEGATIVE_MS + 1), Some(Kind::Route));
+        // Without a callsign only the aircraft counts.
+        let bare = Want { icao: 8, callsign: None };
+        assert_eq!(c.needs(&bare, 0), Some(Kind::Aircraft));
+        c.apply(&bare, Step { aircraft: Some(None), ..Step::default() }, 0);
+        assert_eq!(c.needs(&bare, 1), None);
+        assert_eq!(c.focus_meta(&bare, 1), FocusMeta::default());
     }
 
     #[test]

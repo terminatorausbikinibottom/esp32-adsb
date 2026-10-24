@@ -5,6 +5,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use core::time::Duration;
 
 use adsb_app::{App, HEIGHT, Rgb565Pixel, Status, WIDTH};
+use adsb_core::meta::{FocusMeta, Policy};
 use adsb_core::pipeline::FeedPipeline;
 use adsb_core::tracker::{Config, Snapshot};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -73,6 +74,7 @@ pub struct FbUi {
     line: &'static mut [Rgb565Pixel; WIDTH],
     full_ms: Option<u64>,
     ticks: u32,
+    policy: Policy,
 }
 
 impl FbUi {
@@ -88,12 +90,13 @@ impl FbUi {
             line: LINE.take(),
             full_ms: None,
             ticks: 0,
+            policy: Policy::default(),
         }
     }
 
     /// Push the snapshot to Slint, render what changed and make it visible to the scanout DMA.
     /// Returns whether anything was drawn.
-    pub fn update(&mut self, snap: &Snapshot, st: &Status) -> bool {
+    pub fn update(&mut self, snap: &Snapshot, st: &Status, meta: Option<&FocusMeta>) -> bool {
         let kind = self.app.ui().kind;
         AIRCRAFT.store(snap.list.len() as u32, Relaxed);
         // Callsign, distance and bearing only (no coordinates, see Privacy).
@@ -109,7 +112,7 @@ impl FbUi {
             }
         }
         self.ticks = self.ticks.wrapping_add(1);
-        self.app.update(snap, st, None);
+        self.app.update(snap, st, meta);
         if self.full_ms.is_none() || kind != self.app.ui().kind {
             info!("ui: card={:?}", self.app.ui().kind);
         }
@@ -160,14 +163,23 @@ fn draw_border(fb: &mut [u16], y0: usize, y1: usize) {
 pub async fn tick(ui: &mut FbUi, pipeline: &Pipeline) -> bool {
     let st = status();
     let snap = pipeline.lock().await.snapshot(st.now_ms, st.radius_km);
-    ui.update(&snap, &st)
+    // The demo scenario has no network; real builds show what `meta_task` found.
+    let meta = if DEMO { None } else { Some(crate::lookup::publish(&mut ui.policy, &snap, st.now_ms).await) };
+    ui.update(&snap, &st, meta.as_ref())
 }
 
 #[embassy_executor::task]
 pub async fn ui_task(mut ui: FbUi, pipeline: &'static Pipeline) {
     let mut ticker = Ticker::every(embassy_time::Duration::from_secs(1));
+    let mut last = Instant::now();
     loop {
         ticker.next().await;
+        // A late tick means the executor was blocked (a TLS handshake, RD.9).
+        let gap = last.elapsed().as_millis();
+        last = Instant::now();
+        if gap > 1500 {
+            info!("ui: tick gap_ms={gap}");
+        }
         tick(&mut ui, pipeline).await;
     }
 }

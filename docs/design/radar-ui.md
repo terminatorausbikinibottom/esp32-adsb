@@ -962,3 +962,48 @@ app partition size.
   orchestrator: tls-hostile 7/7). Open, low: F2 CN fallback, F3 residual (SNTP spoofing after the
   build time), F4 library unwraps. Upstream report for F1 drafted above, NOT filed (user decides).
   planespotters now answers 403 without a contact: RD.10 waits for `ADSB_HTTP_CONTACT`.
+
+- 2026-10-24, **RD.9 done: `meta_task` (text metadata from adsbdb) on the board** (base 15905b8 + the RD.9 commit,
+  live build flashed). Photos stay out (RD.10); `plan.photo` of the policy is not used yet.
+  - **Code.** `adsb-core::meta`: `Kind` (combined, aircraft, route; `path()` builds the URL and accepts only a
+    `[A-Z0-9]{1,8}` callsign), `Step` + `adsbdb_step()` (what one reply taught us, incl. the RD.7 catch: "unknown
+    callsign" -> route negative, aircraft is asked for alone next; "unknown aircraft" -> aircraft negative, route
+    asked for next through `/v0/callsign/`), `TextCache` (aircraft by ICAO 7 d, route by callsign 6 h, negative
+    1 h; `needs()` names the missing half, so no extra retry state), `Lru::new` is `const`. `Policy` now plans only
+    valid callsigns. `adsb-core::wire::Head` has `content_length` and `close`. Firmware: `lookup.rs` (`meta_task`,
+    shared cache + latest plan under one async mutex, `publish()` called by `ui_task` each tick, which returns the
+    focus `FocusMeta`); `tls::Conn` replaces `tls::get` (see below); `tls_spike_task` and its probe are gone.
+    `tls-wrong-ca` stays meaningful: `meta_task` then logs `tls: failed host=api.adsbdb.com err=Tls(InvalidCertificate)`
+    plus `meta: error connect` / `meta: backoff` and backs off (not re-run on the board in this step, host and code
+    paths unchanged since RD.8). Demo builds pass `None` as meta (no network).
+  - **Executor stall, what I chose.** Measured on the board (handshake adsbdb 3.4-3.7 s): each handshake gives
+    `ui: tick gap_ms` 3.5-4.1 s and `feed: ... max_gap_ms` 3.3-3.9 s (new log field: longest pause between two
+    feed reads in the 10 s window). No reconnect, `crc_fail=0`, the window after it shows catch-up
+    (frames/s 11 vs 3) = no bytes lost at night rates (1-4 aircraft, 3-14 frames/s); the TCP feed is not
+    dropped. **Not measured at day traffic** (about 1.6 KB/s at 39 frames/s): the net runner does not run during the
+    handshake, so the WiFi driver queue (not our 8 KB socket buffer) holds the packets; TCP retransmission covers
+    drops but the delay is the same 4 s. Mitigation chosen: **HTTP keep-alive to adsbdb** (the server keeps a
+    connection at least 60 s idle and closes it between 60 and 120 s, checked with a Python client): one handshake
+    serves all queued lookups (aircraft, route, prefetch), later requests take about 30 ms. The connection is
+    closed after 60 s idle; a reused connection that fails before the first reply byte gives `Error::Stale` and
+    is reopened without back-off. Result: in two runs of about 19 and 18 min, 4 and 3 handshakes (new aircraft
+    arriving more than 60 s after the last lookup need a new one). Yield points inside the handshake are not
+    possible (library crypto). **Not done, proposed if day traffic shows loss:** run the net runner, feed and UI in an
+    `esp-rtos` interrupt executor (higher priority than the thread executor that runs `meta_task`), so the
+    handshake is preempted; it touches the task layout and the render code and needs a decision.
+  - **Verify (board, night traffic 1-4 aircraft, no hostile lookups).** Run 1 (872 s uptime at the last look):
+    9 `meta: ok`, 1 `not found`, 10 requests, 0 errors, no panic, 3 `ok` within the first 6 min. Run 2 (about
+    18 min): 3 `ok`, 3 `not found`, 7 requests, 0 errors, no panic. No `(icao, kind)` requested twice within its
+    TTL (log checked). Request rate: new log field `t_ms`; consecutive requests 1.08 s, 5.0 s apart (limiter 1 s
+    min; the log has no other timestamps, so only these pairs were checked). Requests are only for the planned
+    aircraft by construction (`next_job` reads the plan); the log was not cross-checked against the aircraft list.
+    Heap: `internal_min=20588` during the handshake (same as RD.8), `internal_free=29108` after (27404 once,
+    back to 29108 later), gate >= 10 KB holds; TLS buffers in PSRAM (`bufs_psram=true`, allocated once and reused).
+    Panel (burst frame, K4 glitches ignored): focus callsign, airline line and `CGN -> AYT` with city line present
+    (resolution of the bench camera makes the small text unreadable; the log's `meta: ok` gives airline and route
+    of the same aircraft). Aircraft the service does not know show "-" as designed.
+  - **Observations.** The callsign usually arrives some seconds after the position, so the first lookup of an
+    aircraft is often `kind=aircraft` and a second `kind=route` follows (an extra request, still <= 1/s);
+    waiting for the callsign before asking would save it (not done). adsbdb answers 404 with the "unknown ..."
+    body, which `meta_task` treats as an answer. The feed task still closes its connection after 60 s of silence
+    (`feed: lost (idle timeout)`, then reconnects): seen several times at night, before any lookup, unrelated.

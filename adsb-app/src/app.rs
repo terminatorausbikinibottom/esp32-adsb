@@ -1,5 +1,5 @@
 use crate::ui::{self, AppWindow};
-use crate::{Badge, CardKind, HEIGHT, WIDTH, render_by_line};
+use crate::{Badge, HEIGHT, WIDTH, render_by_line};
 use adsb_core::geo::compass_label;
 use adsb_core::meta::{Airport, FocusMeta, Photo};
 use adsb_core::radar::{self, Blip, RangeKm, RangeState};
@@ -42,6 +42,16 @@ pub struct Status {
     /// False forces the "No data" overlay (feed known to be down), whatever the tracker says.
     pub feed_ok: bool,
     pub radius_km: f64,
+}
+
+/// Tracker card state as the view-model sees it; Slint only gets `no_data`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardKind {
+    NoData,
+    Overhead,
+    JustPassed,
+    Quiet,
+    Approaching,
 }
 
 /// Everything the Slint window displays. Diffed field by field.
@@ -420,7 +430,7 @@ impl App {
             };
         }
         diff!(wifi_ok => set_wifi_ok, feed_ok => set_feed_ok, counts => set_counts,
-            rate => set_rate, clock => set_clock, kind => set_kind, title => set_heading,
+            rate => set_rate, clock => set_clock, title => set_heading,
             badge => set_badge, airline => set_airline, model => set_model,
             registration => set_registration, route => set_route, cities => set_cities,
             credit => set_credit, alt => set_alt, gs => set_gs, trk => set_trk, dist => set_dist,
@@ -437,6 +447,10 @@ impl App {
                     ),
                 ));
             }
+        }
+        // Only the no-data bit reaches Slint: other card changes alone must not dirty the window.
+        if (old.kind == CardKind::NoData) != (new.kind == CardKind::NoData) {
+            ui.set_no_data(new.kind == CardKind::NoData);
         }
         if old.radius_ring_px != new.radius_ring_px {
             ui.set_radius_ring(new.radius_ring_px as f32);
@@ -479,14 +493,22 @@ impl App {
         });
     }
 
-    /// Advance timers/animations, then render whatever is dirty; see [`render_by_line`].
+    /// Advance timers/animations, then render whatever is dirty; see [`render_by_line`]. Returns
+    /// the rows the sink was called for, `None` if it was never called (even when Slint judged the
+    /// window dirty: a change with no visible effect repaints nothing).
     pub fn render(
         &self,
         line_buf: &mut [Rgb565Pixel],
-        sink: impl FnMut(usize, Range<usize>, &[Rgb565Pixel]),
-    ) -> bool {
+        mut sink: impl FnMut(usize, Range<usize>, &[Rgb565Pixel]),
+    ) -> Option<Range<usize>> {
         slint::platform::update_timers_and_animations();
-        render_by_line(&self.window, line_buf, sink)
+        let mut rows: Option<Range<usize>> = None;
+        render_by_line(&self.window, line_buf, |y, x, px| {
+            sink(y, x, px);
+            let r = rows.get_or_insert(y..y + 1);
+            *r = r.start.min(y)..r.end.max(y + 1);
+        });
+        rows
     }
 }
 
@@ -568,6 +590,17 @@ mod tests {
         assert_eq!((ui.range_km, ui.blips.len()), (25, 2));
         assert_eq!(ui.radius_ring_px, 42); // 5 km of 25 km
         assert_eq!(app.blips.row_count(), 2);
+
+        // A card change that Slint does not show repaints nothing: `render` must say so (the
+        // firmware used to write back an empty row range and panic on Quiet -> JustPassed).
+        let mut line = alloc::vec![Rgb565Pixel(0); WIDTH];
+        let rows = app.render(&mut line, |_, _, _| {}).expect("first frame");
+        assert_eq!(rows.start, 0);
+        assert!(app.render(&mut line, |_, _, _| {}).is_none());
+        snap.card = Card::JustPassed;
+        assert!(app.update(&snap, &st, None));
+        assert_eq!(app.ui().kind, CardKind::JustPassed);
+        assert!(app.render(&mut line, |_, _, _| {}).is_none());
 
         // Metadata of the focus: rows, credit and photo; a repeat changes nothing.
         let photo = Rc::new(Photo {

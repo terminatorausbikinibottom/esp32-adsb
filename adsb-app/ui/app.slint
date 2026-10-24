@@ -1,7 +1,6 @@
 import "../fonts/LiberationSans-Regular.ttf";
 import "../fonts/LiberationSans-Bold.ttf";
 
-export enum CardKind { no-data, overhead, just-passed, quiet, approaching }
 export enum Badge { none, overhead, approaching, nearest }
 
 export struct Blip {
@@ -84,7 +83,7 @@ export component AppWindow inherits Window {
     in property <string> clock;
 
     // Radar.
-    in property <CardKind> kind;
+    in property <bool> no-data: true;
     in property <[Blip]> blips;
     in property <string> half-label;
     in property <string> range-label;
@@ -166,7 +165,7 @@ export component AppWindow inherits Window {
             }
         }
 
-        if kind == CardKind.no-data: Rectangle {
+        if no-data: Rectangle {
             x: 24px;
             y: 204px;
             width: 400px;

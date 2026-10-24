@@ -143,9 +143,11 @@ impl Sim {
     /// Repaint whatever is dirty (timers, animations); returns whether the framebuffer changed.
     pub fn render(&mut self) -> bool {
         let fb = &mut self.fb;
-        self.app.render(&mut self.line, |y, x, px| {
-            fb[y * WIDTH + x.start..][..px.len()].copy_from_slice(px);
-        })
+        self.app
+            .render(&mut self.line, |y, x, px| {
+                fb[y * WIDTH + x.start..][..px.len()].copy_from_slice(px);
+            })
+            .is_some()
     }
 
     /// FNV-1a 64 over the framebuffer as little-endian RGB565 words, row-major. The browser's

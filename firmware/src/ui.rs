@@ -162,21 +162,18 @@ impl FbUi {
         }
         // SAFETY: exclusive CPU access; the DMA only reads. A torn row shows for one frame at worst.
         let fb = unsafe { core::slice::from_raw_parts_mut(self.fb, WIDTH * HEIGHT) };
-        let (mut y0, mut y1) = (usize::MAX, 0);
         let t0 = Instant::now();
-        let drawn = self.app.render(&mut self.line[..], |y, x, px| {
+        let rows = self.app.render(&mut self.line[..], |y, x, px| {
             let row = &mut fb[y * WIDTH + x.start..y * WIDTH + x.end];
             for (d, p) in row.iter_mut().zip(px) {
                 *d = p.0;
             }
-            y0 = y0.min(y);
-            y1 = y1.max(y);
         });
-        if drawn {
+        if let Some(rows) = &rows {
             #[cfg(feature = "diag-border")]
-            draw_border(fb, y0, y1);
+            draw_border(fb, rows.start, rows.end - 1);
             // SAFETY: `fb` is the framebuffer (see `new`).
-            unsafe { display::writeback_rows(self.fb, y0, y1 + 1) };
+            unsafe { display::writeback_rows(self.fb, rows.start, rows.end) };
             let ms = t0.elapsed().as_millis();
             let full = *self.full_ms.get_or_insert_with(|| {
                 info!("ui: first frame");
@@ -184,10 +181,10 @@ impl FbUi {
             });
             info!(
                 "ui: render full_ms={full} partial_ms={ms} rows={}",
-                y1 + 1 - y0
+                rows.len()
             );
         }
-        drawn
+        rows.is_some()
     }
 }
 

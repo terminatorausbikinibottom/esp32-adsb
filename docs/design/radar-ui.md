@@ -1120,3 +1120,14 @@ app partition size.
     33 of 148 distinct frames were glitched (median-based counter). Not measured with an empty sky.
   - **Not done / not verified:** credit text legibility, photo-less aircraft path on the board (`photo: none` did not occur
     in this run), `too big`/403/429 paths (code and host tests only), a separate `scale_ms`.
+
+- 2026-10-24, **RD.10 QA PASS** (0bc9097, tested at 21c4e6a): 8 `photo: ok` in 565 s, decode+scale
+  507–565 ms (K9 < 1.5 s, 336×224 kept), JPEG 23–47 KB, sequential TLS (planespotters 1.56–1.63 s,
+  image host 0.92–1.01 s handshakes), feed `reconnects=0` in all 59 lines, `internal_min=20588`,
+  colours correct (least-glitched frame shows the photo and panel intact; credit line too small for
+  the webcam). User saw the photos on the panel. Leak check by the orchestrator (counts only): WiFi
+  key, coordinates, contact 0 log lines; the contact value is the user's own public URL already in
+  README.md since the initial commit; feed host only in the known adsb-display.md lines. Not verified
+  on the board: `photo: none` / `too big` paths (code + host tests only); cause of one 17 s feed gap
+  with frames/s=0 outside any photo flow (likely a traffic lull, not proven). Beads entry pending
+  (chain blocked by RD.2).

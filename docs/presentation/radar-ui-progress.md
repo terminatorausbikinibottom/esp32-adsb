@@ -330,3 +330,24 @@ Next: RD.14 round radar (pixel aspect), RD.15 touch selection.
 
 ![bg right:45% contain](img/20261024T113627-k4_win.jpg)
 
+
+---
+
+<!-- _class: log -->
+
+## Round and round: radar fixed, run complete
+
+<span class="time">2026-10-24 19:55 UTC</span>
+
+**Round radar works; run finished.**
+
+- **RD.14:** the rings are rounded rectangles that are not square in pixels (your idea). On the glass they are round (≤ 1.8 px off). Render time is back at the old level (83 ms); the image-tile version (96 ms) brought the glitches back and is gone. Host tests, fmt, clippy green.
+- **Needs you:** the panel is stuck in its own colour cycle (probably the 11 MHz test of the headless copy). **Unplug and replug the board's USB**, then check: radar round, no flicker (FU-0).
+- **Push blocked** by my permission rules. Run:
+  `git push -u origin feature/radar-ui`
+  `gh pr create --base main --head feature/radar-ui --title "feat: ADS-B radar UI on the ESP32-S3 board" --body-file /tmp/claude-1000/-workspaces-esp32-adsb/e6d79f83-a0d6-46d5-b6a0-3669d4dcbf34/scratchpad/pr-radar-ui.md`
+- **Follow-ups:** 19 tickets in `docs/design/radar-ui-followups.md` (FU-1 touch selection is designed and approved).
+- Image: sim render on the physical aspect (invented traffic).
+
+![bg right:45% contain](img/20261024T195501-7-busy-physical.png)
+

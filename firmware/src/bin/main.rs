@@ -426,7 +426,7 @@ async fn main(spawner: Spawner) -> ! {
             last = now;
             let st = restart::take_stats();
             info!("alive {n}s");
-            // The restart must finish inside the vertical blank (12 lines = ~0.6 ms at 16 MHz).
+            // The restart must finish inside the vertical blank (12 lines = ~0.8 ms at 12 MHz).
             info!(
                 "restart: frames/s={} isr_avg_us={} (of which lcd wait {}) isr_max_us={} load={}%",
                 st.restarts,

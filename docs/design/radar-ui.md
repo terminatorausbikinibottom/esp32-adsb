@@ -1141,3 +1141,21 @@ app partition size.
   retry (code reading only; no host harness for the Xtensa-only TLS path). Residual (low): the read
   limit is per read, not per reply. Deferred MINORs stay open: build_config.rs:85, ui.rs:30,
   build.rs:5, lookup.rs:153, tracker.rs:285, main.rs:10.
+
+- 2026-10-24, **K4 fix: PCLK 16 -> 12 MHz** (display.rs `PCLK_MHZ`). Metric: `ADSB_DEMO=busy` build, burst of
+  8 s from the bench MJPEG stream (about 27-40 camera fps) at scenario time ~100 s, first 10 frames skipped; a frame
+  counts as glitched if more than 0.4 % of the panel pixels differ by more than 40 grey levels from the pixelwise
+  median of its 6 nearest frames (drift-proof; a real content change shows for 1-3 frames).
+  | variant | refresh | glitched / 100 (busy demo) |
+  |---|---|---|
+  | baseline 16 MHz | 39 Hz | 30.6 (71 of 232) |
+  | 13 MHz | 32 Hz | 20.7 (48 of 232) |
+  | 12 MHz | 29 Hz | 0 (0 of 232), repeated: 0 of 232 |
+  | 16 MHz + data-cache line 64 B | 39 Hz | 41.8 (97 of 232) |
+  | 13 MHz + data-cache line 64 B | 32 Hz | 22.1 (67 of 303) |
+  Cache size: esp-hal 1.2.2 (`esp_config.yml`) already runs the maximum on the S3 (instruction cache 32 KB, 8 ways,
+  32 B line; data cache 64 KB, 8 ways); only the data line (32 -> 64 B, `ESP_HAL_CONFIG_DATA_CACHE_LINE_SIZE`)
+  can change, and it did not help, so it is not adopted. Live build at 12 MHz (3 aircraft, board uptime 2-3 min):
+  0 of 315 frames in 8 s; 1 of 100 in a 20 s burst, those 4 frames are a real focus change (ELI30A to 3C1BAB), not a
+  glitch. Restart ISR: 29-30 frames/s, isr_max 15-31 us. Step 3 (QIO boot loop) not needed. Open: day traffic
+  (7-9 aircraft) not re-checked; the camera beats against the 29 Hz refresh (brightness pulses, not content).

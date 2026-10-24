@@ -8,12 +8,13 @@ use esp_hal::dma::{
 pub const WIDTH: usize = 800;
 pub const HEIGHT: usize = 480;
 pub const FB_BYTES: usize = WIDTH * HEIGHT * 2;
-/// Pixel clock: 16 MHz (panel verified). The old bounce-buffer path (feature `bounce`) runs at 10 MHz
-/// unless `pclk-16mhz` is also set.
+/// Pixel clock: 12 MHz (29 Hz refresh). At 16 MHz flash cache refills starved the PSRAM scanout reads and
+/// glitched ~30 % of frames; 12 MHz gave 0 in 464 frames, 13 MHz still 21 % (radar-ui K4). The old
+/// bounce-buffer path (feature `bounce`) runs at 10 MHz unless `pclk-16mhz` is also set.
 pub const PCLK_MHZ: u32 = if cfg!(feature = "bounce") && !cfg!(feature = "pclk-16mhz") {
     10
 } else {
-    16
+    12
 };
 /// Frame rate for the 820 x 500 total frame.
 pub const REFRESH_HZ: u32 = PCLK_MHZ * 1_000_000 / (820 * 500);

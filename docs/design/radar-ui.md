@@ -1159,3 +1159,7 @@ app partition size.
   0 of 315 frames in 8 s; 1 of 100 in a 20 s burst, those 4 frames are a real focus change (ELI30A to 3C1BAB), not a
   glitch. Restart ISR: 29-30 frames/s, isr_max 15-31 us. Step 3 (QIO boot loop) not needed. Open: day traffic
   (7-9 aircraft) not re-checked; the camera beats against the 29 Hz refresh (brightness pulses, not content).
+
+- 2026-10-24, **K4 user visual check**: the user looked at the panel running the 12 MHz live build
+  (9af2c78) and confirmed "no flickering". Independent QA (16 vs 12 MHz reproduction, TLS/photo
+  windows, metric validity) is running.

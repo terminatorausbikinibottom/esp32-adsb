@@ -10,8 +10,8 @@ extern crate alloc;
 use core::sync::atomic::Ordering::Relaxed;
 
 use adsb_core::meta::{
-    self, FocusMeta, Kind, Lru, Photo, Policy, RateLimiter, Step, TextCache, Want, TTL_AIRCRAFT_MS,
-    TTL_NEGATIVE_MS,
+    self, FocusMeta, Kind, Lru, Photo, Policy, RateLimiter, Step, TTL_AIRCRAFT_MS, TTL_NEGATIVE_MS,
+    TextCache, Want,
 };
 use adsb_core::photo::MAX_JPEG;
 use adsb_core::tracker::Snapshot;
@@ -55,28 +55,43 @@ struct Shared {
     ready: Option<Ready>,
 }
 
-static SHARED: Mutex<CriticalSectionRawMutex, Shared> =
-    Mutex::new(Shared {
-        cache: TextCache::new(),
-        wants: alloc::vec::Vec::new(),
-        photo_job: None,
-        photo_skip: Lru::new(meta::TEXT_CACHE_ENTRIES),
-        ready: None,
-    });
+static SHARED: Mutex<CriticalSectionRawMutex, Shared> = Mutex::new(Shared {
+    cache: TextCache::new(),
+    wants: alloc::vec::Vec::new(),
+    photo_job: None,
+    photo_skip: Lru::new(meta::TEXT_CACHE_ENTRIES),
+    ready: None,
+});
 
 /// Called by `ui_task` every tick: hands the plan to `meta_task`, returns the panel text of the focus.
-pub async fn publish(policy: &mut Policy, photos: &mut PhotoCache, snap: &Snapshot, now_ms: u64) -> FocusMeta {
+pub async fn publish(
+    policy: &mut Policy,
+    photos: &mut PhotoCache,
+    snap: &Snapshot,
+    now_ms: u64,
+) -> FocusMeta {
     let plan = policy.plan(snap, now_ms);
     let mut sh = SHARED.lock().await;
     if let Some(r) = sh.ready.take() {
-        photos.insert(r.icao, (Rc::new(r.photo), r.photographer), TTL_AIRCRAFT_MS, now_ms);
+        photos.insert(
+            r.icao,
+            (Rc::new(r.photo), r.photographer),
+            TTL_AIRCRAFT_MS,
+            now_ms,
+        );
     }
-    let mut meta = plan.text.first().map(|w| sh.cache.focus_meta(w, now_ms)).unwrap_or_default();
+    let mut meta = plan
+        .text
+        .first()
+        .map(|w| sh.cache.focus_meta(w, now_ms))
+        .unwrap_or_default();
     if let Some((photo, by)) = plan.text.first().and_then(|w| photos.get(&w.icao, now_ms)) {
         meta.photo = Some(photo.clone());
         meta.photographer = Some(by.clone());
     }
-    sh.photo_job = plan.photo.filter(|i| photos.get(i, now_ms).is_none() && sh.photo_skip.get(i, now_ms).is_none());
+    sh.photo_job = plan
+        .photo
+        .filter(|i| photos.get(i, now_ms).is_none() && sh.photo_skip.get(i, now_ms).is_none());
     sh.wants.clear();
     sh.wants.extend(plan.text);
     meta
@@ -90,7 +105,9 @@ fn now_ms() -> u64 {
 async fn next_job() -> Option<(Want, Kind)> {
     let mut sh = SHARED.lock().await;
     let Shared { cache, wants, .. } = &mut *sh;
-    wants.iter().find_map(|w| Some((w.clone(), cache.needs(w, now_ms())?)))
+    wants
+        .iter()
+        .find_map(|w| Some((w.clone(), cache.needs(w, now_ms())?)))
 }
 
 async fn photo_pending() -> bool {
@@ -156,7 +173,10 @@ pub async fn meta_task(stack: Stack<'static>) {
                 serve(conn, &mut limiter, &ua).await;
             }
             Err(e) => {
-                warn!("tls: failed host={HOST} err={e:?} total_ms={}", t0.elapsed().as_millis());
+                warn!(
+                    "tls: failed host={HOST} err={e:?} total_ms={}",
+                    t0.elapsed().as_millis()
+                );
                 failed(&mut limiter, "connect");
             }
         }
@@ -176,25 +196,34 @@ async fn serve(mut conn: Conn<'_>, limiter: &mut RateLimiter, ua: &str) {
             continue;
         };
         // `Policy` only plans valid callsigns, so a path always exists.
-        let Some(path) = kind.path(want.icao, want.callsign.as_deref()) else { break };
+        let Some(path) = kind.path(want.icao, want.callsign.as_deref()) else {
+            break;
+        };
         let t0 = Instant::now();
         limiter.started(t0.as_millis());
-        info!("meta: req icao={:06X} kind={} t_ms={}", want.icao, kind_name(kind), t0.as_millis());
+        info!(
+            "meta: req icao={:06X} kind={} t_ms={}",
+            want.icao,
+            kind_name(kind),
+            t0.as_millis()
+        );
         let reply = conn.get(&path, ua, tls::MAX_JSON).await;
         let ms = t0.elapsed().as_millis();
         let usable = match reply {
-            Ok(r) if matches!(r.status, 200 | 404) && r.complete => match meta::adsbdb_step(kind, &r.body) {
-                Ok(step) => {
-                    store(&want, step, ms).await;
-                    limiter.success();
-                    r.reusable
+            Ok(r) if matches!(r.status, 200 | 404) && r.complete => {
+                match meta::adsbdb_step(kind, &r.body) {
+                    Ok(step) => {
+                        store(&want, step, ms).await;
+                        limiter.success();
+                        r.reusable
+                    }
+                    // Only a genuine "unknown ..." answer is cached as negative; garbage is an error.
+                    Err(e) => {
+                        failed(limiter, &alloc::format!("body={e:?}"));
+                        false
+                    }
                 }
-                // Only a genuine "unknown ..." answer is cached as negative; garbage is an error.
-                Err(e) => {
-                    failed(limiter, &alloc::format!("body={e:?}"));
-                    false
-                }
-            },
+            }
             Ok(r) if r.status == 429 => {
                 limiter.too_many_requests(now_ms());
                 warn!("meta: error status=429");
@@ -228,7 +257,8 @@ fn kind_name(kind: Kind) -> &'static str {
 }
 
 async fn store(want: &Want, step: Step, ms: u64) {
-    let found = step.aircraft.as_ref().is_some_and(Option::is_some) || step.route.as_ref().is_some_and(Option::is_some);
+    let found = step.aircraft.as_ref().is_some_and(Option::is_some)
+        || step.route.as_ref().is_some_and(Option::is_some);
     let now = now_ms();
     let mut sh = SHARED.lock().await;
     sh.cache.apply(want, step, now);
@@ -276,8 +306,14 @@ async fn get_once(
     limiter: &mut RateLimiter,
 ) -> Result<alloc::vec::Vec<u8>, PhotoEnd> {
     let t0 = Instant::now();
-    let mut conn = Conn::open(stack, host, bufs).await.inspect_err(|e| warn!("tls: failed host={host} err={e:?}"))?;
-    info!("meta: tls ok host={host} hs_ms={} internal_free={}", conn.handshake_ms, tls::internal_free());
+    let mut conn = Conn::open(stack, host, bufs)
+        .await
+        .inspect_err(|e| warn!("tls: failed host={host} err={e:?}"))?;
+    info!(
+        "meta: tls ok host={host} hs_ms={} internal_free={}",
+        conn.handshake_ms,
+        tls::internal_free()
+    );
     wait_ready(limiter).await;
     limiter.started(now_ms());
     let reply = conn.get(path, ua, max).await;
@@ -290,7 +326,10 @@ async fn get_once(
             limiter.too_many_requests(now_ms());
             Err(PhotoEnd::Err("status=429".into()))
         }
-        s => Err(PhotoEnd::Err(alloc::format!("status={s} host={host} ms={}", t0.elapsed().as_millis()))),
+        s => Err(PhotoEnd::Err(alloc::format!(
+            "status={s} host={host} ms={}",
+            t0.elapsed().as_millis()
+        ))),
     }
 }
 
@@ -303,7 +342,8 @@ async fn photo_flow(
 ) -> Result<(String, Photo), PhotoEnd> {
     let json_path = alloc::format!("/pub/photos/hex/{icao:06X}");
     let json = get_once(stack, bufs, PS_HOST, &json_path, ua, tls::MAX_JSON, limiter).await?;
-    let found = meta::parse_planespotters(&json).map_err(|e| PhotoEnd::Err(alloc::format!("body={e:?}")))?;
+    let found = meta::parse_planespotters(&json)
+        .map_err(|e| PhotoEnd::Err(alloc::format!("body={e:?}")))?;
     drop(json);
     let found = found.ok_or(PhotoEnd::None)?;
     let path = found.path().ok_or(PhotoEnd::None)?;
@@ -313,28 +353,54 @@ async fn photo_flow(
         adsb_core::photo::PhotoError::TooLarge => PhotoEnd::TooBig,
         adsb_core::photo::PhotoError::Decode => PhotoEnd::Err("decode".into()),
     })?;
-    info!("photo: ok icao={icao:06X} bytes={} decode_ms={}", jpeg.len(), t0.elapsed().as_millis());
+    info!(
+        "photo: ok icao={icao:06X} bytes={} decode_ms={}",
+        jpeg.len(),
+        t0.elapsed().as_millis()
+    );
     Ok((found.photographer, photo))
 }
 
 /// RD.10: fetch, decode and hand over the photo of `icao`. Decode blocks this executor (K9); the UI
 /// keeps its old content meanwhile.
-async fn fetch_photo(stack: Stack<'static>, bufs: &mut Bufs, icao: u32, limiter: &mut RateLimiter, ua: &str) {
-    SHARED.lock().await.photo_skip.insert(icao, (), TTL_PHOTO_ERROR_MS, now_ms());
+async fn fetch_photo(
+    stack: Stack<'static>,
+    bufs: &mut Bufs,
+    icao: u32,
+    limiter: &mut RateLimiter,
+    ua: &str,
+) {
+    SHARED
+        .lock()
+        .await
+        .photo_skip
+        .insert(icao, (), TTL_PHOTO_ERROR_MS, now_ms());
     info!("meta: req icao={icao:06X} kind=photo t_ms={}", now_ms());
     tls::MIN_INTERNAL_FREE.store(usize::MAX, Relaxed);
     match photo_flow(stack, bufs, icao, limiter, ua).await {
         Ok((photographer, photo)) => {
             limiter.success();
-            SHARED.lock().await.ready = Some(Ready { icao, photographer, photo });
+            SHARED.lock().await.ready = Some(Ready {
+                icao,
+                photographer,
+                photo,
+            });
         }
         Err(PhotoEnd::None) => {
             info!("photo: none icao={icao:06X}");
-            SHARED.lock().await.photo_skip.insert(icao, (), TTL_NEGATIVE_MS, now_ms());
+            SHARED
+                .lock()
+                .await
+                .photo_skip
+                .insert(icao, (), TTL_NEGATIVE_MS, now_ms());
         }
         Err(PhotoEnd::TooBig) => {
             info!("photo: too big icao={icao:06X}");
-            SHARED.lock().await.photo_skip.insert(icao, (), TTL_NEGATIVE_MS, now_ms());
+            SHARED
+                .lock()
+                .await
+                .photo_skip
+                .insert(icao, (), TTL_NEGATIVE_MS, now_ms());
         }
         Err(PhotoEnd::Err(e)) => {
             info!("photo: error icao={icao:06X} {e}");
@@ -343,5 +409,9 @@ async fn fetch_photo(stack: Stack<'static>, bufs: &mut Bufs, icao: u32, limiter:
             }
         }
     }
-    info!("photo: heap internal_min={} internal_free={}", tls::MIN_INTERNAL_FREE.load(Relaxed), tls::internal_free());
+    info!(
+        "photo: heap internal_min={} internal_free={}",
+        tls::MIN_INTERNAL_FREE.load(Relaxed),
+        tls::internal_free()
+    );
 }

@@ -32,7 +32,11 @@ fn pinned_root(host: &str) -> Option<&'static [u8]> {
         "api.planespotters.net" => (GLOBALSIGN_ROOT_CA, ISRG_ROOT_X1),
         _ => return None,
     };
-    Some(if cfg!(feature = "tls-wrong-ca") { wrong } else { right })
+    Some(if cfg!(feature = "tls-wrong-ca") {
+        wrong
+    } else {
+        right
+    })
 }
 
 // Wall clock for certificate validity: unix seconds minus uptime seconds at the last SNTP sync.
@@ -53,7 +57,10 @@ pub fn set_unix_time(unix_s: u64) -> bool {
     if unix_s < BUILD_UNIX {
         return false;
     }
-    UNIX_AT_BOOT.store(unix_s.saturating_sub(Instant::now().as_secs()) as u32, Relaxed);
+    UNIX_AT_BOOT.store(
+        unix_s.saturating_sub(Instant::now().as_secs()) as u32,
+        Relaxed,
+    );
     true
 }
 
@@ -78,7 +85,8 @@ impl TlsClock for WallClock {
 fn seeded_rng() -> ChaCha8Rng {
     let rng = esp_hal::rng::Rng::new();
     let mut seed = [0u8; 32];
-    seed.chunks_mut(4).for_each(|c| c.copy_from_slice(&rng.random().to_le_bytes()));
+    seed.chunks_mut(4)
+        .for_each(|c| c.copy_from_slice(&rng.random().to_le_bytes()));
     ChaCha8Rng::from_seed(seed)
 }
 
@@ -176,7 +184,11 @@ impl Bufs {
 }
 
 pub async fn resolve(stack: Stack<'_>, host: &str) -> Option<IpAddress> {
-    let found = with_timeout(Duration::from_secs(5), stack.dns_query(host, DnsQueryType::A)).await;
+    let found = with_timeout(
+        Duration::from_secs(5),
+        stack.dns_query(host, DnsQueryType::A),
+    )
+    .await;
     found.ok()?.ok()?.first().copied()
 }
 
@@ -191,10 +203,19 @@ pub struct Conn<'a> {
 }
 
 impl<'a> Conn<'a> {
-    pub async fn open(stack: Stack<'a>, host: &'static str, bufs: &'a mut Bufs) -> Result<Conn<'a>, Error> {
+    pub async fn open(
+        stack: Stack<'a>,
+        host: &'static str,
+        bufs: &'a mut Bufs,
+    ) -> Result<Conn<'a>, Error> {
         let root = pinned_root(host).ok_or(Error::Connect)?;
         let ip = resolve(stack, host).await.ok_or(Error::Dns)?;
-        let Bufs { tcp_rx, tcp_tx, read, write } = bufs;
+        let Bufs {
+            tcp_rx,
+            tcp_tx,
+            read,
+            write,
+        } = bufs;
         let mut socket = TcpSocket::new(stack, tcp_rx, tcp_tx);
         match with_timeout(CONNECT_TIMEOUT, socket.connect((ip, 443))).await {
             Ok(Ok(())) => {}
@@ -210,13 +231,24 @@ impl<'a> Conn<'a> {
                 OpenError::NoServerAuth => Error::NoServerAuth,
             })?;
         sample_heap();
-        Ok(Conn { conn, host, handshake_ms: t0.elapsed().as_millis(), requests: 0, last_used: Instant::now() })
+        Ok(Conn {
+            conn,
+            host,
+            handshake_ms: t0.elapsed().as_millis(),
+            requests: 0,
+            last_used: Instant::now(),
+        })
     }
 
     /// `GET <path>` on this connection. The reply ends by Content-Length, by the last chunk, or
     /// (neither given) by the server closing, which makes the connection not reusable. A body over
     /// `max_body` ends the read and the reply is incomplete.
-    pub async fn get(&mut self, path: &str, user_agent: &str, max_body: usize) -> Result<Reply, Error> {
+    pub async fn get(
+        &mut self,
+        path: &str,
+        user_agent: &str,
+        max_body: usize,
+    ) -> Result<Reply, Error> {
         let reused = self.requests > 0;
         self.requests += 1;
         let host = self.host;
@@ -226,7 +258,10 @@ impl<'a> Conn<'a> {
         // After a failure on a reused connection nothing tells a stale connection from a dead network
         // until a whole reply is missing: `Stale` lets the caller retry on a fresh one.
         let fail = |e| if reused { Error::Stale } else { e };
-        self.conn.write_all(request.as_bytes()).await.map_err(|_| fail(Error::Http))?;
+        self.conn
+            .write_all(request.as_bytes())
+            .await
+            .map_err(|_| fail(Error::Http))?;
         self.conn.flush().await.map_err(|_| fail(Error::Http))?;
 
         let mut data: Vec<u8> = Vec::new();
@@ -269,13 +304,19 @@ impl<'a> Conn<'a> {
         let head = head.ok_or_else(|| fail(Error::Http))?;
         let rest = &data[head.body_start..];
         Ok(match wire::body(&head, rest) {
-            wire::Body::Done { body, exact } => {
-                Reply { status: head.status, body, complete: true, reusable: exact && !closed && !head.close }
-            }
+            wire::Body::Done { body, exact } => Reply {
+                status: head.status,
+                body,
+                complete: true,
+                reusable: exact && !closed && !head.close,
+            },
             // Ended by close (no length) or cut short: the caller must not trust the body.
-            wire::Body::Incomplete => {
-                Reply { status: head.status, body: rest.to_vec(), complete: !head.chunked && head.content_length.is_none() && closed, reusable: false }
-            }
+            wire::Body::Incomplete => Reply {
+                status: head.status,
+                body: rest.to_vec(),
+                complete: !head.chunked && head.content_length.is_none() && closed,
+                reusable: false,
+            },
         })
     }
 

@@ -12,7 +12,9 @@ use embassy_net::udp::{PacketMetadata, UdpSocket};
 use embassy_net::{Config, Runner, Stack, StackResources};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_radio::wifi::sta::StationConfig;
-use esp_radio::wifi::{AuthenticationMethodConfig, Config as WifiConfig, Interface, WifiController};
+use esp_radio::wifi::{
+    AuthenticationMethodConfig, Config as WifiConfig, Interface, WifiController,
+};
 use log::{info, warn};
 
 use adsb_core::wire;
@@ -85,7 +87,10 @@ async fn wifi_task(mut controller: WifiController<'static>) {
                 }
             }
             Err(e) => {
-                warn!("wifi: connect failed ({e:?}), retry in {} s", backoff.as_secs());
+                warn!(
+                    "wifi: connect failed ({e:?}), retry in {} s",
+                    backoff.as_secs()
+                );
                 Timer::after(backoff).await;
                 backoff = (backoff * 2).min(BACKOFF_MAX);
             }
@@ -126,7 +131,10 @@ async fn sntp_task(stack: Stack<'static>) {
         let t0 = Instant::now();
         match sntp_once(stack).await {
             Some(unix) if !tls::set_unix_time(unix) => {
-                warn!("sntp: time before the firmware build, ignored, retry in {} s", backoff.as_secs());
+                warn!(
+                    "sntp: time before the firmware build, ignored, retry in {} s",
+                    backoff.as_secs()
+                );
                 Timer::after(backoff).await;
                 backoff = (backoff * 2).min(BACKOFF_MAX);
             }
@@ -154,11 +162,19 @@ async fn sntp_once(stack: Stack<'static>) -> Option<u64> {
     let (mut rx, mut tx) = ([0u8; 64], [0u8; 64]);
     let mut socket = UdpSocket::new(stack, &mut rx_meta, &mut rx, &mut tx_meta, &mut tx);
     socket.bind(0).ok()?;
-    socket.send_to(&wire::SNTP_REQUEST, (server, 123)).await.ok()?;
+    socket
+        .send_to(&wire::SNTP_REQUEST, (server, 123))
+        .await
+        .ok()?;
     let mut reply = [0u8; 64];
-    let (n, from) = with_timeout(Duration::from_secs(3), socket.recv_from(&mut reply)).await.ok()?.ok()?;
+    let (n, from) = with_timeout(Duration::from_secs(3), socket.recv_from(&mut reply))
+        .await
+        .ok()?
+        .ok()?;
     // Only the server we asked may answer.
-    (from.endpoint.addr == server).then(|| wire::parse_sntp(&reply[..n])).flatten()
+    (from.endpoint.addr == server)
+        .then(|| wire::parse_sntp(&reply[..n]))
+        .flatten()
 }
 
 #[embassy_executor::task]
@@ -187,7 +203,11 @@ async fn feed_task(stack: Stack<'static>, pipeline: &'static Pipeline) {
                 ui::FEED_OK.store(false, Relaxed);
                 warn!("feed: lost ({why})");
                 // Data must have kept arriving for STABLE, else the pause keeps growing.
-                if stats.last_read.checked_duration_since(up).is_some_and(|d| d >= STABLE) {
+                if stats
+                    .last_read
+                    .checked_duration_since(up)
+                    .is_some_and(|d| d >= STABLE)
+                {
                     backoff = BACKOFF_MIN;
                 }
             }
@@ -214,7 +234,10 @@ async fn pump(
             Ok(Err(_)) => return "read error",
             Ok(Ok(n)) => {
                 stats.note_read();
-                pipeline.lock().await.feed(&chunk[..n], Instant::now().as_millis());
+                pipeline
+                    .lock()
+                    .await
+                    .feed(&chunk[..n], Instant::now().as_millis());
                 stats.log_if_due(pipeline).await;
             }
         }
@@ -233,7 +256,14 @@ struct Stats {
 
 impl Stats {
     fn new() -> Self {
-        Self { last: Instant::now(), accepted: 0, undecoded: 0, reconnects: 0, last_read: Instant::now(), max_gap_ms: 0 }
+        Self {
+            last: Instant::now(),
+            accepted: 0,
+            undecoded: 0,
+            reconnects: 0,
+            last_read: Instant::now(),
+            max_gap_ms: 0,
+        }
     }
 
     fn note_read(&mut self) {
@@ -257,6 +287,7 @@ impl Stats {
             self.max_gap_ms,
         );
         self.max_gap_ms = 0;
-        (self.accepted, self.undecoded, self.last) = (c.source.accepted, c.undecoded, Instant::now());
+        (self.accepted, self.undecoded, self.last) =
+            (c.source.accepted, c.undecoded, Instant::now());
     }
 }

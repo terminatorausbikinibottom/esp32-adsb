@@ -119,7 +119,9 @@ pub async fn open_verified<S: Read + Write, C: TlsClock>(
             seen: &seen,
         },
     };
-    conn.open(TlsContext::new(&config, provider)).await.map_err(OpenError::Tls)?;
+    conn.open(TlsContext::new(&config, provider))
+        .await
+        .map_err(OpenError::Tls)?;
     if seen.cert.get() && seen.signature.get() {
         Ok(())
     } else {

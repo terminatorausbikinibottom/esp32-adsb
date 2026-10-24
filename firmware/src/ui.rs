@@ -133,10 +133,23 @@ impl FbUi {
             let ui = self.app.ui();
             match focus {
                 Some(a) => match a.callsign.as_ref() {
-                    Some(cs) => info!("radar: range={} blips={} focus={cs}", ui.range_km, ui.blips.len()),
-                    None => info!("radar: range={} blips={} focus={:06X}", ui.range_km, ui.blips.len(), a.icao),
+                    Some(cs) => info!(
+                        "radar: range={} blips={} focus={cs}",
+                        ui.range_km,
+                        ui.blips.len()
+                    ),
+                    None => info!(
+                        "radar: range={} blips={} focus={:06X}",
+                        ui.range_km,
+                        ui.blips.len(),
+                        a.icao
+                    ),
                 },
-                None => info!("radar: range={} blips={} focus=none", ui.range_km, ui.blips.len()),
+                None => info!(
+                    "radar: range={} blips={} focus=none",
+                    ui.range_km,
+                    ui.blips.len()
+                ),
             }
         }
         if DEMO {
@@ -195,7 +208,11 @@ pub async fn tick(ui: &mut FbUi, pipeline: &Pipeline) -> bool {
     let st = status();
     let snap = pipeline.lock().await.snapshot(st.now_ms, st.radius_km);
     // The demo scenario has no network; real builds show what `meta_task` found.
-    let meta = if DEMO { None } else { Some(crate::lookup::publish(&mut ui.policy, &mut ui.photos, &snap, st.now_ms).await) };
+    let meta = if DEMO {
+        None
+    } else {
+        Some(crate::lookup::publish(&mut ui.policy, &mut ui.photos, &snap, st.now_ms).await)
+    };
     ui.update(&snap, &st, meta.as_ref())
 }
 

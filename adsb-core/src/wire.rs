@@ -26,7 +26,11 @@ pub fn parse_sntp(reply: &[u8]) -> Option<u64> {
         return None; // unsynchronised server
     }
     // The 32-bit NTP seconds wrap in 2036; treat small values as the next era.
-    let unix = if ntp >= NTP_TO_UNIX_S { ntp - NTP_TO_UNIX_S } else { ntp + (1 << 32) - NTP_TO_UNIX_S };
+    let unix = if ntp >= NTP_TO_UNIX_S {
+        ntp - NTP_TO_UNIX_S
+    } else {
+        ntp + (1 << 32) - NTP_TO_UNIX_S
+    };
     (unix >= MIN_UNIX_S).then_some(unix)
 }
 
@@ -66,7 +70,11 @@ pub fn parse_head(buf: &[u8]) -> Option<Head> {
     let head = core::str::from_utf8(&buf[..end]).ok()?;
     let mut lines = head.split("\r\n");
     let status_line = lines.next()?;
-    let status = status_line.strip_prefix("HTTP/1.")?.get(2..5)?.parse().ok()?;
+    let status = status_line
+        .strip_prefix("HTTP/1.")?
+        .get(2..5)?
+        .parse()
+        .ok()?;
     let (mut chunked, mut content_length, mut close, mut bad_framing) = (false, None, false, false);
     for (k, v) in lines.filter_map(|l| l.split_once(':')) {
         let (k, v) = (k.trim(), v.trim().to_ascii_lowercase());
@@ -81,7 +89,14 @@ pub fn parse_head(buf: &[u8]) -> Option<Head> {
         }
     }
     bad_framing |= chunked && content_length.is_some();
-    Some(Head { status, body_start: end + 4, chunked, content_length, close, bad_framing })
+    Some(Head {
+        status,
+        body_start: end + 4,
+        chunked,
+        content_length,
+        close,
+        bad_framing,
+    })
 }
 
 /// Decodes a chunked body. The flag is false when the input ends before the last chunk
@@ -134,7 +149,9 @@ pub enum Body {
 /// Cuts the body from `rest` (the bytes after the head) by Content-Length or chunking.
 pub fn body(head: &Head, rest: &[u8]) -> Body {
     if head.chunked {
-        let (body, Some(end)) = dechunk_to(rest) else { return Body::Incomplete };
+        let (body, Some(end)) = dechunk_to(rest) else {
+            return Body::Incomplete;
+        };
         // The empty line after the last chunk (we do not read trailers).
         return match &rest[end..] {
             [] | [b'\r'] => Body::Incomplete,
@@ -143,7 +160,10 @@ pub fn body(head: &Head, rest: &[u8]) -> Body {
         };
     }
     match head.content_length {
-        Some(n) if rest.len() >= n => Body::Done { body: rest[..n].to_vec(), exact: rest.len() == n },
+        Some(n) if rest.len() >= n => Body::Done {
+            body: rest[..n].to_vec(),
+            exact: rest.len() == n,
+        },
         _ => Body::Incomplete,
     }
 }
@@ -169,7 +189,11 @@ mod tests {
         assert_eq!(parse_sntp(&reply(3, 2, ntp)), None, "client mode");
         assert_eq!(parse_sntp(&reply(4, 0, ntp)), None, "kiss-o'-death");
         assert_eq!(parse_sntp(&reply(4, 2, 0)), None, "zero time");
-        assert_eq!(parse_sntp(&reply(4, 2, (NTP_TO_UNIX_S + 1_000) as u32)), None, "1970");
+        assert_eq!(
+            parse_sntp(&reply(4, 2, (NTP_TO_UNIX_S + 1_000) as u32)),
+            None,
+            "1970"
+        );
         assert_eq!(parse_sntp(&[0x24; 47]), None, "short");
     }
 
@@ -191,22 +215,38 @@ mod tests {
 
     #[test]
     fn head_status_and_chunked() {
-        let h = parse_head(b"HTTP/1.1 206 Partial\r\nContent-Length: 4\r\nTransfer-Encoding: Chunked\r\n\r\nabcd").unwrap();
+        let h = parse_head(
+            b"HTTP/1.1 206 Partial\r\nContent-Length: 4\r\nTransfer-Encoding: Chunked\r\n\r\nabcd",
+        )
+        .unwrap();
         assert_eq!((h.status, h.chunked, h.body_start), (206, true, 71));
         let h = parse_head(b"HTTP/1.0 403 Forbidden\r\nServer: x\r\n\r\n").unwrap();
-        assert_eq!((h.status, h.chunked, h.content_length, h.close), (403, false, None, false));
-        let h = parse_head(b"HTTP/1.1 200 OK\r\ncontent-length: 454\r\nConnection: Close\r\n\r\n").unwrap();
+        assert_eq!(
+            (h.status, h.chunked, h.content_length, h.close),
+            (403, false, None, false)
+        );
+        let h = parse_head(b"HTTP/1.1 200 OK\r\ncontent-length: 454\r\nConnection: Close\r\n\r\n")
+            .unwrap();
         assert_eq!((h.content_length, h.close), (Some(454), true));
-        let h = parse_head(b"HTTP/1.1 200 OK\r\nContent-Length: x\r\nConnection: keep-alive\r\n\r\n").unwrap();
+        let h =
+            parse_head(b"HTTP/1.1 200 OK\r\nContent-Length: x\r\nConnection: keep-alive\r\n\r\n")
+                .unwrap();
         assert_eq!((h.content_length, h.close), (None, false));
-        assert_eq!(parse_head(b"HTTP/1.1 200 OK\r\nServer: x\r\n"), None, "incomplete");
+        assert_eq!(
+            parse_head(b"HTTP/1.1 200 OK\r\nServer: x\r\n"),
+            None,
+            "incomplete"
+        );
         assert_eq!(parse_head(b"garbage\r\n\r\n"), None);
         assert_eq!(parse_head(b"HTTP/1.1 2x0 OK\r\n\r\n"), None);
     }
 
     #[test]
     fn chunks() {
-        assert_eq!(dechunk(b"5\r\nhello\r\n6;ext=1\r\n world\r\n0\r\n\r\n"), (b"hello world".to_vec(), true));
+        assert_eq!(
+            dechunk(b"5\r\nhello\r\n6;ext=1\r\n world\r\n0\r\n\r\n"),
+            (b"hello world".to_vec(), true)
+        );
         assert_eq!(dechunk(b"5\r\nhel"), (b"hel".to_vec(), false));
         assert_eq!(dechunk(b"5\r\nhello\r\n"), (b"hello".to_vec(), false));
         assert_eq!(dechunk(b"zz\r\nhello"), (Vec::new(), false));
@@ -216,20 +256,38 @@ mod tests {
     #[test]
     fn framing_conflicts_are_flagged() {
         let bad = |h: &[u8]| parse_head(h).unwrap().bad_framing;
-        assert!(bad(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\n"));
+        assert!(bad(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\n"
+        ));
         assert!(bad(b"HTTP/1.1 200 OK\r\nContent-Length: x\r\n\r\n"));
-        assert!(bad(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\n"));
-        assert!(!bad(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\ncontent-length: 3\r\n\r\n"));
-        assert!(!bad(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"));
+        assert!(bad(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\n"
+        ));
+        assert!(!bad(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\ncontent-length: 3\r\n\r\n"
+        ));
+        assert!(!bad(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+        ));
     }
 
     #[test]
     fn body_framing_is_exact() {
-        let cl = |n| parse_head(alloc::format!("HTTP/1.1 200 OK\r\nContent-Length: {n}\r\n\r\n").as_bytes()).unwrap();
-        let done = |b: &[u8], exact| Body::Done { body: b.to_vec(), exact };
+        let cl = |n| {
+            parse_head(alloc::format!("HTTP/1.1 200 OK\r\nContent-Length: {n}\r\n\r\n").as_bytes())
+                .unwrap()
+        };
+        let done = |b: &[u8], exact| Body::Done {
+            body: b.to_vec(),
+            exact,
+        };
         assert_eq!(body(&cl(3), b"ab"), Body::Incomplete);
         assert_eq!(body(&cl(3), b"abc"), done(b"abc", true));
-        assert_eq!(body(&cl(3), b"abcd"), done(b"abc", false), "extra bytes: cut, not reusable");
+        assert_eq!(
+            body(&cl(3), b"abcd"),
+            done(b"abc", false),
+            "extra bytes: cut, not reusable"
+        );
         let ch = parse_head(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
         assert_eq!(body(&ch, b"3\r\nabc\r\n0\r\n\r\n"), done(b"abc", true));
         assert_eq!(body(&ch, b"3\r\nabc\r\n0\r\n\r\nX"), done(b"abc", false));

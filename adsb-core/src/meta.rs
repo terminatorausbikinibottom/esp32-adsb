@@ -350,7 +350,9 @@ pub enum Kind {
 
 /// `[A-Z0-9]{1,8}`: the only callsigns that are looked up (they go into a URL).
 pub fn valid_callsign(c: &str) -> bool {
-    (1..=8).contains(&c.len()) && c.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    (1..=8).contains(&c.len())
+        && c.bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
 }
 
 impl Kind {
@@ -388,23 +390,44 @@ impl Step {
 /// Interprets the reply body (status 200 or 404) of a `kind` query. `Err`: unusable body.
 pub fn adsbdb_step(kind: Kind, body: &[u8]) -> Result<Step, MetaError> {
     Ok(match (parse_adsbdb(body), kind) {
-        (Ok((a, r)), Kind::Combined) => Step { aircraft: Some(a), route: Some(r) },
-        (Ok((a, _)), Kind::Aircraft) => Step { aircraft: Some(a), ..Step::default() },
-        (Ok((_, r)), Kind::Route) => Step { route: Some(r), ..Step::default() },
+        (Ok((a, r)), Kind::Combined) => Step {
+            aircraft: Some(a),
+            route: Some(r),
+        },
+        (Ok((a, _)), Kind::Aircraft) => Step {
+            aircraft: Some(a),
+            ..Step::default()
+        },
+        (Ok((_, r)), Kind::Route) => Step {
+            route: Some(r),
+            ..Step::default()
+        },
         (Err(MetaError::NotFound), Kind::Combined) => {
             // Which half is unknown? The reply text says (verified live, RD.7).
             let has = |t: &[u8]| body.windows(t.len()).any(|w| w == t);
             // The half that is not named is asked for next: `TextCache::needs` still misses it.
             if has(b"unknown callsign") {
-                Step { route: Some(None), ..Step::default() }
+                Step {
+                    route: Some(None),
+                    ..Step::default()
+                }
             } else if has(b"unknown aircraft") {
-                Step { aircraft: Some(None), ..Step::default() }
+                Step {
+                    aircraft: Some(None),
+                    ..Step::default()
+                }
             } else {
                 Step::unknown(kind)
             }
         }
-        (Err(MetaError::NotFound), Kind::Aircraft) => Step { aircraft: Some(None), ..Step::default() },
-        (Err(MetaError::NotFound), Kind::Route) => Step { route: Some(None), ..Step::default() },
+        (Err(MetaError::NotFound), Kind::Aircraft) => Step {
+            aircraft: Some(None),
+            ..Step::default()
+        },
+        (Err(MetaError::NotFound), Kind::Route) => Step {
+            route: Some(None),
+            ..Step::default()
+        },
         (Err(e), _) => return Err(e),
     })
 }
@@ -424,13 +447,19 @@ impl Default for TextCache {
 
 impl TextCache {
     pub const fn new() -> Self {
-        Self { aircraft: Lru::new(TEXT_CACHE_ENTRIES), route: Lru::new(TEXT_CACHE_ENTRIES) }
+        Self {
+            aircraft: Lru::new(TEXT_CACHE_ENTRIES),
+            route: Lru::new(TEXT_CACHE_ENTRIES),
+        }
     }
 
     /// The query still needed for `want`, `None` when everything is cached (positive or negative).
     pub fn needs(&mut self, want: &Want, now_ms: u64) -> Option<Kind> {
         let ac = self.aircraft.get(&want.icao, now_ms).is_none();
-        let route = want.callsign.as_ref().is_some_and(|c| self.route.get(c, now_ms).is_none());
+        let route = want
+            .callsign
+            .as_ref()
+            .is_some_and(|c| self.route.get(c, now_ms).is_none());
         match (ac, route) {
             (true, true) => Some(Kind::Combined),
             (true, false) => Some(Kind::Aircraft),
@@ -442,17 +471,26 @@ impl TextCache {
     pub fn apply(&mut self, want: &Want, step: Step, now_ms: u64) {
         let ttl = |known: bool, ttl| if known { ttl } else { TTL_NEGATIVE_MS };
         if let Some(a) = step.aircraft {
-            self.aircraft.insert(want.icao, a.clone(), ttl(a.is_some(), TTL_AIRCRAFT_MS), now_ms);
+            self.aircraft.insert(
+                want.icao,
+                a.clone(),
+                ttl(a.is_some(), TTL_AIRCRAFT_MS),
+                now_ms,
+            );
         }
         if let (Some(r), Some(cs)) = (step.route, want.callsign.clone()) {
-            self.route.insert(cs, r.clone(), ttl(r.is_some(), TTL_ROUTE_MS), now_ms);
+            self.route
+                .insert(cs, r.clone(), ttl(r.is_some(), TTL_ROUTE_MS), now_ms);
         }
     }
 
     /// The panel text for `want` (empty fields where nothing is known yet).
     pub fn focus_meta(&mut self, want: &Want, now_ms: u64) -> FocusMeta {
         let a = self.aircraft.get(&want.icao, now_ms).cloned().flatten();
-        let r = want.callsign.as_ref().and_then(|c| self.route.get(c, now_ms).cloned().flatten());
+        let r = want
+            .callsign
+            .as_ref()
+            .and_then(|c| self.route.get(c, now_ms).cloned().flatten());
         FocusMeta::from_parts(a.as_ref(), r.as_ref())
     }
 }
@@ -610,8 +648,14 @@ mod tests {
 
     #[test]
     fn photo_path_is_safe() {
-        let r = |src: &str| PhotoRef { src: src.into(), photographer: String::new() };
-        assert_eq!(r("https://t.plnspttrs.net/00/1_280.jpg").path(), Some("/00/1_280.jpg"));
+        let r = |src: &str| PhotoRef {
+            src: src.into(),
+            photographer: String::new(),
+        };
+        assert_eq!(
+            r("https://t.plnspttrs.net/00/1_280.jpg").path(),
+            Some("/00/1_280.jpg")
+        );
         assert_eq!(r("https://t.plnspttrs.net/a b").path(), None);
         assert_eq!(r("https://t.plnspttrs.net/a\r\nX: y").path(), None);
         assert_eq!(r("https://t.plnspttrs.net/").path(), None);
@@ -741,10 +785,27 @@ mod tests {
 
     #[test]
     fn kind_paths_validate_the_callsign() {
-        assert_eq!(Kind::Combined.path(0x3C6444, Some("KLM1023")).as_deref(), Some("/v0/aircraft/3C6444?callsign=KLM1023"));
-        assert_eq!(Kind::Aircraft.path(0xABC, Some("bad cs")).as_deref(), Some("/v0/aircraft/000ABC"));
-        assert_eq!(Kind::Route.path(1, Some("KLM1023")).as_deref(), Some("/v0/callsign/KLM1023"));
-        for bad in [None, Some(""), Some("klm1"), Some("A B"), Some("A?B"), Some("A/../B"), Some("TOOLONG99")] {
+        assert_eq!(
+            Kind::Combined.path(0x3C6444, Some("KLM1023")).as_deref(),
+            Some("/v0/aircraft/3C6444?callsign=KLM1023")
+        );
+        assert_eq!(
+            Kind::Aircraft.path(0xABC, Some("bad cs")).as_deref(),
+            Some("/v0/aircraft/000ABC")
+        );
+        assert_eq!(
+            Kind::Route.path(1, Some("KLM1023")).as_deref(),
+            Some("/v0/callsign/KLM1023")
+        );
+        for bad in [
+            None,
+            Some(""),
+            Some("klm1"),
+            Some("A B"),
+            Some("A?B"),
+            Some("A/../B"),
+            Some("TOOLONG99"),
+        ] {
             assert_eq!(Kind::Combined.path(1, bad), None, "{bad:?}");
             assert_eq!(Kind::Route.path(1, bad), None, "{bad:?}");
         }
@@ -768,14 +829,32 @@ mod tests {
         assert_eq!((s.aircraft, s.route), (Some(None), None));
         let s = adsbdb_step(Kind::Route, CALLSIGN_ONLY.as_bytes()).unwrap();
         assert!(s.aircraft.is_none() && s.route.flatten().is_some());
-        assert_eq!(adsbdb_step(Kind::Route, b"<html>"), Err(MetaError::Malformed));
-        assert_eq!(Step::unknown(Kind::Aircraft), Step { aircraft: Some(None), route: None });
-        assert_eq!(Step::unknown(Kind::Combined), Step { aircraft: Some(None), route: Some(None) });
+        assert_eq!(
+            adsbdb_step(Kind::Route, b"<html>"),
+            Err(MetaError::Malformed)
+        );
+        assert_eq!(
+            Step::unknown(Kind::Aircraft),
+            Step {
+                aircraft: Some(None),
+                route: None
+            }
+        );
+        assert_eq!(
+            Step::unknown(Kind::Combined),
+            Step {
+                aircraft: Some(None),
+                route: Some(None)
+            }
+        );
     }
 
     #[test]
     fn text_cache_asks_only_for_what_is_missing() {
-        let want = Want { icao: 7, callsign: Some(HString::try_from("ZQJ123").unwrap()) };
+        let want = Want {
+            icao: 7,
+            callsign: Some(HString::try_from("ZQJ123").unwrap()),
+        };
         let mut c = TextCache::default();
         assert_eq!(c.needs(&want, 0), Some(Kind::Combined));
         // The unknown-callsign path of the live API: two requests, then everything is cached.
@@ -785,13 +864,26 @@ mod tests {
         let s = adsbdb_step(Kind::Aircraft, AIRCRAFT_ONLY.as_bytes()).unwrap();
         c.apply(&want, s, 1);
         assert_eq!(c.needs(&want, 2), None);
-        assert_eq!(c.focus_meta(&want, 2).model.as_deref(), Some("Testliner 100"));
+        assert_eq!(
+            c.focus_meta(&want, 2).model.as_deref(),
+            Some("Testliner 100")
+        );
         // The negative route expires after an hour, the aircraft stays.
         assert_eq!(c.needs(&want, TTL_NEGATIVE_MS + 1), Some(Kind::Route));
         // Without a callsign only the aircraft counts.
-        let bare = Want { icao: 8, callsign: None };
+        let bare = Want {
+            icao: 8,
+            callsign: None,
+        };
         assert_eq!(c.needs(&bare, 0), Some(Kind::Aircraft));
-        c.apply(&bare, Step { aircraft: Some(None), ..Step::default() }, 0);
+        c.apply(
+            &bare,
+            Step {
+                aircraft: Some(None),
+                ..Step::default()
+            },
+            0,
+        );
         assert_eq!(c.needs(&bare, 1), None);
         assert_eq!(c.focus_meta(&bare, 1), FocusMeta::default());
     }

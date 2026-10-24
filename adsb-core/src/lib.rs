@@ -17,8 +17,8 @@ pub mod pipeline;
 pub mod radar;
 #[cfg(feature = "scenario")]
 pub mod scenario;
-pub mod tracker;
 #[cfg(feature = "tls")]
 pub mod tlsauth;
-pub mod x509;
+pub mod tracker;
 pub mod wire;
+pub mod x509;

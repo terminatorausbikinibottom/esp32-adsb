@@ -96,7 +96,10 @@ pub fn generate(get: impl Fn(&str) -> Option<String>) -> Result<String, String> 
             format!("Some({c:?})")
         }
         Some(_) => {
-            return Err("ADSB_HTTP_CONTACT must be 1 to 120 printable ASCII characters without white space".into());
+            return Err(
+                "ADSB_HTTP_CONTACT must be 1 to 120 printable ASCII characters without white space"
+                    .into(),
+            );
         }
     };
     let host = host.map_or("None".to_string(), |h| format!("Some({h:?})"));
@@ -158,7 +161,13 @@ mod tests {
 
     #[test]
     fn missing_var_is_named() {
-        for n in ["WIFI_SSID", "WIFI_KEY", "ADSB_FEED_HOST", "ADSB_RX_LAT", "ADSB_RX_LON"] {
+        for n in [
+            "WIFI_SSID",
+            "WIFI_KEY",
+            "ADSB_FEED_HOST",
+            "ADSB_RX_LAT",
+            "ADSB_RX_LON",
+        ] {
             assert!(run(&without(n)).unwrap_err().starts_with(n), "{n}");
         }
         assert!(generate(|_| None).unwrap_err().starts_with("WIFI_SSID"));
@@ -229,7 +238,11 @@ mod tests {
 
     #[test]
     fn http_contact_is_optional_and_escaped() {
-        assert!(run(&base()).unwrap().contains("HTTP_CONTACT: Option<&str> = None;"));
+        assert!(
+            run(&base())
+                .unwrap()
+                .contains("HTTP_CONTACT: Option<&str> = None;")
+        );
         let out = run(&with("ADSB_HTTP_CONTACT", "mailto:me@example.invalid")).unwrap();
         assert!(out.contains(r#"HTTP_CONTACT: Option<&str> = Some("mailto:me@example.invalid");"#));
         let out = run(&with("ADSB_HTTP_CONTACT", "https://x.invalid/\"q")).unwrap();

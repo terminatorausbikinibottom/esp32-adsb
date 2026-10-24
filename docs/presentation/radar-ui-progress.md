@@ -11,6 +11,11 @@ style: |
   section.dense table { font-size: 18px; }
   h1, h2 { color: #0b6e99; }
   .time { color: #888; font-size: 0.8em; }
+  /* Split background images (![bg right]): keep them inside the slide with a margin. */
+  /* !important: Marp's own figure rule is more specific and sets margin: 0. */
+  section[data-marpit-advanced-background="background"] figure {
+    margin: 40px 50px 40px 10px !important;
+  }
 ---
 
 <!-- _class: lead -->

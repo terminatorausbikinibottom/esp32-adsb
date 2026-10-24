@@ -2,7 +2,9 @@
 
 Status: **revision 1, pre-approved by the user for unattended execution** (overnight), on the
 condition that the work stays in the scope of this doc. Date: 2026-10-23. Branch:
-`feature/radar-ui` (base: `feature/adsb-display`).
+`feature/radar-ui` (base: `feature/adsb-display`). **Revision 3 (2026-10-24)** adds RD.14 (radar
+pixel aspect) and RD.15 (touch selection), ADR-004 and risks K15–K24. Revision 3 is **not**
+pre-approved: the user reviews it before RD.14/RD.15 start.
 
 Parent design: [adsb-display.md](adsb-display.md), revision 3 ("the parent"). Bench:
 [board-bench.md](board-bench.md) and `.claude/skills/board-verify/SKILL.md`.
@@ -15,7 +17,10 @@ Conventions (same as the parent):
   **[code+hw]** = code plus an on-board verify through the bench (flash, serial log, webcam
   photo); **[hw]** = bench run only, no new code.
 - Parent step IDs (for example 3.2, 4.1, 5.2) are used as references. The steps of this doc have
-  the IDs **RD.0–RD.13**. Risks of this doc have the IDs **K1–K14** (the parent uses R1–R26).
+  the IDs **RD.0–RD.13**, plus **RD.14.1–RD.14.4** and **RD.15.1–RD.15.7** (revision 3). Risks of
+  this doc have the IDs **K1–K24** (the parent uses R1–R26).
+- **[user]** (revision 3) marks a check that needs the user's hands or eyes at the board (the
+  bench cannot touch the screen or hold a ruler).
 
 ---
 
@@ -31,7 +36,9 @@ All items are resolved. They are recorded here so that the plan can run without 
 | RD-D4 | **Radar (left side)** | North-up. Receiver at the centre. Auto range in steps of **10 / 25 / 50 / 100 km**, so that about the nearest 10 aircraft fit. Range rings with labels. Each aircraft is a symbol turned to its track, with a label (callsign, or ICAO24 if there is no callsign). The closest aircraft is highlighted. |
 | RD-D5 | **Info panel (right side)** | Shows the **closest aircraft by ground distance**: photo, callsign, airline, make/model/type, registration, origin → destination (IATA + city), altitude, ground speed, track, distance/bearing, photo credit. "—" when a value is unknown. |
 | RD-D6 | **Status bar** | Keep it: WiFi state, feed state, aircraft count, msgs/s (and the clock). |
-| RD-D7 | **Scope** | Reuse parent steps 3.1–3.4, 4.1, 5.1–5.3. **Replace** the parent overhead-card main screen (4.3) with this layout. Touch (1.6, 4.4), list view and detail view (4.5) are **out of scope**. |
+| RD-D7 | **Scope** | Reuse parent steps 3.1–3.4, 4.1, 5.1–5.3. **Replace** the parent overhead-card main screen (4.3) with this layout. Touch (1.6, 4.4), list view and detail view (4.5) are **out of scope**. *(Revision 3: changed by RD-D8. Touch selection on the radar is in scope; list view, detail view and the rest of parent 4.4 stay out.)* |
+| RD-D8 | **Touch selection** (user request, 2026-10-24) | Default selected aircraft = the closest (focus rule, ADR-003 decision 7). A tap on another aircraft on the radar overrides the selection; the info panel shows it, and the text/photo lookups follow it. The override ends when the selected aircraft leaves the radar scope (then the closest is selected again) or after a timeout set at build time (`ADSB_SELECT_TIMEOUT_S`). Default value and the details (tap on empty radar, tap on the panel, feedback) are architect choices in ADR-004; the user can change them in review. |
+| RD-D9 | **Radar aspect** (user feedback, 2026-10-24) | The radar looks elliptic on the panel. Correct it in the radar geometry (rings, blips, labels, hit-testing), not in the scanout. |
 
 ---
 
@@ -80,6 +87,50 @@ the plan.
 - `sim-bridge`: loopback-only axum server (`/ws/live`, `/local/config.json`, `/local/capture`)
   with Host/Origin guard.
 
+### Context for revision 3 (RD.14, RD.15; 2026-10-24)
+
+RD.2–RD.10 are done on the board, and K4 is fixed at PCLK 12 MHz (9af2c78; QA PASS, user saw no
+flicker). The user now sees two things on the real panel:
+
+1. **The radar is elliptic** (wider than tall). The sim PNG is round. Hypothesis: the panel pixels
+   are not square.
+2. **The user wants to select an aircraft with a finger** (RD-D8). The board has a GT911 touch
+   controller; parent step 1.6 (GT911 driver) was never done.
+
+Facts from the code for this revision (head c804300):
+
+- `adsb-core::radar::project` maps ground distance and bearing to radar-box pixels with one scale
+  `k = RING_PX / range` for x and y (square-pixel assumption). `RANGE_STEPS_KM`, `MAX_BLIPS = 48`,
+  `LABELLED = 12`, `SPRITE_PX = 20`. `Blip` has `x, y, sprite, label, focus, dim, flag` (no ICAO).
+- `adsb-app/ui/app.slint` draws the rings as `Rectangle`s with `border-radius` (component `Ring`,
+  centre (224, 224) in the 448×448 box), the focus mark as a 30×30 round `Rectangle`, labels as
+  `Text` 88 px wide at `x + 13` (or `x − 100` right-aligned when `x > 340`), `y − 8`.
+- **Slint software renderer limits (verified in the vendored 1.18.1 source):** `Path` drawing is
+  a no-op in line-by-line mode ("Path rendering is not supported in line-by-line mode",
+  `vendor/i-slint-renderer-software/lib.rs` around line 2173), and `supports_transformations()`
+  returns `false` (line 1266). We render with `render_by_line`. So an ellipse cannot come from a
+  Slint `Path` or a scale transform. A `Rectangle` with `width ≠ height` and `border-radius` gives a
+  stadium shape, not an ellipse.
+- `App` owns the radar `RangeState` and calls `radar::select_range` in `update`. `App::pointer`
+  already maps a `PointerEvent` (logical px, top-left origin) to Slint window events; nothing in
+  the UI handles them today. The sim maps mouse events to `PointerEvent` (`sim/src/web.rs`, canvas
+  CSS-scaled, mapping by the bounding rect).
+- `firmware/src/ui.rs` `tick`: `pipeline.snapshot()` → `lookup::publish(policy, snap)` (lookup
+  plan from `snap.focus`) → `App::update(snap, meta)`. So the lookups and the panel both follow
+  `snap.focus`. `ui_task` ticks at 1 Hz.
+- `adsb-core::tracker` keeps the focus hysteresis (`AircraftTable.focus`, switch only if > 20 %
+  and > 300 m closer). `FeedPipeline::snapshot` = `age` + `table.snapshot`.
+- `adsb-core::meta::Policy`: focus + 2 prefetch, photo only after the focus is stable for
+  `PHOTO_DWELL_MS` = 3 s.
+- `firmware/src/ch422g.rs`: `Ch422g` **owns** the async `I2c` (400 kHz, 50 ms software timeout).
+  `TP_RST` = EXIO1. After boot only `main` uses it (backlight on). `main.rs` does not reset the
+  GT911 and does not touch GPIO4; the comment says "touch_task will take over the bus (and the
+  expander) in step 1.6". Parent step 1.2 found the GT911 at **0x5D** on the I2C scan.
+- `firmware/build_config.rs` has the `number(name, default, min, max)` helper and value-free error
+  messages (tests in the same file).
+- The bench (board-bench.md) can flash, read the serial log and take photos. It has **no serial
+  input** and nothing can touch the screen.
+
 ---
 
 ## Options
@@ -121,6 +172,48 @@ the plan.
 |---|--------|-----------|
 | O5a | All UI in the sim first, then all device work | Few board runs, but nothing is visible on the board until late. A device-only problem (heap, render speed) shows up last. |
 | O5b | **Interleaved, device-visible early**: Slint on the device with the demo feed → live feed → new layout (sim then device) → metadata text → photo | Each night stage leaves a working, visible result on the board. Device risks (heap, render time, drift) show up in the first hours. |
+
+### O6. Where to correct the pixel aspect (revision 3, RD.14)
+
+| # | Option | Trade-off |
+|---|--------|-----------|
+| O6a | Resample the whole frame (render 800/a × 480, stretch to 800 at copy time) | Corrects everything, also text and photo. But every rendered row needs a resample pass on core 0, text gets blurred, and partial repaint gets complex. |
+| O6b | Non-uniform Slint scale factor | Not possible: Slint has one uniform scale factor. |
+| O6c | **Radar geometry only**: one constant `PIXEL_ASPECT` in `adsb-core::radar`; projection, rings, sprites, focus mark and hit-test use it | Small, pure, host-testable. Text and photo stay 7–8 % wide (hardly visible for text; the photo is a separate, optional fix). |
+| O6d | Shrink the whole layout horizontally | Glyphs stay stretched; large layout change for little gain. |
+
+### O7. How to draw elliptic rings (software renderer, `render_by_line`)
+
+| # | Option | Trade-off |
+|---|--------|-----------|
+| O7a | Slint `Path` or a scale transform | **Not possible** (verified: no paths in line-by-line mode, no transformations; see Context for revision 3). |
+| O7b | `Rectangle` with `width ≠ height` and `border-radius` | Gives a stadium shape, not an ellipse. Wrong shape. |
+| O7c | **One opaque RGB8 background image** (448×448: background colour, cross-hair, rings, radius ring), rasterised in `adsb-core::radar`, rebuilt only when the ring set changes | Simplest Slint tree (one `Image` replaces 2 lines + 3 rings). 602 KB PSRAM. Every repainted radar pixel becomes an image read instead of a solid fill: extra render time, size unknown (K16). |
+| O7d | Ring tiles: rasterise each ring once, cut it into small RGBA tiles (row bands, only the non-transparent column runs), show them in a repeater | Repaint cost only near the rings. About 100 more items and more code (cutter, tile model). |
+
+### O8. Where the selection state lives (RD.15)
+
+| # | Option | Trade-off |
+|---|--------|-----------|
+| O8a | In `App` (`adsb-app`) | `App` knows the shown blips and the range. But `lookup::publish` runs **before** `App::update`, so the lookups would follow a tap one tick late, or `App` needs a two-phase API. |
+| O8b | In each platform (firmware `ui.rs`, sim) as glue | Same logic twice; it needs the range that `App` computes privately. |
+| O8c | **In `FeedPipeline` (`adsb-core`)**, next to the tracker focus hysteresis: `snapshot()` also computes the range (the `RangeState` moves from `App`) and applies the selection to `snap.focus` | One place for both platforms, pure, virtual-clock tests. Panel, radar focus mark, lookup policy and logs follow `snap.focus` with no change. Cost: two new `Snapshot` fields; test fixtures that build a `Snapshot` by hand need them. |
+
+### O9. GT911 input (RD.15)
+
+| # | Option | Trade-off |
+|---|--------|-----------|
+| O9a | INT-triggered (GPIO4 falling edge), then read | No idle cost. Depends on the GT911 INT trigger configuration [VERIFY register 0x804D on this board]; GPIO4 also selects the I2C address during reset. |
+| O9b | **Polling at 25 Hz** over I2C | Independent of the INT configuration. A tap lasts ≥ 80 ms, so it gets ≥ 2 samples. Cost: about 25 short I2C reads per second (about 150 µs bus time each, async), negligible CPU. |
+| — | Driver: the `gt911` crate vs. **our own** (about 100 lines) | Parent 1.6 allowed the crate only with embedded-hal-async 1.0 [VERIFY]. Our own driver keeps the register parse in `adsb-core` (host-testable) and has no trait-version risk. |
+
+### O10. How to test touch without a finger (RD.15)
+
+| # | Option | Trade-off |
+|---|--------|-----------|
+| O10a | Inject taps through the serial line | The bench has no serial input. Adding one changes the bench host, which this doc forbids. |
+| O10b | **Timed touch script in a debug build** (feature `touch-script`): synthetic raw touch samples go into the same tap detector → hit-test → selection path; targets are resolved against the blips on screen. The same script runs against the sim on the host. | Covers everything except the GT911 coordinate read and the finger. The board log can be compared with the sim log line by line (busy demo, deterministic). |
+| O10c | Fake the I2C device | Much work, and it tests only our own fake. |
 
 ---
 
@@ -173,6 +266,57 @@ the plan.
     process on the Mac or publish a container port to the LAN, so the **device verify of the
     fallback needs the user** (RD.11).
 
+**ADR-004 (revision 3): Radar pixel aspect and touch selection**
+
+- **Context:** RD-D8, RD-D9 and "Context for revision 3". The Slint software renderer cannot draw
+  ellipses through `Path` or transforms in line-by-line mode. `ui_task` is single-core, 1 Hz, and
+  TLS handshakes block the executor for up to about 4 s. The bench cannot touch the screen.
+- **Decision:**
+  1. **Aspect: O6c.** One constant `adsb_core::radar::PIXEL_ASPECT` = physical pixel width /
+     physical pixel height. Start value **1.076** from the usual 7" 800×480 active area of
+     154.08 × 85.92 mm [VERIFY against this panel, RD.14.1]. All radar geometry keeps the vertical
+     scale (outer ring 208 px high) and divides horizontal offsets by `PIXEL_ASPECT` (outer ring
+     about 193 px wide). It is a code constant, not a build variable: it describes fixed hardware;
+     a measured value is committed once.
+  2. **Rings: O7c** (one opaque RGB8 background image), with a measured gate in RD.14.4. If the
+     gate fails, switch to **O7d** (ring tiles) inside RD.14.4 (no design change needed; same
+     rasteriser, different cut).
+  3. **Sim and aspect:** the sim renders **the same device pixels** (same constant, same code).
+     The PNGs stay device framebuffers (the rings are narrower ellipses in them), so `frame_hash`
+     parity and hit-test coordinates stay identical to the board. For the human view, the browser
+     canvas is shown with the physical aspect (CSS width × `PIXEL_ASPECT`; the pointer mapping
+     already uses the bounding rect), and the PNG test writes one extra `*-physical.png` per radar
+     keyframe, resampled horizontally by `PIXEL_ASPECT`, in which the rings must be round. A
+     sim-only "square pixel" mode is rejected: it would hide exactly the geometry we must check.
+  4. **Selection: O8c.** New pure module `adsb_core::select` (state + rules), used by
+     `FeedPipeline`. The tracker focus (closest, with hysteresis) is unchanged and keeps running
+     under an override, so "back to the closest" needs no extra state.
+  5. **Touch input: O9b** (25 Hz polling) with our own GT911 driver. The register parse and the
+     tap detector are pure code in `adsb_core::touch`. `touch_task` owns the I2C bus and the
+     CH422G after boot (as the parent planned).
+  6. **Hit-testing in Rust, not with Slint `TouchArea`**: `radar::hit` tests the blips that were
+     last **shown** (`App::ui().blips`), with a tolerance radius and the aspect, so the sim and
+     the board resolve a tap the same way and host tests cover it.
+  7. **Test without a finger: O10b** (`touch-script` feature). The finger check is a [user] step.
+  8. **Defaults:** `ADSB_SELECT_TIMEOUT_S` = **60 s** (range 10–3600). Reasons: a new selection
+     needs about 4 s for the text lookup (adsbdb handshake), then the 3 s photo dwell and about
+     3.6 s for the photo, so the panel is complete after about 8–11 s; 60 s leaves about 50 s to
+     read it; parent 4.4 used 60 s for its manual override; a forgotten selection returns to the
+     closest within one minute. The lower limit 10 s keeps the panel from switching back before it
+     is complete.
+- **Consequences:**
+  - `Snapshot` gets `range_km` and `selection`; `App` loses its `RangeState` (uses
+    `snap.range_km`). Hand-built `Snapshot`s in tests need the new fields.
+  - `radar::Blip` gets `icao`. Label geometry constants (offset 13 px, width 88 px, flip at
+    x > 340 px) exist in Rust (hit-test) and in `app.slint`; a test keeps them equal (K20).
+  - Text glyphs and the photo stay about 7.6 % too wide on the panel. A photo fix (scale to
+    312×224 instead of 336×224) is a small optional change; it is **not** in the plan unless the
+    user asks.
+  - +602 KB PSRAM for the background image; +1 task (`touch_task`) in internal `.bss`; +25 I2C
+    reads per second on core 0.
+  - Parent 1.6 is done by RD.15.5/RD.15.7. Parent 4.4 stays open except for its "manual override
+    with timeout" idea, which RD.15 replaces for this layout.
+
 ---
 
 ## Design details
@@ -194,6 +338,7 @@ the plan.
 | `ADSB_RADIUS_KM` | no, default 5 | 0.5…50 (radius for "OVERHEAD") |
 | `ADSB_DEMO` | no | `overflight` or `busy`: feed the scenario instead of the network (parent 4.1) |
 | `ADSB_META_PROXY` | no | `http://<host>:<port>`: use the fallback proxy (RD.11) instead of direct HTTPS |
+| `ADSB_SELECT_TIMEOUT_S` | no, default 60 | Revision 3 (RD.15): integer seconds, 10…3600. Time after which a manual (tapped) selection returns to the closest aircraft. Validated in `build_config.rs` with the `number` helper; written as `SELECT_TIMEOUT_MS: u64`. |
 
 Rules for `build.rs`:
 
@@ -236,6 +381,7 @@ overlap between panel rows (checked in sim PNGs, RD.5 and RD.7).
 
 - **Projection:** north-up azimuthal from the receiver, from `PositionView.ground_m` and
   `bearing_deg`: `x = cx + r·sin(b)·k`, `y = cy − r·cos(b)·k`, `k = 208 px / range`.
+  *(Revision 3: `x = cx + r·sin(b)·k / PIXEL_ASPECT`; see [Radar pixel aspect](#radar-pixel-aspect-rd14).)*
 - **Range:** let `d` = ground distance of the n-th nearest positioned aircraft, n = min(10,
   count). Range = the smallest step of {10, 25, 50, 100} km with `step ≥ 1.1·d`; if none, 100 km.
   No aircraft: 25 km. **Hysteresis:** step up at once; step down only after the smaller step was
@@ -314,7 +460,9 @@ main (core 0): init as today → spawn tasks → ui loop
  ├─ ui_task     1 Hz: snapshot → App.update(meta) → render dirty lines → PSRAM fb
  │              → cache writeback of the dirty rows (direct scanout path)
  ├─ sntp_task   (RD.8) wall clock
- └─ meta_task   (RD.9/RD.10) lookup queue → HTTPS (or proxy) → cache; JPEG decode
+ ├─ meta_task   (RD.9/RD.10) lookup queue → HTTPS (or proxy) → cache; JPEG decode
+ └─ touch_task  (RD.15.5) owns I2C + CH422G after boot; GT911 reset, 25 Hz poll → tap detector
+                → TAP signal → ui_task (extra tick at once: hit-test, select, render)
 core 1: scanout restart ISR only (unchanged)
 ```
 
@@ -356,6 +504,216 @@ Measured in RD.2 and RD.6, logged as `ui: render full_ms=… partial_ms=… rows
 photo change ≤ 250 ms. If the 1 Hz update is over 300 ms, lower the radar update to 0.5 Hz and
 record it.
 
+### Radar pixel aspect (RD.14)
+
+**Numbers.** `PIXEL_ASPECT` = (active width / 800) / (active height / 480). With 154.08 × 85.92 mm
+[VERIFY]: 0.1926 mm / 0.1790 mm = **1.076**. Square pixels would give 1.000. A circle drawn with
+the same pixel radius in x and y is then 7.6 % wider than tall, which matches the user's report.
+The 416×416 px ring of the sim PNG is about 80.1 mm wide and 74.5 mm high on the panel.
+
+**What uses the constant** (all in `adsb-core::radar`, pure):
+
+| Item | Today | With the correction |
+|------|-------|---------------------|
+| `project` | `x = cx + r·sin(b)·k` | `x = cx + r·sin(b)·k / PIXEL_ASPECT` (y unchanged) |
+| Rings (outer, half, radius ring) | Slint `Ring` circles r = 208/104/n px | ellipses `rx = r / PIXEL_ASPECT`, `ry = r` (outer: 193 × 208 px) in the background image (O7c) |
+| Sprites | shape tested in square px | the rasteriser maps a pixel offset `dx` to `dx·PIXEL_ASPECT` before the shape test, so the plane keeps its true shape and its drawn track angle is right (a 45° track is drawn at 45° on the glass, not 47°) |
+| Focus mark | 30×30 round `Rectangle` | `round(30 / PIXEL_ASPECT)` × 30 = 28×30, `border-radius` 14 (a stadium so small looks like an ellipse) |
+| Labels | offset in px from the blip | unchanged (they follow the corrected blip `x`) |
+| Hit-test (RD.15) | — | distance `sqrt((dx·PIXEL_ASPECT)² + dy²)`, i.e. a round area on the glass |
+
+The radar centre stays at (224, 224) of the 448×448 box. The outer ring now leaves about 31 px
+left and right inside the box; the box size and the info panel do not change. Bearings and
+distances in the panel text are not affected.
+
+**Background image (O7c).** `radar::background(radius_ring_px: Option<u16>) -> Vec<u8>` returns
+448×448 RGB8 (602 KB): the radar background colour `#0a0d12`, the two 1-px cross-hair lines
+`#1c2431`, the outer and half rings `#2f3a4d`, and the dim radius ring `#4a3b1c` when present.
+Rings are 1 px anti-aliased ellipse outlines (coverage from the distance to the ellipse, only
+evaluated near the edge of each ring). `App` builds it again only when `radius_ring_px` changes
+(a range change), in PSRAM, and sets it once on a new Slint `radar-bg` image property. Log on the
+board: `radar: bg_ms=…`. The N mark, range label, half label, "+k beyond" and the no-data overlay
+stay Slint `Text`/`Rectangle` (they do not depend on the aspect; the half label keeps its y
+because `ry` is unchanged).
+
+**Fallback O7d (only if the RD.14.4 gate fails):** the same ring raster as RGBA, cut into tiles:
+16 row bands per ring, and in each band only the column runs that have alpha > 0. Shown through a
+`VecModel<RingTile {x, y, image}>`. The background stays a solid `Rectangle`.
+
+**Sim.** Same constant, same code; PNGs are device pixels. The browser shows the canvas with the
+physical aspect (see ADR-004 decision 3). `sim/tests/snapshots.rs` also writes
+`<keyframe>-physical.png` for the radar keyframes: each row resampled to
+`round(800·PIXEL_ASPECT)` px wide (linear). In those files the outer ring must be round.
+
+**How to confirm the constant on the bench and by the user** (RD.14.1): a firmware feature
+`diag-aspect` draws, instead of the UI, a white 1-px border on the 800×480 edge, a 300×300 px
+square with its inscribed circle on the left ("square pixels" assumption) and a
+`round(300/PIXEL_ASPECT)`×300 px rectangle with its inscribed ellipse on the right ("corrected"),
+and the text of the constant in use. Then:
+
+- *Bench (plausibility, no ruler):* in the webcam photo, measure the border rectangle (average of
+  top and bottom edge length / average of left and right edge length). Non-square pixels give
+  about 1.79 (= 1.667 × 1.076); square pixels give 1.667. The camera is not exactly frontal, so
+  accept only a clear result: ≥ 1.75 confirms the hypothesis, ≤ 1.70 rejects it (stop and report),
+  in between is INCONCLUSIVE. Also check that the right shape looks round and the left one wide.
+- *User (decisive):* measure with a ruler the border width W and height H in mm (the white line
+  on the panel edge). `PIXEL_ASPECT = (W/800)/(H/480)`. Expected W ≈ 154 mm, H ≈ 86 mm. If the
+  result differs from 1.076 by more than 1 %, commit the measured value (3 decimals).
+
+### Touch selection (RD.15)
+
+**Data flow (firmware):**
+
+```
+touch_task (25 Hz): GT911 read ─► touch::Sample{t_ms, Option<(x,y)>} ─► touch::TapDetector
+     │                                                      │ Tap{x,y}
+     │  (feature touch-script: script samples replace       ▼
+     │   the GT911 samples while a script tap is active)  TAP: Signal ─► ui_task (wakes at once)
+     ▼                                                                  │
+  `touch:` logs                         App::hit(x,y) on the shown blips/layout ─► Target
+                                        pipeline.tap(Target, now_ms, SELECT_TIMEOUT_MS) ─► Outcome (`select:` log)
+                                        tick(): snapshot (applies selection) → publish → update → render
+```
+
+The sim uses the same `TapDetector` (mouse down/up with the browser clock), `App::hit` and
+`FeedPipeline::tap`, plus a direct `Sim::tap(x, y)` for tests.
+
+**Selection rules** (`adsb_core::select::Selection`, pure; times on the snapshot clock `now_ms`):
+
+| Situation | Result | Log (platform) |
+|-----------|--------|----------------|
+| No override | `snap.focus` = tracker focus (closest, hysteresis as ADR-003 decision 7) | — |
+| Tap on a blip of aircraft X; X is not the current override and not the tracker focus | override X until `now + timeout` | `select: manual icao=X until=<ms>` |
+| Tap on the blip of the current override | renew: until `now + timeout` | `select: renew icao=X until=<ms>` |
+| Tap on the blip of the tracker focus (closest), no override | no change (it is already selected; no override starts) | `select: tap icao=X already` |
+| Tap on the blip of the tracker focus (closest) while an override runs | override ends, closest again (the user asked for the closest) | `select: auto reason=user icao=<old>` |
+| Tap on the info panel while an override runs | override ends, closest again | `select: auto reason=user icao=X` |
+| Tap on the info panel, no override | no change | `touch: tap target=panel` |
+| Tap on empty radar space, "+k beyond", N mark, range label | **no change** (a near miss on a crowded radar must not drop the selection) | `touch: tap target=radar miss` |
+| Tap on the status bar | no change | `touch: tap target=status` |
+| Override and X is **out of scope**: not in the table, no position (stale), `ground_m > range`, or rank ≥ `MAX_BLIPS` (= X is not drawn) | override ends at the next snapshot | `select: auto reason=scope icao=X` |
+| Override and `now ≥ until` | override ends | `select: auto reason=timeout icao=X` |
+
+- "In scope" is one function, `radar::in_scope(snap, index, range)`, also used by `radar::blips`,
+  so "drawn" and "in scope" cannot disagree. A range step-down (after 15 s) can push X out: that
+  is "leaves the radar scope" and ends the override.
+- After an override ends, the panel shows the tracker focus at once (the tracker kept it up to
+  date). If that is the same aircraft, only the badge changes.
+- While the feed is down (no-data overlay), no blips are shown, so taps hit nothing. A running
+  override still ends by timeout or scope.
+- `Snapshot` gets `range_km: RangeKm` and `selection: SelectView` (`Auto` or
+  `Manual { icao, until_ms }`, a copy of the `Selection` state for the view). `FeedPipeline::tap(target, now_ms, timeout_ms) -> TapOutcome`
+  and `FeedPipeline::take_select_event() -> Option<SelectEvent>` (for the `select: auto` logs,
+  which happen inside `snapshot`). `adsb-core` does not log.
+
+**Hit-test** (`radar::hit(blips: &[Blip], x, y) -> Option<u32>`, radar-box coordinates; `App::hit`
+first maps screen coordinates to a `Target { Blip(icao), RadarMiss, Panel, Status }` by the layout
+rectangles: status bar y < 32; radar x < 448; panel x ≥ 448):
+
+1. Candidates by centre: blips with `sqrt((dx·PIXEL_ASPECT)² + dy²) ≤ TOUCH_RADIUS_PX` = **28 px**
+   (about 5 mm on the glass, so the target is about 10 mm wide, a normal finger target; the
+   sprite alone is 20 px ≈ 3.8 mm). The nearest centre wins.
+2. Else, labels: a blip whose label rectangle (same geometry as `app.slint`: `x+13 … x+101`, or
+   `x−100 … x−12` when `x > 340`; `y−8 … y+8`), grown by 4 px, contains the point. If more than
+   one, the one drawn last (on top) wins.
+3. Else: miss.
+
+`radar::Blip` gets `icao: u32`. The constants `LABEL_DX = 13`, `LABEL_W = 88`, `LABEL_FLIP_X = 340`
+live in `radar.rs`; a test in `adsb-app` renders a blip label and checks that its text pixels are
+inside the Rust rectangle (K20).
+
+**Tap detector** (`adsb_core::touch::TapDetector`, pure, sample timestamps in ms):
+
+- Down = first sample with a point. Keep the mean position of all touch samples.
+- Drag: any sample more than `SLOP_PX` = 24 px (aspect-weighted) from the first point → no tap.
+- Up = **2 empty samples in a row** (about 80 ms at 25 Hz; filters a single dropped report).
+- Tap if not a drag and the touch lasted ≤ 1000 ms; long presses are ignored (reserved).
+- After a tap, ignore a new down for 250 ms (bounce, double reports).
+- Output `Tap { x, y }` in screen pixels (after calibration).
+
+**GT911 driver** (`firmware/src/gt911.rs`; parse in `adsb_core::touch::gt911`). Register map
+[VERIFY against the GT911 programming guide and Waveshare's `esp_lcd_touch_gt911` driver]:
+16-bit big-endian register address; `0x8140` product ID (ASCII "911"), `0x8144` firmware
+version (u16 LE), `0x8146`/`0x8148` x/y resolution (u16 LE); `0x814E` status (bit 7 = buffer
+ready, bits 3..0 = number of points); first point at `0x814F` (track id, x u16 LE, y u16 LE, size
+u16 LE, reserved); write `0x00` to `0x814E` after each read with bit 7 set.
+
+- **Reset and address** (in `touch_task`, after the backlight is on, so boot is not slower):
+  GPIO4 output low; 10 ms; `TP_RST` (EXIO1 through `Ch422g::set_pin`, the shadow keeps the
+  backlight and USB bits) low 100 ms; high; 200 ms; GPIO4 to input (no pull) — the parent 1.6
+  sequence, which gives **0x5D**. Then read the product ID at 0x5D; if it NAKs, try 0x14 and log
+  which one answered. If neither answers: `touch: gt911 missing`, the task parks, the UI works
+  without touch. [VERIFY the esp-hal 1.2 API to switch GPIO4 from output to input, e.g. `Flex`.]
+- **Init log:** `touch: gt911 ok addr=0x5d id=911 fw=<hex> res=<x>x<y>`.
+- **Poll** every 40 ms: read status (1 byte). If bit 7 and points ≥ 1: read point 1 (8 bytes),
+  clear status. Bit 7 and 0 points = release report: clear status. Bit 7 clear = no new report:
+  repeat the last state (a held finger does not always produce new reports) [VERIFY].
+- **Mapping and calibration:** if the reported resolution is 800×480, coordinates are used as
+  they are (the parent records no swap or mirror). Else scale per axis to 800×480. A calibration
+  constant (offset and scale per axis, default identity) sits in `touch.rs`; RD.15.7 decides if it
+  is needed. Coordinates are clamped to the screen.
+- **Errors:** an I2C error is counted and logged at most once per 10 s (`touch: i2c error n=…`);
+  after 10 errors in a row, poll once per second until a read succeeds. Never panic after boot.
+- **Stats:** every 60 s `touch: stats polls=… reports=… taps=… err=…`.
+
+**Bus ownership.** `main` keeps using the `Ch422g` for the LCD reset and the backlight, then
+**moves** it into `touch_task`. `Ch422g` gets `pub fn bus(&mut self) -> &mut I2c<'d, Async>` so the
+GT911 driver borrows the same bus. No mutex is needed because nothing else uses the bus after
+boot. A later user of the expander (for example backlight off at night) sends a command to
+`touch_task`.
+
+**Visual feedback of a manual selection:**
+
+- Focus mark colour: cyan `#22d3ee` instead of yellow `#ffcc00` (new Slint property
+  `manual-select: bool`; only the one focus mark item depends on it).
+- Panel badge: `MANUAL 52 s` (cyan, new `Badge::Manual`, new string property `badge-text` for the
+  countdown; `Ui.manual_left`), in place of OVERHEAD/APPROACHING/NEAREST while the override runs.
+  The countdown changes once per second: a small dirty area (112×24 px), like the clock.
+- Nothing else changes: the panel shows the selected aircraft's values and metadata as for the
+  closest.
+
+**Response time.** `ui_task` waits on `select(ticker.next(), TAP.wait())`. A tap gives an extra
+tick at once (snapshot → lookups → update → render, 50–100 ms on the board), so the ring and the
+panel change about 0.1–0.2 s after the finger lifts. The 1 Hz ticks continue as before. During a
+TLS handshake (up to about 4 s) or a photo decode (about 0.5 s) the executor does not run: a tap is
+handled late, or lost if the whole touch falls inside the stall (K19).
+
+**Interaction with the lookups and the photo flow.**
+
+- `lookup::publish` reads `snap.focus`, so the text lookup of the selected aircraft is planned on
+  the same tick, and the 2 prefetches are the 2 nearest others (this includes the closest, so the
+  return to it is quick from cache).
+- The photo still waits for `PHOTO_DWELL_MS` = 3 s of stable selection. Fast taps on several
+  aircraft make text lookups (rate limiter: at most 1/s, cache) but no photo fetches. A photo flow
+  that already runs for the old selection completes and goes to the photo cache (4 entries); it
+  is not cancelled.
+- No new lookup rules are needed.
+
+**Memory and CPU (core 0, single executor).** Selection state: about 24 B. Tap detector: about
+40 B. `touch_task` future: in internal `.bss` (task arena); esp-hal's async I2C futures are large
+(see the `large_stack_frames` allowance in `main.rs`), so measure the `.bss` growth and keep the K1
+gate (internal free ≥ 10 KB, today `internal_min` = 20,588 B). CPU: 25 status reads per second
+(async, about 150 µs of bus time each), hit-test over ≤ 48 blips per tap, one extra render per
+tap. Flash-resident code runs 25 times per second more often: re-check K4 (K17).
+
+**Touch script (feature `touch-script`, debug only; O10b).** The script is data in
+`adsb_core::touch::script` so the sim and the firmware use the same list:
+`&[(at_ms, Action)]` with `Action` = `TapIcao(u32)` (busy demo, deterministic), `TapRank(n)`
+(n-th shown blip that is not the current focus; for live builds), `TapPanel`, `TapEmpty` (a
+radar point at least 60 px from every blip and outside every label rectangle), `TapStatus`. The firmware resolves the target
+against a copy of the shown blips that `ui_task` publishes (only in this feature), then generates
+raw samples (down for 120 ms at 25 Hz, then release) into the same `TapDetector`. Logs
+`touch: script action=… x=… y=…`. The busy-demo script (times on the scenario clock; exact ICAOs
+and times chosen in RD.15.3 from the sim and asserted by the sim test):
+
+1. tap a non-focus blip → `manual`;
+2. +10 s, tap it again → `renew`;
+3. +10 s, tap empty radar → miss, selection unchanged;
+4. +5 s, tap the panel → `auto reason=user`;
+5. tap a blip that the scenario moves out of the range before the timeout → `auto reason=scope`;
+6. tap a blip that stays in range → `auto reason=timeout` (build with `ADSB_SELECT_TIMEOUT_S=20`
+   so the run stays short).
+
 ---
 
 ## Plan
@@ -396,6 +754,19 @@ change `.claude/`, `.devcontainer/` or the bench host configuration.
 | RD.11 | RD.8 failed | fallback proxy (gated) |
 | RD.12 | RD.7 | optional sim live metadata |
 | RD.13 | RD.6 (and RD.10 if done) | soak result |
+| RD.14.1 | — | aspect measured (bench + [user] ruler) |
+| RD.14.2 | — (uses the start value; RD.14.1 may change the constant later) | aspect in radar logic (host) |
+| RD.14.3 | RD.14.2 | elliptic rings in sim PNGs, round in `*-physical.png` |
+| RD.14.4 | RD.14.1, RD.14.3 | **round radar on the board** (+ [user] look) |
+| RD.15.1 | RD.14.2 | selection policy + hit-test (host) |
+| RD.15.2 | — | GT911 parse + tap detector (host) |
+| RD.15.3 | RD.15.1, RD.15.2, RD.14.3 | manual selection in the sim (mouse, PNGs, script log) |
+| RD.15.4 | — | `ADSB_SELECT_TIMEOUT_S` |
+| RD.15.5 | RD.15.2, RD.15.3, RD.15.4 | GT911 alive on the board (no finger) |
+| RD.15.6 | RD.15.5 | **scripted taps select on the board** |
+| RD.15.7 | RD.15.6 | [user] finger check |
+
+Revision 3 steps follow the same stop rules. They start only after the user approved revision 3.
 
 ### RD.0 [hw] Bench check and the fw-D question
 
@@ -625,6 +996,190 @@ RD.11 `meta` module, behind the existing Host/Origin guard.
   internal), the display steady in every photo, metadata lookups continue. Record a short table
   (time, heap, frames/s, lookups) in the revision log; no callsigns or photos in the doc.
 
+### RD.14.1 [code+hw+user] Measure the pixel aspect
+
+- Firmware feature `diag-aspect` (like `diag-pattern`: drawn at boot instead of the UI, UI tasks
+  not started): border, left 300×300 square + circle, right `round(300/PIXEL_ASPECT)`×300
+  rectangle + ellipse, the constant as text (or as a row of 1-px ticks if text is not available
+  outside Slint; the left/right shapes are enough). Pure drawing function in `firmware/src/display.rs`
+  next to `draw_pattern`; log `diag-aspect: pixel_aspect=1.076`.
+- *Verify:*
+  - Bench: expectation "white border; left shape wider than tall; right shape round". `bench
+    flash … --until 'diag-aspect:' --timeout 60`, `bench snap`. Measure the border rectangle ratio
+    in the photo (method and limits in [Radar pixel aspect](#radar-pixel-aspect-rd14)). Record
+    the ratio. ≤ 1.70: stop RD.14 and report (hypothesis wrong).
+  - [user]: ruler W and H of the border line in mm; compute the constant; commit it if it differs
+    by more than 1 % from 1.076. Record W, H and the result in the revision log. Until the user
+    answers, RD.14.2–RD.14.4 run with 1.076.
+
+### RD.14.2 [code] Aspect in the radar logic (`adsb-core::radar`)
+
+- `PIXEL_ASPECT` constant; internal functions take the aspect as a parameter so tests can run
+  with 1.0. `project` divides the x offset; `in_scope(snap, index, range)` (shared with `blips`);
+  `sprite` maps `dx` to `dx·aspect`; `background(radius_ring_px) -> Vec<u8>` (448×448 RGB8,
+  colours and AA as in the design); `FOCUS_W_PX = 28`.
+- *Verify (host):*
+  - Projection: 25 km at 0/90/180/270° → (224, 16), (417, 224), (224, 432), (31, 224) ±1 px; with
+    aspect 1.0 the old values (existing test).
+  - All existing radar tests pass unchanged with aspect 1.0 (old sprite and blip outputs are
+    bit-identical).
+  - Background: the ring colour is at (224 ± 193, 224) and (224, 224 ± 208) ±1 px; the pixel at
+    (224 + 208, 224) (the old circle) is background colour; the image is mirror-symmetric left/right
+    and top/bottom; with and without the radius ring; size is 448·448·3.
+  - Sprite: the 90° sprite's covered width is about `19/aspect` px (±1); the 0° sprite is still
+    nose-up and symmetric.
+  - Host time of `background` recorded (the board time comes in RD.14.4).
+
+### RD.14.3 [code] Elliptic rings in `adsb-app` and the sim
+
+- `app.slint`: remove the two cross-hair `Rectangle`s and the three `Ring`s; add `in property
+  <image> radar-bg` as the first child of the radar box; focus mark 28×30, `border-radius` 14.
+  `App`: build the background on the first update and when `radius_ring_px` changes; keep the
+  `Rc` so an unchanged image is not set again.
+- Sim: canvas CSS with the physical aspect (`index.html`/`web.rs`); `snapshots.rs` writes
+  `*-physical.png` for the radar keyframes.
+- *Verify:*
+  - Host tests green in `adsb-core`, `adsb-app`, `sim`; `trunk build --release` in `sim/`.
+  - PNG check by test: in `7-busy.png` (device pixels), scan the centre row and the centre column
+    for the outer-ring colour: half width / half height = 1/`PIXEL_ASPECT` ± 0.01. In
+    `7-busy-physical.png` the same ratio is 1.00 ± 0.02.
+  - Read the PNGs: rings smooth (no steps or gaps), blips on the rings where expected, labels not
+    cut, the N mark and range labels in place, the focus mark around the focus blip.
+  - `frame_hash` references updated (all radar keyframes change) and the parity test green.
+  - Render time on the host recorded (full and the busy 1 Hz tick).
+
+### RD.14.4 [code+hw+user] Round radar on the board
+
+- Firmware: log `radar: bg_ms=… bytes=…` when the background is built. Nothing else should be
+  needed (shared code).
+- *Verify:*
+  - Bench, busy demo: expectation "radar rings look round in the photo (allow the camera angle),
+    blips match the sim busy keyframe at the same scenario time". Compare with
+    `7-busy-physical.png` rather than `7-busy.png`.
+  - **Render gate (K16):** busy demo `ui: render partial_ms` ≤ 100 ms typical (was 51–76 ms),
+    full ≤ 400 ms; live typical ≤ 80 ms; `radar: bg_ms` ≤ 100 ms. If the busy partial is over
+    100 ms or the full is over 400 ms, switch to O7d (ring tiles) in this step, then measure again.
+  - **K4 re-check (K17):** the K4 burst metric (busy demo, 8 s burst at scenario ~100 s, same
+    counter as the K4 fix entry): ≤ 1 glitched per 100.
+  - Gate K1 (internal free ≥ 10 KB over 10 min), PSRAM drop about 0.6 MB once, no trend.
+  - [user]: "the radar now looks round" (record the answer).
+
+### RD.15.1 [code] Selection policy and hit-test (`adsb-core`)
+
+- New `select` module: `Selection`, `SelectView`, `Target`, `TapOutcome`, `SelectEvent`, rules as
+  in [Touch selection](#touch-selection-rd15). `FeedPipeline` owns `RangeState` and `Selection`:
+  `snapshot()` = age → table snapshot → `select_range` → `Selection::resolve` (may set
+  `snap.focus`, sets `snap.range_km` and `snap.selection`); `tap()`, `take_select_event()`.
+  `App` uses `snap.range_km` and drops its `RangeState`. `radar::Blip.icao`, `radar::hit`,
+  label constants. Update the hand-built `Snapshot`s in tests.
+- *Verify (host, virtual clock):*
+  - Default: focus = tracker focus (existing tracker tests unchanged).
+  - Tap on X (not focus) at t → `snap.focus` = X until `t + timeout − 1`; at `t + timeout` back to
+    the tracker focus and event `Auto{Timeout}`.
+  - Renew moves `until`; tap on the tracker focus → `AlreadySelected` without an override, and
+    `Auto{User}` with one; panel tap ends an override (`Auto{User}`) and is a no-op without one;
+    miss and status taps change nothing.
+  - Scope: X beyond the range, X stale (no position), X removed, X at rank 48 → `Auto{Scope}` at
+    the next snapshot; a range step-down that excludes X → `Scope`; `in_scope` and `blips` agree
+    for every index of a 60-aircraft snapshot.
+  - Lookup policy follows: `Policy::plan` on a snapshot with an override plans X first.
+  - Hit: point at a blip centre → that ICAO; 27 px above → hit, 29 px above → miss; for an
+    unlabelled blip, 27 px sideways → miss because of the aspect weighting
+    (`27·1.076 = 29.1 > 28`), 26 px sideways → hit; two blips within the radius → the nearer;
+    point on a label rectangle → that blip; flipped label (x > 340) → hit on the left side;
+    empty → miss.
+  - Pipeline integration: busy scenario, tap the 5th blip at 60 s, run to the timeout: the
+    expected event sequence.
+
+### RD.15.2 [code] GT911 parse and tap detector (`adsb-core::touch`)
+
+- `gt911::parse_status`, `parse_point`, `parse_info` (product ID, firmware, resolution) on byte
+  slices; `map(raw, res) -> (x, y)` with calibration and clamp; `TapDetector`.
+- *Verify (host):* byte fixtures written from the register map (not from a device dump): status
+  with/without bit 7, 0/1/5 points, point coordinates LE, resolution 800×480 → identity,
+  1024×600 → scaled, out-of-range clamped. Detector: clean tap (3 samples) → 1 tap at the mean;
+  1-sample tap → tap; one dropped sample inside a touch → still 1 tap; drag 30 px → none; 1.2 s
+  press → none; two taps 100 ms apart → the second is ignored, 300 ms apart → 2 taps; noise sample
+  pattern down-up-down within 80 ms → 1 tap.
+
+### RD.15.3 [code] Manual selection in `adsb-app` and the sim
+
+- `App::hit(x, y) -> Target`; `Ui` fields `manual`, `manual_left`; `Badge::Manual`; Slint
+  `manual-select` and `badge-text`; cyan focus mark; `MANUAL 52 s` badge.
+- Sim: `Sim::tap(x, y)` (direct) and mouse down/up through the `TapDetector`; `Sim::pointer` keeps
+  the Slint dispatch. Default timeout in the sim: `adsb_core::select::DEFAULT_TIMEOUT_MS` (60 s).
+- `adsb_core::touch::script` with the busy-demo script; new test `sim/tests/touch.rs` runs the
+  script through the same detector and writes `sim/target/ui-snapshots/touch-script.log` (one
+  `select:`/`touch:` line per event, with scenario time) — the expected board log of RD.15.6.
+- *Verify:*
+  - Host tests: script run gives exactly the 6 expected outcomes in order (manual, renew, miss,
+    user, scope, timeout) with a 20 s timeout; label geometry test (K20).
+  - PNG keyframes: `busy-manual` (cyan mark on the tapped blip, panel shows its callsign and
+    `MANUAL 60 s`), `busy-manual-50s` (countdown text), `busy-after-panel-tap` (yellow mark on the
+    closest, NEAREST/OVERHEAD badge). Read the PNGs: the panel callsign equals the marked blip's
+    label; the badge text fits.
+  - Browser (`trunk serve`, deferred to the user if no browser is available): a click on a blip
+    selects it.
+
+### RD.15.4 [code] Build variable `ADSB_SELECT_TIMEOUT_S`
+
+- `build_config.rs`: optional, `number("ADSB_SELECT_TIMEOUT_S", "60", 10, 3600)`, integer only;
+  writes `SELECT_TIMEOUT_MS: u64`; listed in the rerun vars. `.env.example` line
+  `# ADSB_SELECT_TIMEOUT_S=60` (if the deny rule still blocks edits to that file, report the line
+  as in RD.8).
+- *Verify (host tests in `build_config.rs`):* default 60 → 60000; 10 and 3600 accepted; 9, 3601,
+  `1.5`, `abc`, empty → error naming the variable and the rule, without the value (marker test,
+  as the other vars). Firmware builds with and without the variable.
+
+### RD.15.5 [code+hw] GT911 driver and `touch_task` (no finger)
+
+- `firmware/src/gt911.rs` (reset, probe 0x5D/0x14, info, poll, clear); `touch_task` (owns
+  `Ch422g`, GPIO4); `Ch422g::bus()`; `TAP` signal; `ui_task` waits on ticker or `TAP`, and on a
+  tap calls `App::hit` → `pipeline.tap` → logs → `tick`. Logs as in the design.
+- *Verify:*
+  - Bench (live build and busy demo): markers `touch: gt911 ok addr=0x5d id=911` (60 s), then
+    `touch: stats polls=` with polls 1450–1550 per 60 s (25 Hz ± 3 %), `err=0`, `taps=0`.
+    Record `fw=` and `res=`. If `res` is not 800×480, record it (mapping scales).
+  - No regression: `ui: render` times as in RD.14.4, `restart: frames/s` 29–30, no panic over
+    10 min, gate K1 (record `.bss` growth from the ELF and `internal_min`).
+  - K4 burst metric again with touch polling on: ≤ 1 per 100 (K17).
+  - Negative path: a build with a wrong GT911 address constant (temporary, not committed) logs
+    `touch: gt911 missing` and the UI keeps running.
+
+### RD.15.6 [code+hw] Scripted taps on the board (`touch-script`)
+
+- Feature `touch-script` (needs `demo` for the deterministic script; a live variant uses only
+  `TapRank`/`TapPanel`). `ui_task` publishes the shown blips for the script.
+- *Verify:*
+  - Busy demo build with `ADSB_SELECT_TIMEOUT_S=20`: the `select:`/`touch: script` lines equal
+    `touch-script.log` from RD.15.3 (same ICAOs, same outcomes, same order; times ± 1 s).
+    Snapshots right after step 1 and step 4: cyan mark + `MANUAL` badge + the selected callsign
+    in the panel; then yellow mark on the closest.
+  - Live build with the live script (`TapRank(2)` at 60 s, `TapPanel` at 120 s, default timeout):
+    after the tap, `meta: req icao=<selected>` within 5 s (unless cached; then the panel shows the
+    metadata at once) and, after the 3 s dwell, `photo: ok|none icao=<selected>`; after the panel
+    tap the panel shows the closest again (`ui: focus` / `radar: focus=` lines). No more than 1
+    request/s.
+  - Response time: log the time from `touch: tap` to the end of the following `ui: render`;
+    record it (target ≤ 200 ms outside TLS handshakes).
+
+### RD.15.7 [user] Finger check
+
+Needs the user at the board; the orchestrator reads the log.
+
+- Live build (no script). The user:
+  1. taps near the four corners of the screen (about 10 px from each edge) and the centre; the log
+     `touch: tap x=… y=…` values must be within ±15 px of the aimed points, with no axis swap or
+     mirror. If not: set the calibration constant and repeat.
+  2. taps a blip that is not the closest → it gets the cyan mark, the panel shows it with
+     `MANUAL 60 s` counting down;
+  3. taps the info panel → back to the closest;
+  4. taps a blip and waits 60 s → back to the closest by itself;
+  5. tries a few taps on small blips near the ring edges and in a crowded area, and says if the
+     target size feels right (`TOUCH_RADIUS_PX`).
+- Record the user's answers and the log excerpt (counts only, no positions of aircraft) in the
+  revision log.
+
 ---
 
 ## Risks
@@ -645,19 +1200,37 @@ RD.11 `meta` module, behind the existing Host/Origin guard.
 | K12 | **App image too large** for the app partition (Slint + fonts + TLS + zune-jpeg + serde_json) [VERIFY the current partition table] | Medium / medium | Check the ELF section sizes after RD.2, RD.8, RD.10; if needed add a custom partition table for the 16 MB flash (one factory app of up to about 6 MB). |
 | K13 | **Unattended run stalls** (bench down, camera moved, moiré makes photos hard to judge, quota) | Medium / medium | Stop rules in Plan; independent steps continue; visual INCONCLUSIVE is reported, not guessed; serial-log markers carry most verifies. |
 | K14 | **Fallback proxy exposure on the LAN** | Low / medium | Fixed upstreams, input validation, optional client allow-list, read-only, no location data passes through it, runs only when the user starts it. |
+| K15 | **`PIXEL_ASPECT` wrong**: the panel's active area is not 154.08 × 85.92 mm, or the user's impression came partly from viewing angle [VERIFY] | Medium / low | RD.14.1: bench plausibility (border ratio 1.79 vs 1.67) and the user's ruler (decisive). The constant is one line; the measured value is committed. Stop RD.14 if the bench says square pixels. |
+| K16 | **Background image too slow** (O7c): every repainted radar pixel reads RGB8 from PSRAM instead of a solid fill; busy partial was already 51–76 ms | Medium / medium | Render gate in RD.14.4 (busy partial ≤ 100 ms, full ≤ 400 ms); fallback O7d ring tiles inside the step; last resort the 0.5 Hz radar rule. |
+| K17 | **K4 comes back**: 12 MHz is a threshold (13 MHz still glitched 21/100). More PSRAM reads (background image) and more flash-resident code per second (touch polling, extra renders) can push it over | Medium / high | K4 burst metric in RD.14.4 and RD.15.5 (≤ 1 per 100, busy demo). If it fails: try 11 MHz (parent M3; 27 Hz refresh) and report; touch polling can drop to 10 Hz or use INT (O9a). |
+| K18 | **GT911 details wrong** (register map, address after reset, reset timing through the CH422G, held-finger report behaviour, resolution not 800×480) [VERIFY] | Medium / medium | Probe 0x5D then 0x14; log id, firmware and resolution; scale by the reported resolution; tap detector tolerates missing reports; no panic, UI works without touch; RD.15.5 log check and RD.15.7 corners. |
+| K19 | **Taps lost or late during executor stalls** (TLS handshake up to about 4 s, photo decode about 0.5 s): the user taps and nothing happens | High (at times) / low | Extra render at once on a tap when the executor runs; the stall windows are short and rare (keep-alive, cache). Documented for the user. A real fix is the interrupt-executor idea from RD.9 (not planned). |
+| K20 | **Hit-test and drawing disagree**: label geometry is in Rust and in `app.slint`; blip positions differ between what was shown and the current snapshot | Low / medium | Hit-test only on the **shown** blips; label constants in one Rust place with a render test that checks the Slint label lies inside the Rust rectangle. |
+| K21 | **Internal SRAM**: the `touch_task` future (large esp-hal async I2C futures) goes to internal `.bss` | Medium / medium | Measure `.bss` growth and `internal_min` in RD.15.5; K1 gate ≥ 10 KB. If tight, make the I2C calls through one small non-inlined function, or lower the future size by reading into a static buffer. |
+| K22 | **Selection UX**: near misses on a crowded radar, the wrong of two close blips, the timeout too short or long | Medium / low | 28 px aspect-weighted radius (about 10 mm target), nearest wins, label hit area, misses keep the selection, panel tap to go back, timeout is a build variable; the user judges in RD.15.7. |
+| K23 | **The finger path cannot be verified unattended** (bench cannot touch) | High / medium | `touch-script` covers detector → hit → selection → panel → lookups on the board and matches the sim log; GT911 init/poll is checked by log; only the finger coordinates and feel are a [user] step (RD.15.7). |
+| K24 | **Snapshot/App API change** (range moves into `FeedPipeline`, new `Snapshot` fields) breaks tests or changes the sim's reset behaviour | Low / low | `Sim::reset` and `start_live` already make a new pipeline (so range and selection reset with it); all hand-built `Snapshot`s updated in RD.15.1; `frame_hash` parity test. |
 
 **Deliberately deferred:** touch (1.6, 4.4), list and detail views (4.5), the "just passed" text
 state, label collision avoidance on the radar, a map background, decoding on core 1, photo
 sources other than planespotters (for example adsbdb `url_photo`), OTA, the flightradar24
 cross-check and the AP/feed outage tests (need a human), the open sim-live distance issue of the
-parent (unrelated to this feature).
+parent (unrelated to this feature). *(Revision 3: parent 1.6 and the "manual override" part of
+4.4 are now RD.15. Still deferred from revision 3: aspect correction of the photo and of text,
+GT911 INT mode (O9a), gestures (drag, long press), multi-touch, backlight control by touch, a
+selection timeout set at runtime, the interrupt executor against K19.)*
 
 **Unverified (summary):** Slint 1.18 software renderer: `Path`, rotation, runtime RGB8 images;
 `zune-jpeg` `no_std` build and Xtensa speed; `jpeg-encoder` as dev-dependency; adsbdb combined
 query and aircraft schema; planespotters JSON shape, image CDN host, terms and User-Agent rule;
 the CAs of all three hosts and embedded-tls support for them; mbedtls-rs build model; esp-alloc
 region order and esp-radio internal-caps use; cargo verbose output of `rustc-env`; the current
-app partition size.
+app partition size. *Revision 3:* the panel active area (154.08 × 85.92 mm assumed) and so
+`PIXEL_ASPECT`; the GT911 register map, held-finger reporting, INT configuration (0x804D) and
+configured resolution; the esp-hal 1.2 API to switch GPIO4 from output to input; the board render
+cost of a 448×448 RGB8 image; `.bss` size of the `touch_task` future. (Verified in revision 3:
+the vendored Slint 1.18.1 software renderer draws no `Path` in line-by-line mode and supports no
+transformations.)
 
 ---
 
@@ -1186,3 +1759,26 @@ app partition size.
   Comment fix in restart.rs (blank time at 12 MHz). Open: true day traffic of 7–9 blips in range
   only covered by the busy demo; 12 MHz is a threshold (13 MHz still glitches 21/100), so a
   heavier load could need 11 MHz. **RD.2 closed.**
+
+- 2026-10-24, **revision 3 (architect): design and plan for RD.14 (radar pixel aspect) and RD.15
+  (touch selection)**. Not pre-approved; needs the user's review before implementation.
+  - **Added:** status note; conventions (step IDs RD.14.1–RD.14.4 and RD.15.1–RD.15.7, risks up to
+    K24, the [user] tag); decisions RD-D8 (touch selection, user semantics) and RD-D9 (aspect fix);
+    "Context for revision 3" (facts from the code at c804300, including the verified Slint
+    software-renderer limits: no `Path` in line-by-line mode, no transformations); options O6–O10;
+    ADR-004 (aspect constant `PIXEL_ASPECT` = 1.076 in `adsb-core::radar` [VERIFY]; elliptic rings
+    as one RGB8 background image with a render gate and a ring-tile fallback; sim keeps device
+    pixels plus `*-physical.png` and a physical-aspect canvas; selection in `FeedPipeline` via a
+    new `adsb_core::select`; GT911 polled at 25 Hz with our own driver; hit-test in Rust on the
+    shown blips, 28 px aspect-weighted radius plus label rectangles; `touch-script` debug feature
+    for finger-free board tests; `ADSB_SELECT_TIMEOUT_S` default 60 s, range 10–3600); config
+    row `ADSB_SELECT_TIMEOUT_S`; `touch_task` in the firmware task diagram; design sections "Radar
+    pixel aspect (RD.14)" and "Touch selection (RD.15)"; plan rows and steps RD.14.1–RD.14.4,
+    RD.15.1–RD.15.7; risks K15–K24; deferred and unverified items for revision 3.
+  - **Changed:** RD-D7 (touch selection on the radar is now in scope; list/detail views stay out);
+    the radar projection rule (x offset divided by `PIXEL_ASPECT`, note added in place).
+  - **Removed:** nothing.
+  - Choices the user may want to change in review: the 60 s default timeout; "tap on empty radar
+    keeps the selection"; "tap on the closest aircraft does not start an override (and ends a running one)"; "tap on the
+    panel returns to the closest"; the cyan mark and the `MANUAL 52 s` badge in place of the
+    OVERHEAD/APPROACHING/NEAREST badge; photo and text aspect stay uncorrected.

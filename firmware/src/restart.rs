@@ -107,7 +107,7 @@ fn restart() {
     if display::CONTINUOUS {
         reset_dma(ch);
     } else {
-        // The frame ends after the vertical blank (<= ~0.6 ms); the bound only guards a hung LCD.
+        // The frame ends after the vertical blank (12 lines: ~0.8 ms at 12 MHz, ~0.6 ms at 16 MHz); the bound only guards a hung LCD.
         let tw = now_us();
         while lcd.lcd_user().read().lcd_start().bit_is_set() && now_us().wrapping_sub(tw) < 3000 {}
         wait = now_us().wrapping_sub(tw);

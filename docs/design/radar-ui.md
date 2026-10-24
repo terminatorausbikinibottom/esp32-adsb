@@ -1175,3 +1175,14 @@ app partition size.
     next closest is selected) or after a configurable timeout. Needs an architect revision first
     (GT911 driver, hit-testing on the radar, selection policy in adsb-core, config variable and its
     default, sim support with the mouse).
+
+- 2026-10-24, **K4 QA PASS** (9af2c78, PCLK 12 MHz, 29 Hz). Busy demo: 16 MHz 31.9 / 29.7 glitched
+  per 100 (reproduced), 12 MHz 0 / 0 / 0 / 0 (232 frames each). Metric checked by eye and by a raw
+  consecutive-frame difference count (16 MHz 80/237, 12 MHz 1–4/237). Live (5–8 aircraft in the
+  feed, 2–3 blips in range): 0 K4-type glitches by eye in ~3,900 frames, including windows with TLS
+  handshakes and photo fetch+decode; the median counter flags focus changes (normal single-buffer
+  tearing for 1–2 frames), so the live success figure is counted by eye. Restart 29–30 fps,
+  `isr_max_us` ≤ 34 (blank ~0.8 ms), no panic in 368 s. User visual check: no flickering.
+  Comment fix in restart.rs (blank time at 12 MHz). Open: true day traffic of 7–9 blips in range
+  only covered by the busy demo; 12 MHz is a threshold (13 MHz still glitches 21/100), so a
+  heavier load could need 11 MHz. **RD.2 closed.**

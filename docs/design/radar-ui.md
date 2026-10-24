@@ -1131,3 +1131,13 @@ app partition size.
   on the board: `photo: none` / `too big` paths (code + host tests only); cause of one 17 s feed gap
   with frames/s=0 outside any photo flow (likely a traffic lull, not proven). Beads entry pending
   (chain blocked by RD.2).
+
+- 2026-10-24, **review fixes QA PASS** (261cd8e fmt only, 8d89584 render → `Option<Range>` + Slint
+  `no_data` bool, f40816a TLS time limits (connect 10 s, handshake 15 s, I/O 10 s each, socket
+  timeout 10 s), 88cbef6 bounce build, 8966778 `SOCKETS = 6` (5 concurrent users: DHCP, DNS, feed
+  TCP, SNTP UDP, one HTTPS TCP, plus 1 spare; supersedes the RD.10 note "5 is enough"), b6051b4 CI
+  `--features photo,tls`). QA reproduced the old panic in a scratch copy (Quiet→JustPassed gives
+  drawn with y0=MAX, y1=0). Board 336 s, no panic. Not verified: a real TLS timeout or `Stale`
+  retry (code reading only; no host harness for the Xtensa-only TLS path). Residual (low): the read
+  limit is per read, not per reply. Deferred MINORs stay open: build_config.rs:85, ui.rs:30,
+  build.rs:5, lookup.rs:153, tracker.rs:285, main.rs:10.

@@ -287,6 +287,20 @@ impl Sprites {
     }
 }
 
+/// Rasterises the radar background (`radius_ring_px` 0 = no radius ring) and gives it to Slint.
+fn set_background(ui: &AppWindow, radius_ring_px: i32, now: fn() -> Duration) -> (Duration, usize) {
+    let t0 = now();
+    let rgb = radar::background(u16::try_from(radius_ring_px).ok().filter(|&r| r > 0));
+    ui.set_radar_bg(Image::from_rgb8(
+        SharedPixelBuffer::<Rgb8Pixel>::clone_from_slice(
+            &rgb,
+            radar::RADAR_SIZE_PX as u32,
+            radar::RADAR_SIZE_PX as u32,
+        ),
+    ));
+    (now().saturating_sub(t0), rgb.len())
+}
+
 /// View-model plus the Slint window. Owns the last values pushed to Slint.
 pub struct App {
     window: Rc<MinimalSoftwareWindow>,
@@ -296,6 +310,9 @@ pub struct App {
     range: RangeState,
     blips: Rc<VecModel<ui::Blip>>,
     sprites: Sprites,
+    now: fn() -> Duration,
+    /// Time and size of the last radar background build, until taken.
+    bg_build: Option<(Duration, usize)>,
 }
 
 struct SlintPlatform {
@@ -324,6 +341,7 @@ impl App {
         .map_err(|_| PlatformError::Other("platform already set".into()))?;
         window.set_size(PhysicalSize::new(WIDTH as u32, HEIGHT as u32));
         let ui = AppWindow::new()?;
+        let bg_build = Some(set_background(&ui, 0, now));
         let mut sprites = Sprites::new();
         // Dim north-up plane for the "no photo" placeholder.
         ui.set_plane_icon(sprites.get(&Blip {
@@ -350,7 +368,15 @@ impl App {
             range: RangeState::default(),
             blips,
             sprites,
+            now,
+            bg_build,
         })
+    }
+
+    /// Time and byte size of the radar background built since the last call (the first one at
+    /// start-up, then one per change of the radius ring), for the platform's log.
+    pub fn take_bg_build(&mut self) -> Option<(Duration, usize)> {
+        self.bg_build.take()
     }
 
     /// The values last pushed to Slint.
@@ -453,7 +479,7 @@ impl App {
             ui.set_no_data(new.kind == CardKind::NoData);
         }
         if old.radius_ring_px != new.radius_ring_px {
-            ui.set_radius_ring(new.radius_ring_px as f32);
+            self.bg_build = Some(set_background(ui, new.radius_ring_px, self.now));
         }
         if old.blips != new.blips {
             for (i, b) in new.blips.iter().enumerate() {

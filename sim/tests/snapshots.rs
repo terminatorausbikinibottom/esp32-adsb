@@ -1,26 +1,68 @@
 //! Renders keyframes (overflight states, busy, edge, range steps, track angles) to `target/ui-snapshots/*.png`.
 use adsb_app::{Badge, CardKind, HEIGHT, Status, WIDTH};
 use adsb_core::meta::FocusMeta;
+use adsb_core::radar::PIXEL_ASPECT;
 use adsb_core::scenario::{Kind, overflight as t};
 use adsb_core::tracker::{AircraftView, Card, Counters, Marker, PositionView, Snapshot};
 use sim::{Sim, fixtures};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-fn save(sim: &Sim, dir: &Path, name: &str) -> PathBuf {
-    let path = dir.join(format!("{name}.png"));
+/// Width of the physical-aspect view: each row stretched by `PIXEL_ASPECT`.
+const PHYS_W: usize = (WIDTH as f64 * PIXEL_ASPECT + 0.5) as usize;
+
+fn write_png(path: &Path, w: usize, rgba: &[u8]) {
     let mut enc = png::Encoder::new(
-        std::fs::File::create(&path).unwrap(),
-        WIDTH as u32,
+        std::fs::File::create(path).unwrap(),
+        w as u32,
         HEIGHT as u32,
     );
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
-    enc.write_header()
-        .unwrap()
-        .write_image_data(&sim.rgba())
-        .unwrap();
+    enc.write_header().unwrap().write_image_data(rgba).unwrap();
+}
+
+/// Rows resampled horizontally (linear) to the shape the panel shows: rings must be round in it.
+fn physical_rgba(rgba: &[u8]) -> Vec<u8> {
+    let mut out = vec![0u8; PHYS_W * HEIGHT * 4];
+    for y in 0..HEIGHT {
+        for x in 0..PHYS_W {
+            let f = ((x as f64 + 0.5) * WIDTH as f64 / PHYS_W as f64 - 0.5)
+                .clamp(0.0, (WIDTH - 1) as f64);
+            let (i, t) = (f as usize, f.fract());
+            let j = (i + 1).min(WIDTH - 1);
+            for c in 0..4 {
+                let (p, q) = (rgba[(y * WIDTH + i) * 4 + c], rgba[(y * WIDTH + j) * 4 + c]);
+                out[(y * PHYS_W + x) * 4 + c] =
+                    (f64::from(p) * (1.0 - t) + f64::from(q) * t + 0.5) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// Saves `name.png` (device pixels) and `name-physical.png` (stretched by the pixel aspect).
+fn save(sim: &Sim, dir: &Path, name: &str) -> PathBuf {
+    let path = dir.join(format!("{name}.png"));
+    write_png(&path, WIDTH, &sim.rgba());
+    write_png(
+        &dir.join(format!("{name}-physical.png")),
+        PHYS_W,
+        &physical_rgba(&sim.rgba()),
+    );
     path
+}
+
+/// Extent (first..=last) of ring-coloured pixels along a line of `n` samples; `at(i)` is the RGB.
+fn ring_extent(n: usize, at: impl Fn(usize) -> [u8; 3]) -> usize {
+    // Anti-aliased ring pixels are at least half way from the background to the ring colour.
+    let hit = |i| {
+        let [r, g, b] = at(i);
+        (0x16..=0x38).contains(&r) && (0x22..=0x48).contains(&g) && (0x2c..=0x60).contains(&b)
+    };
+    let first = (0..n).find(|&i| hit(i)).expect("no ring");
+    let last = (0..n).rev().find(|&i| hit(i)).unwrap();
+    last - first + 1
 }
 
 fn distinct_colours(sim: &Sim) -> usize {
@@ -176,6 +218,22 @@ fn keyframes_render_to_png() {
             <= 13
     );
     shots.push(save(&sim, &dir, "7-busy"));
+    // The outer ring is narrower than tall by the pixel aspect in device pixels and round once
+    // stretched like the panel does. Row and column next to the cross-hair (rows 223 / column 223).
+    let width = ring_extent(448, |x| pixel(&sim, x as i32, 32 + 223)) as f64;
+    let height = ring_extent(448, |y| pixel(&sim, 223, 32 + y as i32)) as f64;
+    assert!(
+        (width / height - 1.0 / PIXEL_ASPECT).abs() < 0.01,
+        "{width} x {height}"
+    );
+    let phys = physical_rgba(&sim.rgba());
+    let at =
+        |x: usize, y: usize| -> [u8; 3] { phys[(y * PHYS_W + x) * 4..][..3].try_into().unwrap() };
+    let box_w = (448.0 * PIXEL_ASPECT) as usize;
+    let col = (223.5 * PIXEL_ASPECT) as usize;
+    let pw = ring_extent(box_w, |x| at(x, 32 + 223)) as f64;
+    let ph = ring_extent(448, |y| at(col, 32 + y)) as f64;
+    assert!((pw / ph - 1.0).abs() < 0.02, "physical {pw} x {ph}");
 
     sim.seek(Kind::Edge, 1, 70_000);
     shots.push(save(&sim, &dir, "8-edge"));

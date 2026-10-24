@@ -1809,3 +1809,21 @@ transformations.)
   the image is mirror-symmetric except for the two cross-hair lines (symmetry test skips rows and
   columns 223/224; "old circle is background" is checked at (432, 223) because row 224 is the
   cross-hair). Host time of `background(Some(60))` (release): 0.39 ms; board time in RD.14.4.
+
+- 2026-10-24, **RD.14.3 done (elliptic rings in `adsb-app` and the sim, host)**. `app.slint`: the two
+  cross-hair rectangles, the `Ring` component and the three rings are replaced by one 448x448
+  `Image` (`radar-bg`, first child of the radar box); focus mark 28x30, `border-radius` 14. `App`
+  builds the background in `new()` and again when `radius_ring_px` changes; `App::take_bg_build()`
+  returns (time, bytes) for the platform log (used in RD.14.4). Sim: the canvas gets the physical
+  CSS width (`800 * PIXEL_ASPECT` = 861 px, set in `web.rs`; needs the web-sys feature
+  `CssStyleDeclaration`); `snapshots.rs` writes a `*-physical.png` next to every keyframe (all of
+  them show the radar box, not only a subset) and checks, in `7-busy`, outer ring width/height =
+  1/`PIXEL_ASPECT` +-0.01 (device pixels) and 1.00 +-0.02 (physical). `trunk build --release` ok.
+  **`frame_hash` references changed on purpose (all six keyframes, the radar box now comes from the
+  background image and the focus mark is 28 px wide):** 4b67e25bc82bfe53 -> e17dac042ff64347,
+  96901448b2f6427c -> 3add3e907e624f6f, 917226b90e9de636 -> 50a6e2223a79619b,
+  d32e092c3721c3a3 -> bf8dc80dbcf77ab9, 0d2bb9b246e12264 -> 7618ffea8d872a38,
+  f1b1ab0b78e30641 -> 028cdeacffff413d. Host render (release, busy at 100 s): full 52 ms
+  (includes scenario seek), 1 Hz tick about 0.5 ms (incl. update and render). PNGs read by eye:
+  rings smooth, round in `*-physical.png`, blips on the rings, labels not cut, focus mark around
+  the focus blip.

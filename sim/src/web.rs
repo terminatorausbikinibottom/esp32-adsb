@@ -402,6 +402,14 @@ fn start() {
     let canvas: HtmlCanvasElement = by_id(&doc, "screen");
     canvas.set_width(WIDTH as u32);
     canvas.set_height(HEIGHT as u32);
+    // Shown with the panel's physical shape (pixels are wider than tall), so the rings look round.
+    let w = (WIDTH as f64 * adsb_core::radar::PIXEL_ASPECT).round();
+    let style = canvas.style();
+    style.set_property("width", &format!("{w}px")).unwrap();
+    style
+        .set_property("aspect-ratio", &format!("{w} / {HEIGHT}"))
+        .unwrap();
+    style.set_property("height", "auto").unwrap();
     let ctx = canvas
         .get_context("2d")
         .unwrap()

@@ -1900,3 +1900,10 @@ transformations.)
     (which the panel answered with its own colour cycle) probably left it in that state; it needs a
     power cycle by the user (USB unplug/replug). The bench camera view shows the panel (photos
     containing anything else were deleted).
+
+- 2026-10-24, **RD.14 closed with an accepted gap** (orchestrator): O7e kept. Host tests (adsb-core
+  78, adsb-app, sim incl. snapshots and hashes), fmt and clippy green; sim `7-busy-physical.png` shows
+  round rings. Board: render back at the pre-RD.14 level, live gates met. Open: the K4 burst and the
+  user's visual check, blocked because the panel needs a power cycle (see
+  [radar-ui-followups.md](radar-ui-followups.md) FU-0). No independent QA agent for this step (the
+  user asked to finish within the remaining token budget).

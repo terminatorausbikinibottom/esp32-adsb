@@ -16,6 +16,15 @@ adds load at the 12 MHz K4 threshold, so repeat the K4 burst check.
 
 ## Display
 
+### FU-0 (P1) Power-cycle the panel, then finish the RD.14 check
+
+Since about 17:00 on 2026-10-24 the panel shows its own solid-colour cycle and ignores our signal,
+while the firmware runs normally (likely left there by the 11 MHz experiment, below the panel
+minimum). Unplug and replug the board's USB. Then: K4 burst on the busy demo with the fixed
+`k4.sh` (gate ~0 per 100; the render time is back at the pre-RD.14 level that measured 0), and a
+look at the panel: rings round, blips on the rings, no flicker. If K4 is back, revert ec83f24's
+parent changes to e24c962's ring code (last known working state).
+
 ### FU-2 (P1) K4 margin at peak traffic
 
 PCLK 12 MHz is a threshold, not a proven margin: 13 MHz still glitches about 21 per 100 frames,

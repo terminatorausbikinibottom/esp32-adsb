@@ -351,3 +351,22 @@ Next: RD.14 round radar (pixel aspect), RD.15 touch selection.
 
 ![bg right:45% contain](img/20261024T195501-7-busy-physical.png)
 
+
+---
+
+<!-- _class: log -->
+
+## Great success: round and steady
+
+<span class="time">2026-10-24 20:04 UTC</span>
+
+**Round radar confirmed on the board** after your USB power cycle.
+
+- K4 bursts (busy demo, 3 valid runs): 0 / 0 / 0 glitches per 100 (2 flagged frames in run 1 were a normal 1 Hz value update, checked by eye).
+- Rings look round on the panel (photo: busy demo, invented traffic).
+- Live build is back on the board.
+
+Still to do by you: push + PR (commands in the previous message).
+
+![bg right:45% contain](img/20261024T200457-o7e_panel.jpg)
+

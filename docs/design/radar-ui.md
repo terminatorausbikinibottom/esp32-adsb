@@ -952,3 +952,13 @@ app partition size.
   only in the exact expected state (certificate verified, no signature yet), else `InvalidCertificate`. Test
   `repeated_certificate_verify_is_an_error_not_a_panic` (mode `dupcv` in `tools/tls-hostile/srv.py`); it fails with the
   panic when the guard is removed.
+
+- 2026-10-24, **RD.8 QA PASS** (0a24ded, eb67aff, 33b5635, a516943, c197b49; beads entry pending).
+  Gate: embedded-tls 0.19 directly (not reqwless, see engineer entry) verifies all three hosts.
+  Security history: orchestrator found missing basicConstraints/CA checks (fixed eb67aff); QA
+  FAIL F1 critical: embedded-tls accepts a handshake without Certificate/CertificateVerify (fixed
+  a516943 via `tlsauth::open_verified`, regression tests in `tools/tls-hostile/`; fix loop 1/2);
+  QA F6 DoS (repeated CertificateVerify panics the library) fixed c197b49 (verified by the
+  orchestrator: tls-hostile 7/7). Open, low: F2 CN fallback, F3 residual (SNTP spoofing after the
+  build time), F4 library unwraps. Upstream report for F1 drafted above, NOT filed (user decides).
+  planespotters now answers 403 without a contact: RD.10 waits for `ADSB_HTTP_CONTACT`.

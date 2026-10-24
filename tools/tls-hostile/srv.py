@@ -60,19 +60,21 @@ send_hs(hsmsg(8, b"\x00\x00"))
 # modes: nocert (no Certificate / CertificateVerify), nocv (real chain, no proof of the key),
 # nocv_bad (forged chain, no proof), good (real chain + valid CertificateVerify),
 # forged (attacker chain + CertificateVerify with the attacker key),
-# leafsigned (a leaf-signed leaf + valid CertificateVerify)
+# leafsigned (a leaf-signed leaf + valid CertificateVerify), dupcv (good flow, CertificateVerify sent twice)
 CHAINS = {"nocv": ("leaf", "inter"), "nocv_bad": ("badleaf", "attinter"), "good": ("leaf", "inter"),
-          "forged": ("badleaf", "attinter"), "leafsigned": ("forged", "leaf", "inter")}
+          "forged": ("badleaf", "attinter"), "dupcv": ("leaf", "inter"), "leafsigned": ("forged", "leaf", "inter")}
 if mode in CHAINS:
     names = CHAINS[mode]
     chain = [open(f"{fx}/{n}.der", "rb").read() for n in names]
     body = b"\x00" + struct.pack(">I", sum(3 + len(x) + 2 for x in chain))[1:] + b"".join(struct.pack(">I", len(x))[1:] + x + b"\x00\x00" for x in chain)
     send_hs(hsmsg(11, body))
-    if mode in ("good", "forged", "leafsigned"):
+    if mode in ("good", "forged", "leafsigned", "dupcv"):
         k_leaf = serialization.load_pem_private_key(open(f"{fx}/{names[0]}.key", "rb").read(), None)
         content = b"\x20" * 64 + b"TLS 1.3, server CertificateVerify\x00" + H(tr)
         sig = k_leaf.sign(content, ec.ECDSA(hashes.SHA256()))
         send_hs(hsmsg(15, struct.pack(">HH", 0x0403, len(sig)) + sig))
+        if mode == "dupcv":
+            send_hs(hsmsg(15, struct.pack(">HH", 0x0403, len(sig)) + sig))
 fin = hmac.new(expand_label(s_hs, b"finished", b"", 32), H(tr), hashlib.sha256).digest()
 send_hs(hsmsg(20, fin))
 c.settimeout(3)

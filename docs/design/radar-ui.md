@@ -946,3 +946,9 @@ app partition size.
     TLS result is unaffected; RD.9/RD.10 need `ADSB_HTTP_CONTACT` from the user. Handshake times: adsb 4.3 s,
     planespotters 1.8-4.9 s, image 0.9 s (the 4.9 s planespotters run followed a server-side chain change or a
     slower path; not investigated).
+
+- 2026-10-24, **RD.8 fix 3 (QA F6)**: Certificate, CertificateVerify, CertificateVerify panicked inside embedded-tls
+  (`pki.rs:137`, the transcript is gone after the first CertificateVerify). `tlsauth` now forwards a CertificateVerify
+  only in the exact expected state (certificate verified, no signature yet), else `InvalidCertificate`. Test
+  `repeated_certificate_verify_is_an_error_not_a_panic` (mode `dupcv` in `tools/tls-hostile/srv.py`); it fails with the
+  panic when the guard is removed.

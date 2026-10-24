@@ -100,3 +100,9 @@ async fn unsynced_clock_refuses_the_good_flow() {
     let r = handshake::<Unsynced>("good").await;
     assert!(matches!(r, Err(OpenError::Tls(TlsError::InvalidCertificate))), "{r:?}");
 }
+
+#[tokio::test]
+async fn repeated_certificate_verify_is_an_error_not_a_panic() {
+    let r = handshake::<Now>("dupcv").await;
+    assert!(matches!(r, Err(OpenError::Tls(TlsError::InvalidCertificate))), "{r:?}");
+}

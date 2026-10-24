@@ -71,8 +71,9 @@ impl<C: TlsClock> TlsVerifier<Aes128GcmSha256> for Checked<'_, C> {
     }
 
     fn verify_signature(&mut self, verify: CertificateVerifyRef) -> Result<(), TlsError> {
-        // Also keeps embedded-tls from unwrapping a missing certificate transcript.
-        if !self.seen.cert.get() {
+        // Forward only in the exact expected state: embedded-tls unwraps the certificate transcript,
+        // which is gone after the first CertificateVerify (a repeat would panic) or never set.
+        if !self.seen.cert.get() || self.seen.signature.get() {
             return Err(TlsError::InvalidCertificate);
         }
         self.inner.verify_signature(verify)?;

@@ -1083,3 +1083,9 @@ app partition size.
   better (for example Rust `std` on ESP-IDF via esp-idf-svc/esp-idf-hal with IDF's `esp_lcd` RGB
   driver, bounce buffers and XIP-from-PSRAM). The user prefers 100 % Rust but does not accept a
   glitchy UI.
+
+- 2026-10-24, **user decisions for the unattended run**: if the K4 stop rule triggers, the
+  architect writes the platform review **and** a throwaway spike is built on a separate branch
+  (Rust `std` on ESP-IDF via esp-idf-svc: `esp_lcd` RGB panel with bounce buffers and a static
+  Slint frame) to prove glitch-free scanout on the board. No migration of the main firmware
+  without the user. Quota: stop cleanly at **90 % of the weekly limit** (notify first).

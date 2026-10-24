@@ -1861,3 +1861,16 @@ transformations.)
   per window (baseline / O7c / O7c without rings / O7d, ms): 0-40 s 82 / 106 / 78 / 96; 40-90 s 59 / 99 /
   54 / 84. The bursts need to be repeated with the wait loop fixed (read the `alive` of the current
   boot only) before any decision on 0.5 Hz or tile changes.
+
+- 2026-10-24, **RD.14 ring drawing changed (user idea, O7e)**: the ring tiles (O7d) made the radar
+  render 82 → 96 ms and brought K4 back (~1–3 glitched per 100, busy demo); 11 MHz is below the
+  panel minimum. New approach: draw each ring as a Slint `Rectangle` (the old fast border-radius
+  path) whose box is **non-square in pixels**: width = round(height / PIXEL_ASPECT), corner radius
+  = width / 2. This is a stadium; on the glass it deviates from a true circle by at most 1.8 px
+  (outer ring 193×208, 1.7 %) and 1.0 px (half ring 97×104, 2.0 %), below what a 1 px line shows.
+  Remove the ring tiles and the background raster. Projection, sprites, focus mark and hit-test
+  keep PIXEL_ASPECT (RD.14.2 unchanged). Gate unchanged: render time back to the pre-RD.14 level
+  and K4 ~0 per 100 (busy demo, measurement script fixed to read only the current boot's log),
+  plus the user's visual check. Also: the 2026-10-24 watchdog runs (14:44, 16:02) started headless
+  copies of this session that worked in parallel (cc5c8c0, a306ec0) and drove the board; both were
+  stopped at 17:30 and the watchdog is off.

@@ -38,6 +38,11 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      # The firmware's feature set (not default): photo decode and the TLS verifier.
+      - if: matrix.project == 'adsb-core'
+        run: cargo clippy --all-targets --features photo,tls -- -D warnings
+      - if: matrix.project == 'adsb-core'
+        run: cargo test --features photo,tls
       - run: cargo build --target riscv32imc-unknown-none-elf
 
   firmware:

@@ -163,6 +163,8 @@ async fn main(spawner: Spawner) -> ! {
         esp_radio::wifi::WifiController::new(peripherals.WIFI, Default::default())
             .expect("Failed to initialize Wi-Fi controller");
     log_heap("wifi init");
+    #[cfg(feature = "bounce")]
+    let _ = &wifi_controller; // the old bounce path has no network tasks
 
     // Async I2C0; touch_task will take over the bus (and the expander) in step 1.6.
     let mut i2c = I2c::new(

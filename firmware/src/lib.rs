@@ -12,4 +12,6 @@ pub mod net;
 pub mod restart;
 #[cfg(not(feature = "bounce"))]
 pub mod tls;
+// The old bounce path has no UI and no network (ui needs net and lookup).
+#[cfg(not(feature = "bounce"))]
 pub mod ui;

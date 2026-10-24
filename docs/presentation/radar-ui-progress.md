@@ -38,6 +38,8 @@ Design and evidence: `docs/design/radar-ui.md`
 - **Start:** the board showed only a test pattern. No WiFi, no feed, no UI on the device.
 - **After one night:** Slint UI, WiFi, live feed, radar, verified TLS 1.3 and live route/type data
   run on the board. **10 of 14 plan steps passed QA.**
+- **Next morning:** photos on the board, review fixes, and the display glitches fixed with one
+  constant. **All 14 steps closed** (2 not needed or skipped). Touch selection is queued.
 - **How:** architect → engineer → QA → reviewer, unattended. The agents tested on the real board
   through the bench service (flash, serial log, webcam).
 
@@ -51,7 +53,7 @@ Design and evidence: `docs/design/radar-ui.md`
 |---|---|---|
 | RD.0 | stock vs vendored esp-hal | PASS, vendored patch dropped |
 | RD.1 | build config from local `.env`, leak tests | PASS |
-| RD.2 | Slint on the device | runs; **display glitches open (K4)** |
+| RD.2 | Slint on the device | PASS, display glitches fixed at 12 MHz pixel clock |
 | RD.3 | WiFi + live feed | PASS |
 | RD.4 | radar logic (range, projection, sprites, focus) | PASS |
 | RD.5 | radar + info layout (sim) | PASS, Slint renderer bug found and patched |
@@ -59,9 +61,10 @@ Design and evidence: `docs/design/radar-ui.md`
 | RD.7 | metadata parsers, cache, JPEG decode | PASS after 1 fix loop |
 | RD.8 | verified TLS on the device | PASS, embedded-tls bug found and guarded |
 | RD.9 | route/airline/type on the board | PASS with gaps (night traffic) |
-| RD.10 | photo on the board | in progress (needed a User-Agent contact) |
+| RD.10 | photo on the board | PASS (needed a User-Agent contact) |
 | RD.11 / 12 | proxy fallback / sim live metadata | not needed / skipped |
-| RD.13 | soak | no reboot or panic in 3 h+, internal heap flat |
+| RD.13 | soak | PASS, 6 h 31 min, 0 reboots, heap flat |
+| RD.14 / 15 | round radar / touch selection | queued |
 
 ---
 
@@ -69,7 +72,8 @@ Design and evidence: `docs/design/radar-ui.md`
 
 | | |
 |---|---|
-| Scanout | 39–40 fps |
+| Scanout | 29 fps at 12 MHz (was 39–40 at 16 MHz) |
+| Photo decode + scale | 0.5–0.57 s |
 | Full UI redraw | 77–78 ms |
 | Typical 1 Hz update | 7 ms |
 | Internal heap minimum | 20.6 KB (gate ≥ 10 KB) |
@@ -86,7 +90,7 @@ Design and evidence: `docs/design/radar-ui.md`
 2. **Slint 1.18.1 renderer:** an off-by-one error gave wrong frames on partial repaint.
    Patched and regression-tested.
 3. **Display glitches (K4):** flash cache refills starve the display DMA, because flash and PSRAM
-   share one bus. The glitches get worse with traffic.
+   share one bus. The glitches got worse with traffic. Fixed by a lower pixel clock.
 4. **Process:** the watchdog treated a question waiting for the user as a crash and started a
    headless copy of the session. That copy did the night's work.
 
@@ -115,14 +119,18 @@ Design and evidence: `docs/design/radar-ui.md`
 
 ---
 
-## Display glitches: plan
+## Display glitches: the fix
 
-1. Lower the pixel clock to 12–13 MHz, together with bigger CPU caches.
-2. Find out why 80 MHz QIO flash boot-loops.
-3. **Stop rule:** if these fail, or the work becomes highly experimental, review the platform.
-   - **esp-hal + embassy:** 100 % Rust, but young RGB/DMA support.
-   - **Rust `std` on ESP-IDF:** a mature `esp_lcd` RGB driver with bounce buffers and
-     XIP-from-PSRAM. The app crates stay Rust.
+| Pixel clock | Refresh | Glitched frames / 100 (busy demo) |
+|---|---|---|
+| 16 MHz | 39 Hz | 30.6 |
+| 13 MHz | 32 Hz | 20.7 |
+| **12 MHz** | **29 Hz** | **0** (6 runs) |
+
+- Live, with TLS handshakes and photo decode: 0 glitches in ~3,900 frames. The user saw no flicker.
+- Bigger caches: esp-hal already uses the maximum sizes. QIO and the platform change were not needed.
+- **Stop rule, kept for later:** if a heavier load brings the glitches back, review the platform
+  (esp-hal + embassy vs Rust `std` on ESP-IDF with `esp_lcd`).
 
 > A glitchy UI is of no use, even when it is 100 % Rust.
 
@@ -130,10 +138,10 @@ Design and evidence: `docs/design/radar-ui.md`
 
 ## Open items
 
-- K4 display fix (see the plan).
-- Review: 3 MAJOR findings (a board crash in `ui.rs:160`, a `meta_task` hang after a WiFi drop,
-  CI fmt) and 4 MINOR findings. Fixes approved.
-- PSRAM free falls ~105 KB in 3 h: cache fill or slow leak.
+- RD.14: the radar looks elliptic on the panel (non-square pixels).
+- RD.15: touch selection (tap an aircraft; back to the closest after leaving scope or a timeout).
+- 12 MHz is a threshold: re-check at peak traffic.
+- 6 MINOR review findings deferred.
 - Upstream reports for embedded-tls and Slint are drafted, not filed.
 
 ---

@@ -1850,3 +1850,14 @@ transformations.)
   accept ~1 per 100. Not measured yet: K1 heap gate over 10 min, round-radar photo, user check; the
   bench camera showed something else than the panel at the end of this session (wrong camera, photo
   deleted), so no board photo of the round radar exists yet.
+
+- 2026-10-24, **RD.14.4 correction to the entry above (K4 statistics)**: of the four O7d bursts, the two
+  with 0 flagged frames are **not valid**: the board had just rebooted and showed the "No data"
+  overlay, because the wait loop of the burst script reads stale `alive` lines of the earlier session
+  and fires early (checked by eye: those frames show the overlay, not the busy scene). Valid O7d
+  bursts: 2, both with K4-type glitches at the 1 Hz render ticks (2 frames in 233; about 7 in 232);
+  valid baseline bursts: 3, all 0 (frames checked by eye: busy scene). So the regression is 2 of 2
+  runs against 0 of 3, about 1-3 per 100, not "about 1.0 per 100 over all runs". Render medians
+  per window (baseline / O7c / O7c without rings / O7d, ms): 0-40 s 82 / 106 / 78 / 96; 40-90 s 59 / 99 /
+  54 / 84. The bursts need to be repeated with the wait loop fixed (read the `alive` of the current
+  boot only) before any decision on 0.5 Hz or tile changes.

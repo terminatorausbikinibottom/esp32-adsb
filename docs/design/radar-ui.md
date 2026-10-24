@@ -1874,3 +1874,29 @@ transformations.)
   plus the user's visual check. Also: the 2026-10-24 watchdog runs (14:44, 16:02) started headless
   copies of this session that worked in parallel (cc5c8c0, a306ec0) and drove the board; both were
   stopped at 17:30 and the watchdog is off.
+
+- 2026-10-24, **RD.14.4 with O7e (rings as non-square rounded rectangles), board results so far**.
+  Code: `Ring` in `app.slint` is `round(2R / aspect)` x `2R` px with corner radius = width / 2 (aspect set
+  once from `radar::PIXEL_ASPECT`, radius ring restored); ring tiles, background raster, `RingTile`
+  and the `radar: bg_ms` log removed. `frame_hash` references changed again (rings are Slint
+  rectangles; the pre-RD.14 references were not restored because the rings are narrower now):
+  386073fb3453356a, a76b916f6b46c919, 1c9dd97938a75af9, d4ce84e900a6751d, ecbcf9f5aa34c21e,
+  7afea7e393b83795. In the sim `7-busy` the outer ring is 386 x 416 px (0.928, check 1/1.076 +-0.01)
+  and 416 x 416 in `7-busy-physical.png`; the straight sides of the stadium are visible only at
+  pixel level.
+  - **Render (K16), busy demo, medians in ms, same windows as the table above:** 0-40 s **83** (baseline
+    82), 40-90 s **59** (59), 90-135 s **83** (81); p90 89 / 87 / 92; full 78 ms. Pre-RD.14 level reached.
+  - **Live build, 10 min (`alive` 624 s), feed with 3 blips:** `ui: render partial_ms` median 18, p90 65,
+    max 78 (gate typical <= 80: met); internal free heap min 25.7 KB, last 29.1 KB (gate >= 10 KB:
+    met; steady at 29,108 from the 3rd heartbeat on); PSRAM free falls in steps of about 0.45 MB at photo
+    fetches (7.58 -> 6.40 MB, photo cache filling, no per-tick trend); tick gaps of 1.8 to 4 s at TLS
+    handshakes as known; no panic.
+  - **K4 burst: NOT measured.** `k4.sh` is fixed (flash, then wait on `alive` lines of the current boot only,
+    burst at alive >= 98 s). The first valid burst (alive 99 to 109 s) showed the panel in its own
+    solid-colour cycle (green/blue, not the UI), and the same after `bench reset`, with the
+    diag-aspect image, and with the O7e live and busy builds: the panel does not take our signal
+    any more while the firmware runs normally (restart frames/s 29, scanout and backlight logged). The
+    panel was last seen working at about 17:00 (O7d runs); the 11 MHz experiment of the headless copy
+    (which the panel answered with its own colour cycle) probably left it in that state; it needs a
+    power cycle by the user (USB unplug/replug). The bench camera view shows the panel (photos
+    containing anything else were deleted).

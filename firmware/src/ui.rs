@@ -45,12 +45,22 @@ fn now_ms() -> u64 {
     Instant::now().as_millis()
 }
 
+/// Seed 1, like the sim keyframes, so photos compare with `sim/target/ui-snapshots`.
+#[cfg(feature = "demo")]
+fn demo_scenario() -> adsb_core::scenario::Scenario {
+    use adsb_core::scenario::{Kind, Scenario};
+    let kind = match config::DEMO {
+        Some(config::Demo::Busy) => Kind::Busy,
+        _ => Kind::Overflight,
+    };
+    Scenario::new(kind, 1)
+}
+
 /// The pipeline for the configured receiver (the fictitious one in demo mode).
 pub fn new_pipeline() -> FeedPipeline {
     #[cfg(feature = "demo")]
     if DEMO {
-        use adsb_core::scenario::{Kind, Scenario};
-        return FeedPipeline::new(Scenario::new(Kind::Overflight, 1).receiver());
+        return FeedPipeline::new(demo_scenario().receiver());
     }
     FeedPipeline::new(Config {
         rx_lat_deg: config::RX_LAT,
@@ -75,6 +85,7 @@ pub struct FbUi {
     full_ms: Option<u64>,
     ticks: u32,
     policy: Policy,
+    last_focus: Option<u32>,
 }
 
 impl FbUi {
@@ -91,6 +102,7 @@ impl FbUi {
             full_ms: None,
             ticks: 0,
             policy: Policy::default(),
+            last_focus: None,
         }
     }
 
@@ -111,8 +123,25 @@ impl FbUi {
                 None => info!("ui: focus none"),
             }
         }
-        self.ticks = self.ticks.wrapping_add(1);
         self.app.update(snap, st, meta);
+        // Every 30 s and on focus change; the focus is what the panel title shows (no coordinates).
+        let focus = snap.focus.and_then(|i| snap.list.get(i));
+        let focus_icao = focus.map(|a| a.icao);
+        if self.ticks.is_multiple_of(30) || focus_icao != self.last_focus {
+            let ui = self.app.ui();
+            match focus {
+                Some(a) => match a.callsign.as_ref() {
+                    Some(cs) => info!("radar: range={} blips={} focus={cs}", ui.range_km, ui.blips.len()),
+                    None => info!("radar: range={} blips={} focus={:06X}", ui.range_km, ui.blips.len(), a.icao),
+                },
+                None => info!("radar: range={} blips={} focus=none", ui.range_km, ui.blips.len()),
+            }
+        }
+        if DEMO {
+            info!("demo: scenario_ms={}", st.now_ms); // matches a photo to a sim frame
+        }
+        self.last_focus = focus_icao;
+        self.ticks = self.ticks.wrapping_add(1);
         if self.full_ms.is_none() || kind != self.app.ui().kind {
             info!("ui: card={:?}", self.app.ui().kind);
         }
@@ -184,12 +213,12 @@ pub async fn ui_task(mut ui: FbUi, pipeline: &'static Pipeline) {
     }
 }
 
-/// Plays the fictitious overflight scenario into the pipeline in real time.
+/// Plays the fictitious demo scenario into the pipeline in real time.
 #[cfg(feature = "demo")]
 #[embassy_executor::task]
 pub async fn feed_task(pipeline: &'static Pipeline) {
-    use adsb_core::scenario::{Event, Kind, Scenario};
-    let mut scenario = Scenario::new(Kind::Overflight, 1);
+    use adsb_core::scenario::Event;
+    let mut scenario = demo_scenario();
     let start = Instant::now();
     FEED_OK.store(true, Relaxed);
     let mut tick = Ticker::every(embassy_time::Duration::from_millis(500));

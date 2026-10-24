@@ -1031,3 +1031,20 @@ app partition size.
   tests only → re-check at day traffic (also the ~3.5–4 s executor stall per handshake, K5).
   Bench transport timed out every ~10 min during long `--follow` waits (host side; noted for the
   bench follow-up).
+
+- 2026-10-24, **RD.6 result** (bench, head 237b3c6 + RD.6 change). Firmware: demo `feed_task` and
+  `new_pipeline` now honour `ADSB_DEMO` (`busy` = `Kind::Busy`, seed 1, as the sim keyframe);
+  logs `radar: range=<km> blips=<n> focus=<callsign|ICAO hex|none>` (every 30 s and on focus change)
+  and, in demo builds, `demo: scenario_ms=<ms>` every second.
+  - Busy demo (expectation: ~30 blips, ring labels, focus ring, focus callsign, `—` fields): the
+    photo at scenario_ms ~100-103 s (sim keyframe 7-busy is 100 s) matches the sim PNG: 50 km range,
+    same blip pattern, focus ring and `ZQ6717` in the panel, `no photo`, `—` fields, `+10 beyond`.
+    PASS (the photo is dim and soft; the sim shows the same layout).
+  - Live build: photo (clean frame, glitched=0) shows range 100 km, DLH417 in the panel with
+    metadata (airline, route); logged `radar: range=100 blips=2 focus=DLH417` equal. PASS.
+  - Render times: full 77-78 ms (target <= 400); partial, busy demo (30 blips) 51-76 ms; live 10 min:
+    650 renders, max partial 93 ms, 1 Hz row-limited updates (<100 rows) avg 7 ms, max 10 ms (target
+    <= 80 typical). No 0.5 Hz fallback needed.
+  - K1 gate: 10 min live, `internal_min=20588`, heartbeat `internal_free` 20588-29108 (>= 10 KB), no
+    panic, 4 `ui: tick gap` (TLS handshakes, known).
+  - Not verified: photo (JPEG) panel on the board (RD.10); night traffic = 1-2 aircraft.

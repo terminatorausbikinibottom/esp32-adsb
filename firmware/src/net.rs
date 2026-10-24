@@ -34,7 +34,9 @@ const BACKOFF_MAX: Duration = Duration::from_secs(30);
 const STABLE: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-const SOCKETS: usize = 5; // DHCP, DNS, feed, one for SNTP or HTTPS at a time, spare
+// All at once: DNS and DHCP (stack-owned), feed TCP, SNTP UDP, one HTTPS TCP (meta_task) = 5, plus
+// one spare so a socket that is closing never starves the next `TcpSocket::new` (it panics when full).
+const SOCKETS: usize = 6;
 
 pub type NetRunner = Runner<'static, Interface>;
 

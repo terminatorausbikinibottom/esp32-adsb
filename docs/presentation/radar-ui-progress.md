@@ -276,3 +276,23 @@ Soak still running (round 10 of 12, ends ~09:00 UTC). Full report: `docs/present
 
 Now: photo on the board (RD.10), then the approved review fixes, then the display tests.
 
+
+---
+
+<!-- _class: log -->
+
+## Say cheese: planes have faces now
+
+<span class="time">2026-10-24 09:55 UTC</span>
+
+**RD.10 done, QA PASS:** the closest aircraft now has its planespotters photo on the board (here RYR3LD, Ryanair 737, BRE → STN).
+
+- Photo fetched only for the focus aircraft after 3 s; verified TLS to planespotters and the image host, one connection at a time.
+- JPEG 23–47 KB, decode + scale 0.5–0.57 s on the ESP32-S3; colours correct.
+- Feed: 0 reconnects; internal heap min 20.6 KB.
+- Cost: ~4 s UI pause per photo (TLS handshakes).
+
+Frame picked from a 30 fps burst: most other frames still glitch (K4). Next: approved review fixes, then the display tests.
+
+![bg right:45% contain](img/20261024T095555-f053.jpg)
+

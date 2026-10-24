@@ -1907,3 +1907,9 @@ transformations.)
   user's visual check, blocked because the panel needs a power cycle (see
   [radar-ui-followups.md](radar-ui-followups.md) FU-0). No independent QA agent for this step (the
   user asked to finish within the remaining token budget).
+
+- 2026-10-24, **FU-0 / RD.14 K4 check done** after the user's USB power cycle (panel takes the
+  signal again). O7e busy demo (ec83f24 + docs), fixed `k4.sh`, bursts at alive 98–113 s: 2/232
+  flagged (frames 91–92: the 1 Hz ALT/DIST value update caught mid-change, radar and rings identical,
+  no row shift → 0 K4), 0/232, 0/232. **K4 = 0 per 100.** Rings look round on the panel. Live build
+  flashed back.

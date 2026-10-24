@@ -16,7 +16,7 @@ adds load at the 12 MHz K4 threshold, so repeat the K4 burst check.
 
 ## Display
 
-### FU-0 (P1) Power-cycle the panel, then finish the RD.14 check
+### FU-0 (P1) ~~Power-cycle the panel, then finish the RD.14 check~~ DONE 2026-10-24
 
 Since about 17:00 on 2026-10-24 the panel shows its own solid-colour cycle and ignores our signal,
 while the firmware runs normally (likely left there by the 11 MHz experiment, below the panel

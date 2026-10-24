@@ -296,3 +296,29 @@ Frame picked from a 30 fps burst: most other frames still glitch (K4). Next: app
 
 ![bg right:45% contain](img/20261024T095555-f053.jpg)
 
+
+---
+
+<!-- _class: log -->
+
+## Great success: the screen stopped shaking
+
+<span class="time">2026-10-24 11:36 UTC</span>
+
+**Display glitches (K4) fixed: great success!** One constant: pixel clock 16 → 12 MHz (refresh 39 → 29 Hz).
+
+| Pixel clock | Glitched frames / 100 (busy demo) |
+|---|---|
+| 16 MHz | 30.6 |
+| 13 MHz | 20.7 |
+| **12 MHz** | **0** (6 runs) |
+
+- Live with TLS handshakes and photo decode: 0 glitches by eye in ~3,900 frames. User check on the real panel: "no flickering".
+- Bigger caches: esp-hal already uses the maximum. No platform change needed.
+- Risk: 12 MHz is a threshold (13 MHz still glitches); re-check at peak traffic.
+
+Also done: approved review fixes (crash, TLS timeouts, fmt, CI). Beads up to date: RD.0–RD.13 closed.
+Next: RD.14 round radar (pixel aspect), RD.15 touch selection.
+
+![bg right:45% contain](img/20261024T113627-k4_win.jpg)
+

@@ -6,6 +6,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use core::future::Future;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering::Relaxed};
 
 use adsb_core::tlsauth::{self, OpenError};
@@ -17,6 +18,7 @@ use embassy_time::{Duration, Instant, with_timeout};
 use embedded_io_async::{ErrorType, Read, Write};
 use embedded_tls::{Aes128GcmSha256, TlsClock, TlsConnection, TlsError};
 use esp_alloc::MemoryCapability;
+use log::warn;
 use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 
@@ -134,6 +136,8 @@ pub enum Error {
     NoServerAuth,
     /// The reply had no complete HTTP head, or the transfer failed before one arrived.
     Http,
+    /// A stage ran into its time limit (WiFi or AP gone, peer silent); the connection is dropped.
+    Timeout(&'static str),
     /// A reused connection failed before the first reply byte: the server had closed it while idle.
     Stale,
 }
@@ -152,7 +156,23 @@ const PSRAM_VADDR: core::ops::Range<usize> = 0x3C00_0000..0x3E00_0000;
 const READ_BUF: usize = 16 * 1024 + 640; // largest TLS record the server may send
 const WRITE_BUF: usize = 2048;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const IO_TIMEOUT: Duration = Duration::from_secs(20);
+/// The handshake is about 5 s of CPU today (it blocks the executor, so this is mostly network wait).
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Each write, flush, read and the close, and the socket's own unacked-data timeout.
+const IO_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `fut` within `limit`, else log `meta: timeout <stage>` and fail. The caller drops the connection;
+/// dropping a `TcpSocket` removes it from the stack at once, so nothing is left half open.
+async fn within<T>(
+    stage: &'static str,
+    limit: Duration,
+    fut: impl Future<Output = T>,
+) -> Result<T, Error> {
+    with_timeout(limit, fut).await.map_err(|_| {
+        warn!("meta: timeout {stage}");
+        Error::Timeout(stage)
+    })
+}
 /// Body cap of the JSON lookups; the photo passes its own.
 pub const MAX_JSON: usize = 32 * 1024;
 const MAX_HEAD: usize = 4096;
@@ -217,19 +237,23 @@ impl<'a> Conn<'a> {
             write,
         } = bufs;
         let mut socket = TcpSocket::new(stack, tcp_rx, tcp_tx);
-        match with_timeout(CONNECT_TIMEOUT, socket.connect((ip, 443))).await {
-            Ok(Ok(())) => {}
-            _ => return Err(Error::Connect),
-        }
+        socket.set_timeout(Some(IO_TIMEOUT));
+        within("connect", CONNECT_TIMEOUT, socket.connect((ip, 443)))
+            .await?
+            .map_err(|_| Error::Connect)?;
         let mut conn = TlsConnection::<_, Aes128GcmSha256>::new(Sampled(socket), read, write);
         let t0 = Instant::now();
         // Nothing is written before this returns Ok.
-        tlsauth::open_verified::<_, WallClock>(&mut conn, host, root, seeded_rng())
-            .await
-            .map_err(|e| match e {
-                OpenError::Tls(e) => Error::Tls(e),
-                OpenError::NoServerAuth => Error::NoServerAuth,
-            })?;
+        within(
+            "handshake",
+            HANDSHAKE_TIMEOUT,
+            tlsauth::open_verified::<_, WallClock>(&mut conn, host, root, seeded_rng()),
+        )
+        .await?
+        .map_err(|e| match e {
+            OpenError::Tls(e) => Error::Tls(e),
+            OpenError::NoServerAuth => Error::NoServerAuth,
+        })?;
         sample_heap();
         Ok(Conn {
             conn,
@@ -258,11 +282,14 @@ impl<'a> Conn<'a> {
         // After a failure on a reused connection nothing tells a stale connection from a dead network
         // until a whole reply is missing: `Stale` lets the caller retry on a fresh one.
         let fail = |e| if reused { Error::Stale } else { e };
-        self.conn
-            .write_all(request.as_bytes())
+        within("write", IO_TIMEOUT, self.conn.write_all(request.as_bytes()))
             .await
+            .map_err(fail)?
             .map_err(|_| fail(Error::Http))?;
-        self.conn.flush().await.map_err(|_| fail(Error::Http))?;
+        within("flush", IO_TIMEOUT, self.conn.flush())
+            .await
+            .map_err(fail)?
+            .map_err(|_| fail(Error::Http))?;
 
         let mut data: Vec<u8> = Vec::new();
         let mut chunk = alloc::vec![0u8; 1024];
@@ -285,7 +312,11 @@ impl<'a> Conn<'a> {
                     break;
                 }
             }
-            match with_timeout(IO_TIMEOUT, self.conn.read(&mut chunk)).await {
+            let read = with_timeout(IO_TIMEOUT, self.conn.read(&mut chunk)).await;
+            if read.is_err() {
+                warn!("meta: timeout read");
+            }
+            match read {
                 Ok(Ok(0)) | Ok(Err(TlsError::ConnectionClosed)) => {
                     closed = true;
                     break;
@@ -321,6 +352,7 @@ impl<'a> Conn<'a> {
     }
 
     pub async fn close(self) {
-        let _ = self.conn.close().await;
+        // Ok or not, the socket is dropped afterwards and its Drop removes it from the stack.
+        let _ = within("close", IO_TIMEOUT, self.conn.close()).await;
     }
 }

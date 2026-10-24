@@ -249,3 +249,22 @@ Also watching: PSRAM free falls ~30–40 KB/h (likely cache fill + traffic; leak
 
 Soak still running (round 10 of 12, ends ~09:00 UTC). Full report: `docs/presentation/radar-ui-progress.md`.
 (No photo: in daylight the screen reflects the room.)
+
+
+---
+
+<!-- _class: log -->
+
+## Six and a half hours, zero crashes
+
+<span class="time">2026-10-24 09:25 UTC</span>
+
+**RD.13 soak done: 6 h 31 min, 0 reboots, 0 panics.**
+
+- Internal heap flat (free 28.9 KB, minimum 20.4 KB; gate ≥ 10 KB).
+- PSRAM free settled at ~7.40–7.41 MB after the first 3 h and stayed flat → cache fill, not a leak.
+- 112 metadata lookups ok, 0 errors. Feed: 0 CRC errors, 6 reconnects (cause not yet checked).
+- Scanout 39 fps throughout.
+
+Now: photo on the board (RD.10), then the approved review fixes, then the display tests.
+

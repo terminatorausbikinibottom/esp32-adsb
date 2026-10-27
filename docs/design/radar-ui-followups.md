@@ -57,6 +57,26 @@ disable modem power save; log the RSSI while connected to spot a weak link. Test
 block the MAC) on purpose and check that the device comes back without a reboot (parent 3.2
 verify, never run on this build).
 
+### FU-22 (P1) Wrong route (and sometimes type) on the info panel
+
+User report 2026-10-27: UAL42 shows **EWR → OGG**, the real flight was **EWR → FRA**. Checked:
+adsbdb itself returns `UAL42`: origin EWR (KEWR, New York), destination OGG (PHOG, Kahului) on
+2026-10-27, so the device shows the API data correctly; the **source data is wrong**. adsbdb maps
+routes by callsign only, from a static database; airlines reuse and re-time flight numbers, so
+entries go stale. The user also sees a wrong aircraft description sometimes (no example yet; the
+type comes from the ICAO24 lookup, which can be stale after a hex re-assignment).
+Fix ideas:
+- **Plausibility check** (pure function in `adsb-core`, host-testable): compare the aircraft's
+  position and track with the great-circle path origin → destination (cross-track distance, and
+  does the track point roughly toward the destination?). If it fails, show the route as "?" or
+  dimmed with a mark, and log `meta: route implausible`. UAL42 over Europe heading east is far from
+  any EWR → OGG path, so this case would be caught.
+- **Another source** with a position-based plausibility flag, e.g. the adsb.lol route API
+  (`routeset` with lat/lon, which marks routes as plausible or not) [VERIFY API, terms, TLS root].
+- Show the route source and age in the detail view, so wrong data is easy to spot.
+Test: host tests with invented positions for a plausible and an implausible route; a board check
+at day traffic against flightradar24 for at least 5 aircraft.
+
 ### FU-21 (P2) SSID appears in the device log
 
 The `wifi: connect failed` line prints esp-radio's `DisconnectedInfo` with `{:?}`, which contains

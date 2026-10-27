@@ -41,6 +41,27 @@ per-frame restart (PSRAM has room; check the K4 load).
 
 ## Robustness
 
+### FU-20 (P1) Device loses WiFi and does not get it back
+
+User report 2026-10-27: the device loses WiFi. Bench log of the live build flashed 2026-10-24
+(`bench log --session`): `wifi: connected` at boot; at about 1,490 s uptime the link drops, then 44
+`wifi: connect failed (… reason: NoAccessPointFound, rssi: -128 …), retry in 30 s` in a row (about
+22 min) with no reconnect until the log ends at `alive 2908s` (the bench monitor exited there with
+"Broken pipe", so later behaviour is not logged). The UI and scanout kept running.
+Open questions: was the AP really gone (other clients fine?) or does the S3 stop seeing it (radio
+stuck after a disconnect, scan on one channel only, power save, coexistence with the PSRAM/LCD
+load)? Ideas: log the disconnect reason of the first drop; on N failed scans do a full
+`stop()`/`start()` of the WiFi controller, and as a last resort a software reset; scan all channels;
+disable modem power save; log the RSSI while connected to spot a weak link. Test: drop the AP (or
+block the MAC) on purpose and check that the device comes back without a reboot (parent 3.2
+verify, never run on this build).
+
+### FU-21 (P2) SSID appears in the device log
+
+The `wifi: connect failed` line prints esp-radio's `DisconnectedInfo` with `{:?}`, which contains
+the SSID. The privacy rules say the device logs no SSID, key, feed host or coordinates. Log only the
+reason and the RSSI.
+
 ### FU-4 (P2) Executor stalls during TLS (K5)
 
 Each TLS handshake blocks the single executor for about 3.5–4 s (`ui: tick gap`). Every photo

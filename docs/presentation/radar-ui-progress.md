@@ -82,6 +82,79 @@ Design and evidence: `docs/design/radar-ui.md`
 
 ---
 
+<!-- _class: dense -->
+
+## Architecture
+
+```text
+ fr24feed :30002 (AVR text)         adsbdb · planespotters (HTTPS)
+          │ TCP                                  │ TLS 1.3, pinned roots
+ ┌────────▼─────────────── ESP32-S3 firmware ────▼─────────────────┐
+ │ core 0, one Embassy executor                                    │
+ │  feed_task ─► modes (decode) ─► adsb-core (tracker, radar,      │
+ │                                  focus, meta cache, JPEG)       │
+ │  meta_task ─► HTTPS lookups, photo fetch + decode ──┐           │
+ │  ui_task 1 Hz ─► adsb-app (Slint, software renderer) │           │
+ │                    └─ line buffer (SRAM) ─► framebuffer (PSRAM) │
+ │ core 1: scanout restart ISR (per frame, VBLANK)                 │
+ └──────────────────────────────────────────── RGB panel 800×480 ──┘
+ same adsb-core + adsb-app ─► sim (wasm, browser) ◄─ sim-bridge (live feed)
+```
+
+- **`modes`**: general Mode S / ADS-B decoder, `no_std`, host-tested, cross-checked with pyModeS/dump1090.
+- **`adsb-core`**: tracker, radar geometry, focus rule, metadata, photo: pure and host-testable.
+- **`adsb-app`**: the Slint UI, shared by the board and the browser sim.
+
+---
+
+<!-- _class: dense -->
+
+## Tech stack
+
+| Area | Choice | Why |
+|---|---|---|
+| Language | Rust, `no_std` libraries + `alloc` | one codebase for board, host tests and browser |
+| HAL / async | esp-hal 1.2.2 (stock), Embassy | 100 % Rust; vendored patch dropped after an A/B test |
+| UI | Slint 1.18.1 software renderer, line by line | fits 512 KB SRAM; same UI in the wasm sim (1-line renderer patch vendored) |
+| Display | RGB DPI from a PSRAM framebuffer, restart per frame | IDF's S3 workaround, ported; **12 MHz pixel clock** |
+| WiFi / IP | esp-radio, embassy-net (DHCP, DNS) | — |
+| TLS | embedded-tls 0.19, pinned roots | no C; we added a guard for its missing-certificate bug |
+| Data | adsbdb (route, type), planespotters (photo) | public, no key; User-Agent needs a contact |
+| JPEG | zune-jpeg in `adsb-core` | pure Rust, progressive JPEG, same code on host and board |
+| Config | `firmware/.env` → generated `config.rs` | secrets never in `rustc-env` or logs |
+| Verification | bench service: flash, serial log, webcam | agents test on the real board without the user |
+
+---
+
+## Key decisions: display
+
+1. **Single PSRAM framebuffer, restart the DMA every frame** (ADR-001, step 1.5).
+   SRAM bounce buffers failed on this board; the per-VBLANK restart from ESP-IDF fixed the drift.
+2. **Pixel clock 16 → 12 MHz** (K4). Flash cache refills share the bus with the scanout DMA.
+   12 MHz gives 0 glitches per 100 frames; 13 MHz still 21. Cost: 39 → 29 Hz, fine for a 1 Hz UI.
+3. **Stop rule, not sunk cost:** if a heavier load brings the glitches back, review the platform
+   (Rust `std` on ESP-IDF with `esp_lcd`) before experimental work.
+4. **Round radar on non-square pixels** (ADR-004). One `PIXEL_ASPECT` = 1.076 for all radar
+   geometry. Rings are **rounded rectangles that are not square in pixels**: Slint's fast path,
+   ≤ 1.8 px from a true circle. Image tiles were tried first: +14 ms render, glitches back.
+
+---
+
+## Key decisions: data and safety
+
+1. **Decode on the device** from the raw 30002 feed (ADR-001): the decoder is the most testable
+   part, and the same frames drive host tests, the sim and the board.
+2. **Metadata direct from the device** over verified TLS (ADR-003). Never unverified TLS; a LAN
+   proxy was the gated fallback and was not needed.
+3. **Focus = closest positioned aircraft** with hysteresis (> 20 % and 300 m closer), computed in
+   `adsb-core`. Photo only after 3 s of stable focus, at most 1 request/s.
+4. **Single core for the app:** all tasks and Slint on core 0, core 1 only for the scanout ISR.
+   Simple and deterministic; the price is ~4 s UI pauses during TLS handshakes (FU-4).
+5. **Privacy by construction:** no location, captures or secrets in the repo, logs or photos;
+   leak checks count matches and never print values.
+
+---
+
 ## Findings worth a slide
 
 1. **embedded-tls 0.19:** a man-in-the-middle can leave out the server certificate, and the

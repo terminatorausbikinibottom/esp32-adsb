@@ -46,8 +46,9 @@ per-frame restart (PSRAM has room; check the K4 load).
 User report 2026-10-27: the device loses WiFi. Bench log of the live build flashed 2026-10-24
 (`bench log --session`): `wifi: connected` at boot; at about 1,490 s uptime the link drops, then 44
 `wifi: connect failed (… reason: NoAccessPointFound, rssi: -128 …), retry in 30 s` in a row (about
-22 min) with no reconnect until the log ends at `alive 2908s` (the bench monitor exited there with
-"Broken pipe", so later behaviour is not logged). The UI and scanout kept running.
+22 min) with no reconnect. At `alive 2908s` the user reset the board by hand to restore WiFi (the
+reset ended the bench monitor, "Broken pipe"); after the reset WiFi worked again. So the device
+does not recover on its own, but a reset fixes it. The UI and scanout kept running meanwhile.
 Open questions: was the AP really gone (other clients fine?) or does the S3 stop seeing it (radio
 stuck after a disconnect, scan on one channel only, power save, coexistence with the PSRAM/LCD
 load)? Ideas: log the disconnect reason of the first drop; on N failed scans do a full

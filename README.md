@@ -166,7 +166,8 @@ cd sim-bridge && cp .env.example .env && cargo run       # only needed for live 
 ```
 
 The bridge has its own `sim-bridge/.env` (gitignored; see `.env.example` for the keys), read from
-the directory it is started in or from `ADSB_SIM_ENV_FILE`. It listens on loopback only and trunk
+`ADSB_SIM_ENV_FILE`, else the directory it is started in, else `sim-bridge/` itself; a variable set
+in the shell wins over the file. It listens on loopback only and trunk
 proxies `/ws` and `/local` to it. Without a `.env` the simulator runs scenarios only.
 
 Privacy: live mode shows the real receiver area and traffic. Don't share live screenshots or

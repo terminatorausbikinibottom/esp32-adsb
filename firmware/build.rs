@@ -20,7 +20,22 @@ fn generate_config() {
     for var in build_config::VARS {
         println!("cargo:rerun-if-env-changed={var}");
     }
-    match build_config::generate(|n| std::env::var(n).ok()) {
+    // firmware/.env is optional; a variable set in the environment wins over the file. Only watch the
+    // file when it exists (a missing watched file makes Cargo rerun this script on every build).
+    let env_path = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join(".env");
+    let file = match std::fs::read_to_string(&env_path) {
+        Ok(text) => {
+            println!("cargo:rerun-if-changed=.env");
+            build_config::parse_env(&text).unwrap_or_else(|msg| panic!("firmware config: {msg}"))
+        }
+        Err(_) => Vec::new(),
+    };
+    let get = |n: &str| {
+        std::env::var(n)
+            .ok()
+            .or_else(|| file.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone()))
+    };
+    match build_config::generate(get) {
         Ok(src) => {
             let out = std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("config.rs");
             std::fs::write(out, src).unwrap();

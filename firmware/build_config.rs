@@ -119,9 +119,67 @@ pub fn generate(get: impl Fn(&str) -> Option<String>) -> Result<String, String> 
     ))
 }
 
+/// Parses `firmware/.env`: `KEY=value` lines, optional `export `, blank lines and `#` comments.
+/// A value in '…' or "…" is taken as is; an unquoted value ends at ` #` and is trimmed.
+/// No `$VAR` expansion and no escapes.
+pub fn parse_env(text: &str) -> Result<Vec<(String, String)>, String> {
+    let mut vars = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(format!(".env line {}: expected KEY=value", i + 1));
+        };
+        let key = key.trim();
+        if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(format!(".env line {}: bad variable name", i + 1));
+        }
+        let value = value.trim_start();
+        let value = match value.chars().next() {
+            Some(q @ ('"' | '\'')) => match value[1..].find(q) {
+                Some(end) => &value[1..1 + end],
+                None => return Err(format!(".env line {} ({key}): missing closing quote", i + 1)),
+            },
+            _ => value.split(" #").next().unwrap_or("").trim_end(),
+        };
+        vars.push((key.to_string(), value.to_string()));
+    }
+    Ok(vars)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn env_file_syntax() {
+        let text = "# comment\n\nWIFI_SSID=my net\nexport WIFI_KEY = \"pa#ss 'x'\" \n\
+                    ADSB_RX_LAT=47.5 # home\nADSB_DEMO='busy'\nADSB_META_PROXY=a#b\nEMPTY=\n";
+        let vars = parse_env(text).unwrap();
+        let get = |k: &str| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("WIFI_SSID"), Some("my net"));
+        assert_eq!(get("WIFI_KEY"), Some("pa#ss 'x'"));
+        assert_eq!(get("ADSB_RX_LAT"), Some("47.5"));
+        assert_eq!(get("ADSB_DEMO"), Some("busy"));
+        assert_eq!(get("ADSB_META_PROXY"), Some("a#b"));
+        assert_eq!(get("EMPTY"), Some(""));
+    }
+
+    #[test]
+    fn env_file_errors_without_echo() {
+        for (text, want) in [
+            (format!("A=1\n{MARK}\n"), "line 2: expected KEY=value"),
+            (format!("BAD-NAME={MARK}\n"), "line 1: bad variable name"),
+            (format!("WIFI_KEY=\"{MARK}\n"), "line 1 (WIFI_KEY): missing closing quote"),
+        ] {
+            let err = parse_env(&text).unwrap_err();
+            assert!(err.contains(want), "{err}");
+            assert!(!err.contains(MARK), "{err}");
+        }
+    }
 
     const MARK: &str = "MARKER-VALUE-9f3";
 

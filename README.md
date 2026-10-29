@@ -136,7 +136,9 @@ tools/bench/bench snap --delay 1                         # prints .bench/snaps/<
 ```
 
 Build first with `cd firmware && cargo build --release` (ELF at
-`firmware/target/xtensa-esp32s3-none-elf/release/firmware`). If `tools/bench/bench` fails with
+`firmware/target/xtensa-esp32s3-none-elf/release/firmware`). `build.rs` reads the config from
+`firmware/.env` (gitignored; `cp .env.example .env` and fill in the keys); a variable set in the
+shell wins over the file, e.g. `ADSB_DEMO=busy cargo build --release`. If `tools/bench/bench` fails with
 `env: 'uv': No such file or directory` (exit 127), the container has no uv yet: use
 `python3 tools/bench/bench ...`. `snap` and `health` exit 0 or 4 (any failure, message on stderr).
 

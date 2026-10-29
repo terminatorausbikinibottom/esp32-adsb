@@ -1,0 +1,445 @@
+---
+marp: true
+theme: default
+paginate: true
+size: 16:9
+title: ADS-B radar on the ESP32-S3
+style: |
+  section { font-size: 26px; }
+  section.log { font-size: 21px; }
+  section.dense { font-size: 20px; }
+  section.dense table { font-size: 18px; }
+  h1, h2 { color: #0b6e99; }
+  .time { color: #888; font-size: 0.8em; }
+  /* Split background images (![bg right]): keep them inside the slide with a margin. */
+  /* !important: Marp's own figure rule is more specific and sets margin: 0. */
+  section[data-marpit-advanced-background="background"] figure {
+    margin: 40px 50px 40px 10px !important;
+  }
+---
+
+<!-- _class: lead -->
+<!-- _paginate: false -->
+
+# ADS-B radar on the ESP32-S3
+
+### One night, one agent pipeline, one real board
+
+`feature/radar-ui` · progress status report
+Design and evidence: `docs/design/radar-ui.md`
+
+---
+
+## The story in one minute
+
+- **Goal:** the Waveshare ESP32-S3 7" board reads a local ADS-B feed over WiFi.
+  - **Left:** a radar of nearby aircraft.
+  - **Right:** the closest aircraft with airline, type, route and photo (adsbdb, planespotters).
+- **Start:** the board showed only a test pattern. No WiFi, no feed, no UI on the device.
+- **After one night:** Slint UI, WiFi, live feed, radar, verified TLS 1.3 and live route/type data
+  run on the board. **10 of 14 plan steps passed QA.**
+- **Next morning:** photos on the board, review fixes, and the display glitches fixed with one
+  constant. **All 14 steps closed** (2 not needed or skipped). Touch selection is queued.
+- **How:** architect → engineer → QA → reviewer, unattended. The agents tested on the real board
+  through the bench service (flash, serial log, webcam).
+
+---
+
+<!-- _class: dense -->
+
+## Results
+
+| Step | What | Result |
+|---|---|---|
+| RD.0 | stock vs vendored esp-hal | PASS, vendored patch dropped |
+| RD.1 | build config from local `.env`, leak tests | PASS |
+| RD.2 | Slint on the device | PASS, display glitches fixed at 12 MHz pixel clock |
+| RD.3 | WiFi + live feed | PASS |
+| RD.4 | radar logic (range, projection, sprites, focus) | PASS |
+| RD.5 | radar + info layout (sim) | PASS, Slint renderer bug found and patched |
+| RD.6 | radar on the board | PASS, board matches the sim render |
+| RD.7 | metadata parsers, cache, JPEG decode | PASS after 1 fix loop |
+| RD.8 | verified TLS on the device | PASS, embedded-tls bug found and guarded |
+| RD.9 | route/airline/type on the board | PASS with gaps (night traffic) |
+| RD.10 | photo on the board | PASS (needed a User-Agent contact) |
+| RD.11 / 12 | proxy fallback / sim live metadata | not needed / skipped |
+| RD.13 | soak | PASS, 6 h 31 min, 0 reboots, heap flat |
+| RD.14 / 15 | round radar / touch selection | queued |
+
+---
+
+## Numbers
+
+| | |
+|---|---|
+| Scanout | 29 fps at 12 MHz (was 39–40 at 16 MHz) |
+| Photo decode + scale | 0.5–0.57 s |
+| Full UI redraw | 77–78 ms |
+| Typical 1 Hz update | 7 ms |
+| Internal heap minimum | 20.6 KB (gate ≥ 10 KB) |
+| WiFi alone | 44 KB internal SRAM |
+| Soak lookups | 115+ ok, 0 errors |
+
+---
+
+<!-- _class: dense -->
+
+## Architecture
+
+```text
+ fr24feed :30002 (AVR text)         adsbdb · planespotters (HTTPS)
+          │ TCP                                  │ TLS 1.3, pinned roots
+ ┌────────▼─────────────── ESP32-S3 firmware ────▼─────────────────┐
+ │ core 0, one Embassy executor                                    │
+ │  feed_task ─► modes (decode) ─► adsb-core (tracker, radar,      │
+ │                                  focus, meta cache, JPEG)       │
+ │  meta_task ─► HTTPS lookups, photo fetch + decode ──┐           │
+ │  ui_task 1 Hz ─► adsb-app (Slint, software renderer) │           │
+ │                    └─ line buffer (SRAM) ─► framebuffer (PSRAM) │
+ │ core 1: scanout restart ISR (per frame, VBLANK)                 │
+ └──────────────────────────────────────────── RGB panel 800×480 ──┘
+ same adsb-core + adsb-app ─► sim (wasm, browser) ◄─ sim-bridge (live feed)
+```
+
+- **`modes`**: general Mode S / ADS-B decoder, `no_std`, host-tested, cross-checked with pyModeS/dump1090.
+- **`adsb-core`**: tracker, radar geometry, focus rule, metadata, photo: pure and host-testable.
+- **`adsb-app`**: the Slint UI, shared by the board and the browser sim.
+
+---
+
+<!-- _class: dense -->
+
+## Tech stack
+
+| Area | Choice | Why |
+|---|---|---|
+| Language | Rust, `no_std` libraries + `alloc` | one codebase for board, host tests and browser |
+| HAL / async | esp-hal 1.2.2 (stock), Embassy | 100 % Rust; vendored patch dropped after an A/B test |
+| UI | Slint 1.18.1 software renderer, line by line | fits 512 KB SRAM; same UI in the wasm sim (1-line renderer patch vendored) |
+| Display | RGB DPI from a PSRAM framebuffer, restart per frame | IDF's S3 workaround, ported; **12 MHz pixel clock** |
+| WiFi / IP | esp-radio, embassy-net (DHCP, DNS) | — |
+| TLS | embedded-tls 0.19, pinned roots | no C; we added a guard for its missing-certificate bug |
+| Data | adsbdb (route, type), planespotters (photo) | public, no key; User-Agent needs a contact |
+| JPEG | zune-jpeg in `adsb-core` | pure Rust, progressive JPEG, same code on host and board |
+| Config | `firmware/.env` → generated `config.rs` | secrets never in `rustc-env` or logs |
+| Verification | bench service: flash, serial log, webcam | agents test on the real board without the user |
+
+---
+
+## Key decisions: display
+
+1. **Single PSRAM framebuffer, restart the DMA every frame** (ADR-001, step 1.5).
+   SRAM bounce buffers failed on this board; the per-VBLANK restart from ESP-IDF fixed the drift.
+2. **Pixel clock 16 → 12 MHz** (K4). Flash cache refills share the bus with the scanout DMA.
+   12 MHz gives 0 glitches per 100 frames; 13 MHz still 21. Cost: 39 → 29 Hz, fine for a 1 Hz UI.
+3. **Stop rule, not sunk cost:** if a heavier load brings the glitches back, review the platform
+   (Rust `std` on ESP-IDF with `esp_lcd`) before experimental work.
+4. **Round radar on non-square pixels** (ADR-004). One `PIXEL_ASPECT` = 1.076 for all radar
+   geometry. Rings are **rounded rectangles that are not square in pixels**: Slint's fast path,
+   ≤ 1.8 px from a true circle. Image tiles were tried first: +14 ms render, glitches back.
+
+---
+
+## Key decisions: data and safety
+
+1. **Decode on the device** from the raw 30002 feed (ADR-001): the decoder is the most testable
+   part, and the same frames drive host tests, the sim and the board.
+2. **Metadata direct from the device** over verified TLS (ADR-003). Never unverified TLS; a LAN
+   proxy was the gated fallback and was not needed.
+3. **Focus = closest positioned aircraft** with hysteresis (> 20 % and 300 m closer), computed in
+   `adsb-core`. Photo only after 3 s of stable focus, at most 1 request/s.
+4. **Single core for the app:** all tasks and Slint on core 0, core 1 only for the scanout ISR.
+   Simple and deterministic; the price is ~4 s UI pauses during TLS handshakes (FU-4).
+5. **Privacy by construction:** no location, captures or secrets in the repo, logs or photos;
+   leak checks count matches and never print values.
+
+---
+
+## Findings worth a slide
+
+1. **embedded-tls 0.19:** a man-in-the-middle can leave out the server certificate, and the
+   handshake still succeeds. QA found it. Our code refuses such connections, and hostile-server
+   tests cover it.
+2. **Slint 1.18.1 renderer:** an off-by-one error gave wrong frames on partial repaint.
+   Patched and regression-tested.
+3. **Display glitches (K4):** flash cache refills starve the display DMA, because flash and PSRAM
+   share one bus. The glitches got worse with traffic. Fixed by a lower pixel clock.
+4. **Process:** the watchdog treated a question waiting for the user as a crash and started a
+   headless copy of the session. That copy did the night's work.
+
+---
+
+## Display glitches: what happens
+
+- The display DMA reads the framebuffer from **PSRAM** all the time.
+- Slint code and font data come from **flash** through the cache. Flash and PSRAM share **one bus**.
+- A cache miss blocks the bus for a few µs. The DMA FIFO (~16 px) runs empty, and the rest of
+  the frame is shifted sideways for one frame.
+
+| Experiment | Glitched photos |
+|---|---|
+| Rendering with no framebuffer writes | 3–4 / 30 |
+| Heavy PSRAM read/write traffic | 0 / 30 |
+| Flash reads only, no rendering | 2 / 30 |
+
+---
+
+## Display glitches: live
+
+<span class="time">2026-10-24 09:36 UTC · 30 fps bench camera, real time, live traffic with photo (RD.10)</span>
+
+![h:430](img/k4-flicker-live.gif)
+
+---
+
+## Display glitches: the fix
+
+| Pixel clock | Refresh | Glitched frames / 100 (busy demo) |
+|---|---|---|
+| 16 MHz | 39 Hz | 30.6 |
+| 13 MHz | 32 Hz | 20.7 |
+| **12 MHz** | **29 Hz** | **0** (6 runs) |
+
+- Live, with TLS handshakes and photo decode: 0 glitches in ~3,900 frames. The user saw no flicker.
+- Bigger caches: esp-hal already uses the maximum sizes. QIO and the platform change were not needed.
+- **Stop rule, kept for later:** if a heavier load brings the glitches back, review the platform
+  (esp-hal + embassy vs Rust `std` on ESP-IDF with `esp_lcd`).
+
+> A glitchy UI is of no use, even when it is 100 % Rust.
+
+---
+
+## Open items
+
+- RD.14: the radar looks elliptic on the panel (non-square pixels).
+- RD.15: touch selection (tap an aircraft; back to the closest after leaving scope or a timeout).
+- 12 MHz is a threshold: re-check at peak traffic.
+- 6 MINOR review findings deferred.
+- Upstream reports for embedded-tls and Slint are drafted, not filed.
+
+---
+
+<!-- _class: lead -->
+
+# Progress log
+
+Notify messages, oldest first, times in UTC.
+Entries 1–6 were sent during the night and resent on 2026-10-24 with their original time.
+
+---
+
+<!-- _class: log -->
+
+## Feature start: radar-ui
+
+<span class="time">2026-10-23 18:01 UTC</span>
+
+**Overnight run started** on branch `feature/radar-ui`.
+
+Plan: WiFi + live feed on device → Slint app on ESP32 → radar (left) → closest-aircraft info with photo via adsbdb + planespotters (right).
+
+Architect is writing `docs/design/radar-ui.md` now. Bench is healthy; panel currently shows the scanout test pattern.
+
+![bg right:45% contain](img/20261024T083026-20261023T180148.373070Z.jpg)
+
+---
+
+<!-- _class: log -->
+
+## It's alive! (mostly)
+
+<span class="time">2026-10-23 21:30 UTC</span>
+
+**Slint UI runs on the ESP32** with the demo feed: cards cycle NoData → Quiet → Approaching → Overhead → JustPassed. Render 5–50 ms, heap OK.
+
+**But:** frames still glitch during updates (DMA starved by flash cache refills). 80 MHz DIO did not fix it; QIO boot-loops; bounce path not wired to the UI. **Parked for your decision tomorrow** (bounce M2 / lower PCLK / palette FB) – details in radar-ui.md revision log.
+
+Continuing tonight with host-only work: radar logic (RD.4), new layout in sim (RD.5), metadata+photo (RD.7).
+
+![bg right:45% contain](img/20261024T083026-20261023T213005.368944Z.jpg)
+
+---
+
+<!-- _class: log -->
+
+## Radar online (in the sim)
+
+<span class="time">2026-10-23 22:19 UTC</span>
+
+**RD.4 + RD.5 done:** radar on the left (auto range 10/25/50/100 km, rotated aircraft sprites, call signs, focus ring, '+N beyond'), closest-aircraft panel on the right (badge, ALT/GS/DIST/TRK; photo & route still '—' until RD.7).
+
+Found and fixed a **Slint 1.18.1 renderer bug** (off-by-one in scene.rs → wrong frames with partial repaint). Vendored with a 1-line patch + regression test.
+
+Screenshot = sim render of the 'busy' test scenario (invented traffic). QA running; next: metadata + photo (RD.7).
+
+![bg right:45% contain](img/20261024T083027-7-busy.png)
+
+---
+
+<!-- _class: log -->
+
+## Houston, we have aircraft
+
+<span class="time">2026-10-23 23:32 UTC</span>
+
+**RD.3 done:** the board is on WiFi, reads your feed live, and the new radar shows real traffic (1–4 aircraft at this hour). Heap OK (≥27 KB internal free), 0 secrets in logs, 0 CRC errors, 39–40 fps scanout.
+
+Caveat: K4 glitches got more frequent (radar redraws ~450 rows/s) – this is a clean frame picked from a burst. Your display decision tomorrow matters more now.
+
+Next: TLS on the device (RD.8) for route/type/photo.
+
+![bg right:45% contain](img/20261024T083027-f227.jpg)
+
+---
+
+<!-- _class: log -->
+
+## Caught a TLS bug in the wild
+
+<span class="time">2026-10-24 00:59 UTC</span>
+
+**RD.8 done:** the ESP32 talks verified TLS 1.3 to adsbdb, planespotters and their image CDN (pinned roots; wrong-CA build fails all 3).
+
+On the way, QA found a **critical bug in embedded-tls 0.19**: a MITM can skip the certificate entirely and the handshake still succeeds. Fixed on our side (hard check before any request byte) + hostile-server regression tests (`tools/tls-hostile`). Upstream report is drafted in the design log – **not filed, your call**.
+
+**Needs you:** planespotters now returns 403 without a contact → set `ADSB_HTTP_CONTACT` for photos.
+Now: route/airline/type on the board (RD.9). (No photo this time – bench is busy.)
+
+---
+
+<!-- _class: log -->
+
+## Morning report: it flies, but it shakes
+
+<span class="time">2026-10-24 05:03 UTC</span>
+
+**Soak: 2 h 13 min, no reboot, no panic**, internal heap flat, 84/104 lookups ok, 0 errors. Real routes on screen (e.g. SIN → LGW, A350-941).
+
+**But:** with morning traffic (8 aircraft) the **K4 display glitches went from occasional to most frames** – see photo (ghosted double image). The scanout itself stays at 39 fps. Your K4 decision is now the top item.
+
+Also watching: PSRAM free falls ~30–40 KB/h (likely cache fill + traffic; leak not ruled out). Full summary when you're back.
+
+![bg right:45% contain](img/20261024T083027-f135.jpg)
+
+---
+
+<!-- _class: log -->
+
+## Morning after: 10/14 green, 1 shaky screen
+
+<span class="time">2026-10-24 08:30 UTC</span>
+
+**Night summary:** 10 of 14 steps passed QA. Slint UI, WiFi, live feed, radar, verified TLS and live route/type data run on the board (e.g. LHX942 FRA → MAN right now).
+
+**Open for you:**
+1. K4 display glitches: pick a fix (bounce buffers recommended / lower PCLK / palette FB / code from PSRAM). 80 MHz QIO boot-loops; DIO is not enough.
+2. `ADSB_HTTP_CONTACT` for planespotters photos (RD.10).
+3. 3 MAJOR review findings (ui.rs:160 crash, meta_task hang after WiFi drop, CI fmt).
+
+Soak still running (round 10 of 12, ends ~09:00 UTC). Full report: `docs/presentation/radar-ui-progress.md`.
+(No photo: in daylight the screen reflects the room.)
+
+
+---
+
+<!-- _class: log -->
+
+## Six and a half hours, zero crashes
+
+<span class="time">2026-10-24 09:25 UTC</span>
+
+**RD.13 soak done: 6 h 31 min, 0 reboots, 0 panics.**
+
+- Internal heap flat (free 28.9 KB, minimum 20.4 KB; gate ≥ 10 KB).
+- PSRAM free settled at ~7.40–7.41 MB after the first 3 h and stayed flat → cache fill, not a leak.
+- 112 metadata lookups ok, 0 errors. Feed: 0 CRC errors, 6 reconnects (cause not yet checked).
+- Scanout 39 fps throughout.
+
+Now: photo on the board (RD.10), then the approved review fixes, then the display tests.
+
+
+---
+
+<!-- _class: log -->
+
+## Say cheese: planes have faces now
+
+<span class="time">2026-10-24 09:55 UTC</span>
+
+**RD.10 done, QA PASS:** the closest aircraft now has its planespotters photo on the board (here RYR3LD, Ryanair 737, BRE → STN).
+
+- Photo fetched only for the focus aircraft after 3 s; verified TLS to planespotters and the image host, one connection at a time.
+- JPEG 23–47 KB, decode + scale 0.5–0.57 s on the ESP32-S3; colours correct.
+- Feed: 0 reconnects; internal heap min 20.6 KB.
+- Cost: ~4 s UI pause per photo (TLS handshakes).
+
+Frame picked from a 30 fps burst: most other frames still glitch (K4). Next: approved review fixes, then the display tests.
+
+![bg right:45% contain](img/20261024T095555-f053.jpg)
+
+
+---
+
+<!-- _class: log -->
+
+## Great success: the screen stopped shaking
+
+<span class="time">2026-10-24 11:36 UTC</span>
+
+**Display glitches (K4) fixed: great success!** One constant: pixel clock 16 → 12 MHz (refresh 39 → 29 Hz).
+
+| Pixel clock | Glitched frames / 100 (busy demo) |
+|---|---|
+| 16 MHz | 30.6 |
+| 13 MHz | 20.7 |
+| **12 MHz** | **0** (6 runs) |
+
+- Live with TLS handshakes and photo decode: 0 glitches by eye in ~3,900 frames. User check on the real panel: "no flickering".
+- Bigger caches: esp-hal already uses the maximum. No platform change needed.
+- Risk: 12 MHz is a threshold (13 MHz still glitches); re-check at peak traffic.
+
+Also done: approved review fixes (crash, TLS timeouts, fmt, CI). Beads up to date: RD.0–RD.13 closed.
+Next: RD.14 round radar (pixel aspect), RD.15 touch selection.
+
+![bg right:45% contain](img/20261024T113627-k4_win.jpg)
+
+
+---
+
+<!-- _class: log -->
+
+## Round and round: radar fixed, run complete
+
+<span class="time">2026-10-24 19:55 UTC</span>
+
+**Round radar works; run finished.**
+
+- **RD.14:** the rings are rounded rectangles that are not square in pixels (your idea). On the glass they are round (≤ 1.8 px off). Render time is back at the old level (83 ms); the image-tile version (96 ms) brought the glitches back and is gone. Host tests, fmt, clippy green.
+- **Needs you:** the panel is stuck in its own colour cycle (probably the 11 MHz test of the headless copy). **Unplug and replug the board's USB**, then check: radar round, no flicker (FU-0).
+- **Push blocked** by my permission rules. Run:
+  `git push -u origin feature/radar-ui`
+  `gh pr create --base main --head feature/radar-ui --title "feat: ADS-B radar UI on the ESP32-S3 board" --body-file /tmp/claude-1000/-workspaces-esp32-adsb/e6d79f83-a0d6-46d5-b6a0-3669d4dcbf34/scratchpad/pr-radar-ui.md`
+- **Follow-ups:** 19 tickets in `docs/design/radar-ui-followups.md` (FU-1 touch selection is designed and approved).
+- Image: sim render on the physical aspect (invented traffic).
+
+![bg right:45% contain](img/20261024T195501-7-busy-physical.png)
+
+
+---
+
+<!-- _class: log -->
+
+## Great success: round and steady
+
+<span class="time">2026-10-24 20:04 UTC</span>
+
+**Round radar confirmed on the board** after your USB power cycle.
+
+- K4 bursts (busy demo, 3 valid runs): 0 / 0 / 0 glitches per 100 (2 flagged frames in run 1 were a normal 1 Hz value update, checked by eye).
+- Rings look round on the panel (photo: busy demo, invented traffic).
+- Live build is back on the board.
+
+Still to do by you: push + PR (commands in the previous message).
+
+![bg right:45% contain](img/20261024T200457-o7e_panel.jpg)
+

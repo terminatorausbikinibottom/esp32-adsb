@@ -14,7 +14,7 @@ path = "./src/bin/main.rs"
 # the exp-*, diag-norefill and pclk-16mhz features only apply to it.
 bounce = []
 # Extra log line before the scanout starts; changes timing and code layout only. Build with and
-# without it to check the image position does not depend on the build (see vendor/esp-hal/VENDORED.md).
+# without it to check the image position does not depend on the build (see docs/design/esp-hal-dpi-patch.md).
 diag-shift = []
 # `no-resync` drops the per-frame DMA restart (1.3 behaviour; with `bounce`: keeps only the counter fix),
 # step 1.5 diagnostics (see docs/design/adsb-display.md): `diag-norefill` stops the refills (both buffers keep rows 0..19), `diag-ruler` paints the ruler.
@@ -31,6 +31,17 @@ exp-no-always-out = []  # e1: leave lcd_always_out_en clear (as esp-hal/1.5 befo
 exp-no-burst      = []  # e2: internal burst off (esp-hal default, as 1.5 before)
 exp-solid         = []  # e3: two SRAM buffers, buffer 0 solid red, buffer 1 solid blue, once, no refill, no interrupts, no core 1
 exp-solid-noeof   = []  # e4: with exp-solid, no suc_eof on any descriptor
+
+# Replace the boot-time test pattern by the UI's black frame (default) with the old bars/ruler.
+diag-pattern = []
+# Draws the pixel-aspect check image (border, square + circle, corrected rectangle + ellipse) instead of the UI (RD.14.1).
+diag-aspect = []
+# 1-px white border over the UI after each render (drift check, RD.3).
+diag-border = []
+# Negative test (RD.8): pin the wrong root for every host; every handshake must then fail with a certificate error.
+tls-wrong-ca = []
+# Feeds the fictitious `ADSB_DEMO` scenario (adsb-core `scenario`) into the pipeline. Needed when ADSB_DEMO is set.
+demo = ["adsb-core/scenario"]
 
 [dependencies]
 esp-hal = { version = "~1.2.2", features = ["esp32s3", "log-04", "unstable"] }
@@ -50,6 +61,7 @@ log                    = "0.4.27"
 
 embassy-net = { version = "0.9.1", features = [
   "dhcpv4",
+  "dns",
   "log",
   "medium-ethernet",
   "tcp",
@@ -57,7 +69,8 @@ embassy-net = { version = "0.9.1", features = [
 ] }
 embedded-io = "0.7.1"
 embedded-io-async = "0.7.0"
-esp-alloc = { version = "0.11.0", features = ["esp32s3"] }
+# internal-heap-stats: `max_usage` for the peak heap figure of the TLS spike (RD.8).
+esp-alloc = { version = "0.11.0", features = ["esp32s3", "internal-heap-stats"] }
 esp-backtrace = { version = "0.20.0", features = [
   "esp32s3",
   "panic-handler",
@@ -66,6 +79,7 @@ esp-backtrace = { version = "0.20.0", features = [
 esp-println = { version = "0.18.0", features = ["esp32s3", "log-04"] }
 # for more networking protocol support see https://crates.io/crates/edge-net
 embassy-executor = { version = "0.10.0", features = ["log"] }
+embassy-sync = "0.8"
 embassy-time = { version = "0.5.0", features = ["log"] }
 esp-radio = { version = "1.0.0-beta.1", features = [
   "esp-alloc",
@@ -88,19 +102,24 @@ smoltcp = { version = "0.14.0", default-features = false, features = [
   "socket-udp",
 ] }
 
-adsb-core        = { path = "../adsb-core" }
+adsb-core        = { path = "../adsb-core", features = ["tls", "photo"] }
 adsb-app         = { path = "../adsb-app", default-features = false, features = ["single-threaded"] }
 modes             = { path = "../modes" }
 critical-section = "1.2.0"
+# TLS 1.3 client with pinned-root chain verification (RD.8). `rsa` + `p384` for the RSA and P-384
+# signatures in the chains of the three hosts; `rustpki` is the pure-Rust verifier (webpki needs ring).
+embedded-tls = { version = "0.19", default-features = false, features = ["p384", "rsa", "rustpki"] }
+rand_chacha  = { version = "0.3", default-features = false }
+rand_core    = { version = "0.6", default-features = false }
 static_cell      = "2.1.1"
 
 
-# Patched esp-hal (Dpi::send ordering), see vendor/esp-hal/VENDORED.md. Drop once fixed upstream.
-# The per-frame restart in src/restart.rs resets before every start, so stock esp-hal may suffice:
-# to try it, comment out the two lines below and rebuild (Cargo.lock switches to the registry source
-# by itself); to go back, uncomment them.
+# Stock esp-hal 1.2.2 passes on the board (2026-10-23, radar-ui RD.0: 39 fps, isr_max 6 us, no shift).
+# The Dpi::send reorder patch is no longer vendored; see docs/design/esp-hal-dpi-patch.md to restore it.
+
+# Slint 1.18.1 scene.rs off-by-one, see ../vendor/i-slint-renderer-software/VENDORED.md. Drop once fixed upstream.
 [patch.crates-io]
-esp-hal = { path = "vendor/esp-hal" }
+i-slint-renderer-software = { path = "../vendor/i-slint-renderer-software" }
 
 # For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html
 [profile.dev]

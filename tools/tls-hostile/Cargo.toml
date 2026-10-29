@@ -1,0 +1,16 @@
+[package]
+name = "tls-hostile"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Host-only regression test for firmware TLS verification (RD.8). Not part of the xtensa build.
+[dev-dependencies]
+adsb-core = { path = "../../adsb-core", features = ["tls"] }
+embedded-tls = { version = "=0.19.0", features = ["p384", "rsa", "rustpki"] }
+embedded-io-adapters = { version = "0.7", features = ["tokio-1"] }
+rand_chacha = "0.3"
+rand_core = "0.6"
+tokio = { version = "1", features = ["full"] }
+
+[workspace]

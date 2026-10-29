@@ -1,8 +1,16 @@
 import "../fonts/LiberationSans-Regular.ttf";
 import "../fonts/LiberationSans-Bold.ttf";
 
-export enum CardKind { no-data, overhead, just-passed, quiet, approaching }
-export enum Screen { card, list }
+export enum Badge { none, overhead, approaching, nearest }
+
+export struct Blip {
+    // Centre in the radar box, logical px.
+    x: length,
+    y: length,
+    sprite: image,
+    label: string,
+    focus: bool,
+}
 
 component Dot inherits Rectangle {
     in property <bool> ok;
@@ -41,15 +49,29 @@ component StatusBar inherits Rectangle {
     }
 }
 
-component NavButton inherits Rectangle {
-    in property <string> label;
-    callback tapped();
-    width: 120px;
-    height: 48px;
-    border-radius: 8px;
-    background: ta.pressed ? #3b82f6 : #2a3140;
-    Text { text: label; font-size: 20px; color: #e6e9ef; horizontal-alignment: center; vertical-alignment: center; }
-    ta := TouchArea { clicked => { root.tapped(); } }
+// Ring with vertical radius `radius` px; the panel's pixels are `aspect` times wider than tall, so
+// the box is `radius * 2 / aspect` px wide (a stadium, within 2 px of a circle on the glass).
+component Ring inherits Rectangle {
+    in property <length> radius;
+    in property <float> aspect;
+    in property <color> line: #2f3a4d;
+    property <length> w: round(2 * radius / 1px / aspect) * 1px;
+    x: 224px - w / 2;
+    y: 224px - radius;
+    width: w;
+    height: 2 * radius;
+    border-radius: w / 2;
+    border-width: 1px;
+    border-color: line;
+}
+
+// "TRK" + "090°": grey caption, value elided to the cell.
+component Cell inherits Rectangle {
+    in property <string> caption;
+    in property <string> value;
+    height: 20px;
+    Text { x: 0px; width: 40px; text: caption; font-size: 14px; color: #7b8494; vertical-alignment: center; }
+    Text { x: 40px; width: parent.width - 40px; text: value; font-size: 17px; color: #e6e9ef; vertical-alignment: center; overflow: elide; }
 }
 
 export component AppWindow inherits Window {
@@ -64,22 +86,36 @@ export component AppWindow inherits Window {
     in property <string> rate;
     in property <string> clock;
 
-    in property <CardKind> kind;
-    in property <string> heading;
-    in property <string> line1;
-    in property <string> line2;
-    in property <string> line3;
-    in property <string> more;
-    // Greyed card (nearest beyond the radius, just passed) vs. full-contrast.
-    in property <bool> dim;
-    // Position decoded against the receiver only: may be wrong far out.
-    in property <bool> flagged;
-    in property <Screen> screen;
+    // Radar.
+    in property <bool> no-data: true;
+    in property <[Blip]> blips;
+    in property <string> half-label;
+    in property <string> range-label;
+    in property <string> beyond;
+    // Radius (vertical px) of the dim configured-radius ring; 0 hides it.
+    in property <length> radius-ring;
+    // `radar::PIXEL_ASPECT`, set once.
+    in property <float> pixel-aspect: 1.0;
+    in property <image> plane-icon;
 
-    callback navigate(Screen);
+    // Info panel (focus aircraft).
+    in property <string> heading: "—";
+    in property <Badge> badge;
+    in property <image> photo;
+    in property <bool> has-photo;
+    in property <string> credit;
+    in property <string> airline: "—";
+    in property <string> model: "—";
+    in property <string> registration: "—";
+    in property <string> route: "— → —";
+    in property <string> cities: "— → —";
+    in property <string> alt: "—";
+    in property <string> gs: "—";
+    in property <string> trk: "—";
+    in property <string> dist: "—";
 
     // Not shown: its literals make the font embedder bake these non-ASCII glyphs in.
-    out property <string> glyph-seed: "°→↑↓·±×−–—·áàâäãåçéèêëíìîïñóòôöõøúùûüýÿÁÀÂÄÅÇÉÈÊËÍÎÏÑÓÔÖØÚÛÜßœŠšŽžłŁ";
+    out property <string> glyph-seed: "°→↑↓·±×−–—·©’áàâäãåæçéèêëíìîïñóòôöõøúùûüýþÿÁÀÂÄÃÅÆÇÉÈÊËÍÌÎÏÑÓÒÔÖÕØÚÙÛÜÝÞßðÐœŒĀāĂăĄąĆćČčĎďĐđĒēĖėĘęĚěĞğĪīĮįİıŁłŃńŇňŌōŐőŘřŚśŞşŠšŤťŪūŮůŰűŲųŹźŻżŽž";
 
     StatusBar {
         y: 0px;
@@ -91,44 +127,108 @@ export component AppWindow inherits Window {
         clock: root.clock;
     }
 
-    if screen == Screen.card: VerticalLayout {
+    // Radar box 448 x 448, centre (224, 224) in it, outer ring 193 x 208 px (round on the glass).
+    Rectangle {
+        x: 0px;
         y: 32px;
-        height: parent.height - 32px;
-        padding: 24px;
-        spacing: 10px;
+        width: 448px;
+        height: 448px;
+        clip: true;
+        background: #0a0d12;
+
+        Rectangle { x: 0px; y: 224px; width: 448px; height: 1px; background: #1c2431; }
+        Rectangle { x: 224px; y: 0px; width: 1px; height: 448px; background: #1c2431; }
+        Ring { radius: 208px; aspect: pixel-aspect; }
+        Ring { radius: 104px; aspect: pixel-aspect; }
+        if radius-ring > 0px: Ring { radius: radius-ring; aspect: pixel-aspect; line: #4a3b1c; }
+
+        Text { x: 230px; y: 2px; text: "N"; font-size: 16px; font-weight: 700; color: #e6e9ef; }
+        Text { x: 230px; y: 122px; text: half-label; font-size: 13px; color: #7b8494; }
+        Text { x: 8px; y: 6px; text: range-label; font-size: 16px; font-weight: 700; color: #9aa4b2; }
+        Text { x: 8px; y: 424px; text: beyond; font-size: 14px; color: #f5a524; }
+
+        for b in blips: Rectangle {
+            Image { x: b.x - 10px; y: b.y - 10px; width: 20px; height: 20px; source: b.sprite; }
+            if b.focus: Rectangle {
+                x: b.x - 14px;
+                y: b.y - 15px;
+                width: 28px;
+                height: 30px;
+                border-radius: 14px;
+                border-width: 2px;
+                border-color: #ffcc00;
+            }
+            Text {
+                width: 88px;
+                x: b.x > 340px ? b.x - 100px : b.x + 13px;
+                y: b.y - 8px;
+                text: b.label;
+                font-size: 14px;
+                font-weight: b.focus ? 700 : 400;
+                color: b.focus ? #ffffff : #aab4c3;
+                horizontal-alignment: b.x > 340px ? right : left;
+                overflow: elide;
+            }
+        }
+
+        if no-data: Rectangle {
+            x: 24px;
+            y: 204px;
+            width: 400px;
+            height: 40px;
+            border-radius: 8px;
+            background: #1b1f27;
+            border-width: 1px;
+            border-color: #e5484d;
+            Text { text: "No data: feed disconnected"; font-size: 20px; color: #e6e9ef; horizontal-alignment: center; vertical-alignment: center; }
+        }
+    }
+
+    // Info panel 352 x 448.
+    Rectangle {
+        x: 448px;
+        y: 32px;
+        width: 352px;
+        height: 448px;
+        background: #11151c;
+
         Rectangle {
-            height: 4px;
-            background: kind == CardKind.overhead ? #3b82f6
-                : kind == CardKind.no-data ? #e5484d
-                : kind == CardKind.approaching ? #f5a524 : #3a4150;
+            x: 8px;
+            y: 4px;
+            width: 336px;
+            height: 224px;
+            background: #1e232d;
+            if !has-photo: Image { x: 134px; y: 62px; width: 68px; height: 68px; source: plane-icon; }
+            if !has-photo: Text { y: 136px; width: parent.width; text: "no photo"; font-size: 16px; color: #7b8494; horizontal-alignment: center; }
+            if has-photo: Image { width: 336px; height: 224px; source: photo; }
         }
-        Text {
-            text: heading;
-            font-size: kind == CardKind.overhead ? 72px : 40px;
-            font-weight: 700;
-            color: dim ? #7b8494 : #ffffff;
-            overflow: elide;
+        Text { x: 8px; y: 229px; width: 336px; text: credit; font-size: 13px; color: #7b8494; overflow: elide; }
+
+        Text { x: 8px; y: 246px; width: 220px; text: heading; font-size: 36px; font-weight: 700; color: #ffffff; overflow: elide; }
+        if badge != Badge.none: Rectangle {
+            x: 232px;
+            y: 256px;
+            width: 112px;
+            height: 24px;
+            border-radius: 12px;
+            background: badge == Badge.overhead ? #3b82f6 : badge == Badge.approaching ? #f5a524 : #3a4150;
+            Text {
+                text: badge == Badge.overhead ? "OVERHEAD" : badge == Badge.approaching ? "APPROACHING" : "NEAREST";
+                font-size: 13px;
+                font-weight: 700;
+                color: badge == Badge.approaching ? #0e1117 : #ffffff;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
         }
-        Text { text: line1; font-size: 32px; color: dim ? #7b8494 : #e6e9ef; overflow: elide; }
-        Text { text: line2; font-size: 28px; color: dim ? #7b8494 : #c3c9d4; overflow: elide; }
-        Text { text: line3; font-size: 28px; color: dim ? #7b8494 : #c3c9d4; overflow: elide; }
-        Text { text: flagged ? "position unverified" : ""; font-size: 20px; color: #f5a524; }
-        Rectangle { vertical-stretch: 1; }
-        Text { text: more; font-size: 24px; color: #9aa4b2; }
-    }
-
-    if screen == Screen.list: Text {
-        y: 32px;
-        x: 24px;
-        text: "List view";
-        font-size: 40px;
-        color: #7b8494;
-    }
-
-    NavButton {
-        x: parent.width - self.width - 16px;
-        y: parent.height - self.height - 16px;
-        label: screen == Screen.card ? "List" : "Card";
-        tapped => { navigate(screen == Screen.card ? Screen.list : Screen.card); }
+        Text { x: 8px; y: 290px; width: 336px; text: airline; font-size: 17px; color: #e6e9ef; overflow: elide; }
+        Text { x: 8px; y: 310px; width: 336px; text: model; font-size: 17px; color: #c3c9d4; overflow: elide; }
+        Text { x: 8px; y: 330px; width: 336px; text: registration; font-size: 17px; color: #c3c9d4; overflow: elide; }
+        Text { x: 8px; y: 352px; width: 336px; text: route; font-size: 26px; font-weight: 700; color: #ffffff; overflow: elide; }
+        Text { x: 8px; y: 383px; width: 336px; text: cities; font-size: 15px; color: #9aa4b2; overflow: elide; }
+        Cell { x: 8px; y: 404px; width: 210px; caption: "ALT"; value: alt; }
+        Cell { x: 222px; y: 404px; width: 122px; caption: "GS"; value: gs; }
+        Cell { x: 8px; y: 424px; width: 210px; caption: "DIST"; value: dist; }
+        Cell { x: 222px; y: 424px; width: 122px; caption: "TRK"; value: trk; }
     }
 }

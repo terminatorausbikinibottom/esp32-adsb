@@ -8,12 +8,13 @@ use esp_hal::dma::{
 pub const WIDTH: usize = 800;
 pub const HEIGHT: usize = 480;
 pub const FB_BYTES: usize = WIDTH * HEIGHT * 2;
-/// Pixel clock: 16 MHz (panel verified). The old bounce-buffer path (feature `bounce`) runs at 10 MHz
-/// unless `pclk-16mhz` is also set.
+/// Pixel clock: 12 MHz (29 Hz refresh). At 16 MHz flash cache refills starved the PSRAM scanout reads and
+/// glitched ~30 % of frames; 12 MHz gave 0 in 464 frames, 13 MHz still 21 % (radar-ui K4). The old
+/// bounce-buffer path (feature `bounce`) runs at 10 MHz unless `pclk-16mhz` is also set.
 pub const PCLK_MHZ: u32 = if cfg!(feature = "bounce") && !cfg!(feature = "pclk-16mhz") {
     10
 } else {
-    16
+    12
 };
 /// Frame rate for the 820 x 500 total frame.
 pub const REFRESH_HZ: u32 = PCLK_MHZ * 1_000_000 / (820 * 500);
@@ -111,6 +112,40 @@ fn ruler_pixel(x: usize, y: usize) -> u16 {
     }
 }
 
+/// Pixel-aspect check image (RD.14.1): 1 px white border on the 800x480 edge; left a 300x300 px square
+/// with its inscribed circle (square-pixel assumption), right the `round(300 / aspect)` x 300 px
+/// rectangle with its inscribed ellipse. On a panel with the given aspect the right shape looks round.
+pub fn aspect_pixel(x: usize, y: usize, aspect: f64) -> u16 {
+    let edge = x == 0 || y == 0 || x == WIDTH - 1 || y == HEIGHT - 1;
+    let w = (300.0 / aspect + 0.5) as usize;
+    let outline = |x0: usize, w: usize| {
+        let y0 = 90;
+        let (dx, dy) = (
+            x as f64 + 0.5 - x0 as f64 - w as f64 / 2.0,
+            y as f64 + 0.5 - y0 as f64 - 150.0,
+        );
+        let rect = x >= x0 && x < x0 + w && y >= y0 && y < y0 + 300;
+        let on_rect = rect && (x < x0 + 2 || x >= x0 + w - 2 || y < y0 + 2 || y >= y0 + 298);
+        // Ellipse outline about 2 px thick: |d^2 - 1| ~ 2 |d - 1|, times the mean semi-axis, < 2.
+        let (ex, ey) = (dx / (w as f64 / 2.0), dy / 150.0);
+        let d2 = ex * ex + ey * ey;
+        on_rect
+            || (d2 - 1.0) * (w as f64 / 4.0 + 75.0) < 1.0
+                && (1.0 - d2) * (w as f64 / 4.0 + 75.0) < 1.0
+    };
+    if edge || outline(50, 300) || outline(450, w) {
+        0xFFFF
+    } else {
+        0
+    }
+}
+
+pub fn draw_aspect(fb: &mut [u16], aspect: f64) {
+    for (i, px) in fb.iter_mut().enumerate() {
+        *px = aspect_pixel(i % WIDTH, i / WIDTH, aspect);
+    }
+}
+
 pub fn draw_pattern(fb: &mut [u16]) {
     for (i, px) in fb.iter_mut().enumerate() {
         let (x, y) = (i % WIDTH, i / WIDTH);
@@ -205,4 +240,17 @@ unsafe impl DmaTxBuffer for LoopedFb {
     fn from_view(view: Self) -> Self {
         view
     }
+}
+
+/// Writes the cache lines of rows `y0..y1` of the framebuffer at `fb` back to PSRAM so the scanout
+/// DMA sees them (the single cache-maintenance point of the UI, parent R3). Rows are 1600 B, a
+/// multiple of the 64 B cache line.
+///
+/// # Safety
+/// `fb` must point to the WIDTH x HEIGHT framebuffer.
+pub unsafe fn writeback_rows(fb: *const u16, y0: usize, y1: usize) {
+    assert!(y0 <= y1 && y1 <= HEIGHT);
+    // SAFETY: inside the framebuffer; a shared slice is only used to name the range to write back.
+    let rows = unsafe { core::slice::from_raw_parts(fb.add(y0 * WIDTH), (y1 - y0) * WIDTH) };
+    unsafe { esp_hal::dma::aligned::DmaAlignedRef::new_unchecked(rows) }.writeback();
 }

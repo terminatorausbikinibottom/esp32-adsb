@@ -10,6 +10,8 @@
 use adsb_core as _; // linked for now; used from Phase 3
 use core::alloc::Layout;
 use embassy_executor::Spawner;
+#[cfg(not(feature = "bounce"))]
+use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Timer};
 use esp_alloc::MemoryCapability;
 use esp_backtrace as _;
@@ -37,6 +39,8 @@ use firmware::display;
 use firmware::display::LoopedFb;
 #[cfg(not(feature = "bounce"))]
 use firmware::restart;
+#[cfg(not(feature = "bounce"))]
+use firmware::ui;
 #[cfg(any(feature = "bounce", not(feature = "no-resync")))]
 use static_cell::ConstStaticCell;
 #[cfg(not(feature = "bounce"))]
@@ -77,10 +81,12 @@ esp_bootloader_esp_idf::esp_app_desc!();
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
 #[esp_rtos::main]
-async fn main(_spawner: Spawner) -> ! {
+async fn main(spawner: Spawner) -> ! {
     // generator version: 1.4.0
     // generator parameters: -o esp32s3 -o esp32s3-wroom-1-octal-psram -o embassy -o unstable-hal -o alloc -o wifi -o log -o esp-backtrace
 
+    #[cfg(feature = "bounce")]
+    let _ = spawner; // the old bounce path has no UI tasks
     esp_println::logger::init_logger_from_env();
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
@@ -105,11 +111,9 @@ async fn main(_spawner: Spawner) -> ! {
     let _gpio36 = peripherals.GPIO36;
     let _gpio37 = peripherals.GPIO37;
 
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
-    log_heap("boot(internal only)");
-
     // Octal mode forced (auto-detect is "not entirely reliable"); 80 MHz is the module's max rated
-    // octal speed. The PSRAM heap region is added after the internal one, which stays the default.
+    // octal speed. PSRAM is the first heap region so plain allocations (Slint, buffers) land there;
+    // esp-radio asks for internal memory by capability, and the internal region is added second.
     let psram = Psram::new(
         peripherals.PSRAM,
         PsramConfig {
@@ -125,7 +129,8 @@ async fn main(_spawner: Spawner) -> ! {
         "psram: start={psram_start:p} size={} MB ({psram_size} bytes)",
         psram_size / 1024 / 1024
     );
-    log_heap("psram");
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
+    log_heap("psram + internal");
 
     let layout = Layout::from_size_align(display::FB_BYTES, display::FB_ALIGN).unwrap();
     let fb_ptr = unsafe { esp_alloc::HEAP.alloc_caps(MemoryCapability::External.into(), layout) };
@@ -139,9 +144,21 @@ async fn main(_spawner: Spawner) -> ! {
     let fb: &'static [u8] = unsafe { core::slice::from_raw_parts(fb_ptr, display::FB_BYTES) };
     info!("psram: fb ptr={fb_ptr:p} len={}", display::FB_BYTES);
     // SAFETY: 64-byte aligned, 2-byte multiple length, exclusively owned.
-    display::draw_pattern(unsafe {
+    let fb_px = unsafe {
         core::slice::from_raw_parts_mut(fb_ptr.cast::<u16>(), display::WIDTH * display::HEIGHT)
-    });
+    };
+    #[cfg(feature = "diag-aspect")]
+    {
+        display::draw_aspect(fb_px, adsb_core::radar::PIXEL_ASPECT);
+        info!(
+            "diag-aspect: pixel_aspect={}",
+            adsb_core::radar::PIXEL_ASPECT
+        );
+    }
+    #[cfg(all(feature = "diag-pattern", not(feature = "diag-aspect")))]
+    display::draw_pattern(fb_px);
+    #[cfg(not(any(feature = "diag-pattern", feature = "diag-aspect")))]
+    fb_px.fill(0);
     log_heap("psram(fb drawn)");
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -150,11 +167,12 @@ async fn main(_spawner: Spawner) -> ! {
     info!("Embassy initialized!");
     log_heap("rtos started");
 
-    let _wifi_controller =
+    let wifi_controller =
         esp_radio::wifi::WifiController::new(peripherals.WIFI, Default::default())
             .expect("Failed to initialize Wi-Fi controller");
-    let _wifi_interface = esp_radio::wifi::Interface::station();
     log_heap("wifi init");
+    #[cfg(feature = "bounce")]
+    let _ = &wifi_controller; // the old bounce path has no network tasks
 
     // Async I2C0; touch_task will take over the bus (and the expander) in step 1.6.
     let mut i2c = I2c::new(
@@ -323,6 +341,13 @@ async fn main(_spawner: Spawner) -> ! {
     }
     #[cfg(not(feature = "bounce"))]
     {
+        // First UI frame into the framebuffer before the scanout starts (the backlight is still off).
+        static PIPELINE: StaticCell<ui::Pipeline> = StaticCell::new();
+        let pipeline = &*PIPELINE.init(Mutex::new(ui::new_pipeline()));
+        let mut ui = ui::FbUi::new(fb_ptr.cast::<u16>());
+        #[cfg(not(feature = "diag-aspect"))]
+        ui::tick(&mut ui, pipeline).await;
+
         // Direct PSRAM ring (1.3) plus a per-VBLANK DMA restart on core 1 (see firmware::restart).
         // Descriptors must be in internal RAM.
         static DESCRIPTORS: StaticCell<InternalMemory<[DmaDescriptor; display::DESCRIPTORS]>> =
@@ -391,6 +416,22 @@ async fn main(_spawner: Spawner) -> ! {
             .expect("backlight on");
         info!("ch422g: backlight on");
 
+        // diag-aspect shows the check image only: no UI, no network.
+        #[cfg(feature = "diag-aspect")]
+        let _ = (&mut ui, pipeline, spawner, wifi_controller);
+        #[cfg(not(feature = "diag-aspect"))]
+        {
+            spawner.spawn(ui::ui_task(ui, pipeline).expect("ui_task"));
+            #[cfg(feature = "demo")]
+            if ui::DEMO {
+                spawner.spawn(ui::feed_task(pipeline).expect("feed_task"));
+            } else {
+                firmware::net::start(spawner, wifi_controller, pipeline);
+            }
+            #[cfg(not(feature = "demo"))]
+            firmware::net::start(spawner, wifi_controller, pipeline);
+        }
+
         let mut n = 0u32;
         let mut last = Instant::now();
         loop {
@@ -400,7 +441,7 @@ async fn main(_spawner: Spawner) -> ! {
             last = now;
             let st = restart::take_stats();
             info!("alive {n}s");
-            // The restart must finish inside the vertical blank (12 lines = ~0.6 ms at 16 MHz).
+            // The restart must finish inside the vertical blank (12 lines = ~0.8 ms at 12 MHz).
             info!(
                 "restart: frames/s={} isr_avg_us={} (of which lcd wait {}) isr_max_us={} load={}%",
                 st.restarts,
@@ -409,7 +450,9 @@ async fn main(_spawner: Spawner) -> ! {
                 st.max_us,
                 st.busy_us as u64 * 100 / elapsed_us as u64
             );
-            log_heap("heartbeat");
+            if n.is_multiple_of(10) {
+                log_heap("heartbeat");
+            }
             n += 1;
         }
     }

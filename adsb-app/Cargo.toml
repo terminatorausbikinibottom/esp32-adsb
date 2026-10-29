@@ -25,3 +25,7 @@ slint-build = "=1.18.1"
 
 [dev-dependencies]
 adsb-core = { path = "../adsb-core", features = ["scenario"] }
+
+# Slint 1.18.1 scene.rs off-by-one, see vendor/i-slint-renderer-software/VENDORED.md. Drop once fixed upstream.
+[patch.crates-io]
+i-slint-renderer-software = { path = "../vendor/i-slint-renderer-software" }

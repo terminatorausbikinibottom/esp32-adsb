@@ -1,0 +1,6 @@
+# Read by espflash from the current directory (the bench service runs it from the repo root).
+# 80 MHz (DIO) instead of the 40 MHz default (QIO boot-looped with TG0WDT on this board): flash cache refills share the MSPI bus with the
+# PSRAM framebuffer DMA, and slow refills starve the scanout (radar-ui RD.2, risk K4).
+[flash]
+mode = "dio"
+frequency = "80MHz"

@@ -3,10 +3,14 @@ use std::{path::PathBuf, sync::Arc};
 
 #[tokio::main]
 async fn main() {
-    // Run from the directory holding the local `.env`, or point ADSB_SIM_ENV_FILE at it.
-    let env_file =
-        std::env::var_os("ADSB_SIM_ENV_FILE").map_or_else(|| PathBuf::from(".env"), PathBuf::from);
-    let text = std::fs::read_to_string(&env_file).ok();
+    // ADSB_SIM_ENV_FILE, else `.env` in the current directory, else `sim-bridge/.env` (so `cargo run`
+    // works from any directory).
+    let text = match std::env::var_os("ADSB_SIM_ENV_FILE") {
+        Some(path) => std::fs::read_to_string(PathBuf::from(path)).ok(),
+        None => std::fs::read_to_string(".env").ok().or_else(|| {
+            std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".env")).ok()
+        }),
+    };
     let cfg =
         Config::from_sources(text.as_deref(), |k| std::env::var(k).ok()).unwrap_or_else(|e| {
             eprintln!("sim-bridge: {e}");

@@ -1,10 +1,12 @@
 //! Simulator platform layer: runs a synthetic scenario through the same pipeline and `App` as the
 //! firmware and keeps the rendered 800x480 RGB565 framebuffer. The browser glue is in `web`.
+pub mod fixtures;
 pub mod live;
 #[cfg(target_arch = "wasm32")]
 mod web;
 
 use adsb_app::{App, HEIGHT, PointerEvent, Rgb565Pixel, Status, WIDTH};
+use adsb_core::meta::FocusMeta;
 use adsb_core::pipeline::FeedPipeline;
 use adsb_core::scenario::{Event, Kind, RADIUS_KM, Scenario};
 use core::time::Duration;
@@ -18,6 +20,9 @@ pub struct Sim {
     /// Persistent framebuffer: the renderer only delivers dirty spans.
     fb: Vec<Rgb565Pixel>,
     line: Vec<Rgb565Pixel>,
+    /// Fixture metadata of the current focus callsign (scenario mode only), kept so the photo's
+    /// `Rc` stays the same between ticks.
+    meta: Option<(String, Option<FocusMeta>)>,
 }
 
 impl Sim {
@@ -39,6 +44,7 @@ impl Sim {
             radius_km: RADIUS_KM,
             fb: vec![Rgb565Pixel(0); WIDTH * HEIGHT],
             line: vec![Rgb565Pixel(0); WIDTH],
+            meta: None,
         }
     }
 
@@ -48,6 +54,7 @@ impl Sim {
         self.pipeline = FeedPipeline::new(self.scenario.receiver());
         self.feed_ok = true;
         self.radius_km = RADIUS_KM;
+        self.meta = None;
         self.app.reset().expect("slint window");
         // Repaint now: the framebuffer still holds the previous scenario or live frame.
         self.render();
@@ -76,12 +83,23 @@ impl Sim {
             feed_ok: self.feed_ok,
             radius_km: self.radius_km,
         };
-        self.refresh(&st);
+        self.refresh(&st, true);
     }
 
-    fn refresh(&mut self, st: &Status) {
+    fn refresh(&mut self, st: &Status, fixtures: bool) {
         let snap = self.pipeline.snapshot(st.now_ms, st.radius_km);
-        self.app.update(&snap, st);
+        let cs = snap
+            .focus
+            .and_then(|i| snap.list.get(i)?.callsign.as_ref())
+            .filter(|_| fixtures)
+            .map(|c| c.trim().to_string());
+        match (&cs, &self.meta) {
+            (Some(c), Some((have, _))) if c == have => {}
+            (Some(c), _) => self.meta = Some((c.clone(), fixtures::for_callsign(c))),
+            (None, _) => self.meta = None,
+        }
+        let meta = self.meta.as_ref().and_then(|(_, m)| m.as_ref());
+        self.app.update(&snap, st, meta);
         self.render();
     }
 
@@ -113,7 +131,7 @@ impl Sim {
             feed_ok,
             radius_km: self.radius_km,
         };
-        self.refresh(&st);
+        self.refresh(&st, false);
     }
 
     /// Returns whether the framebuffer changed.
@@ -125,9 +143,11 @@ impl Sim {
     /// Repaint whatever is dirty (timers, animations); returns whether the framebuffer changed.
     pub fn render(&mut self) -> bool {
         let fb = &mut self.fb;
-        self.app.render(&mut self.line, |y, x, px| {
-            fb[y * WIDTH + x.start..][..px.len()].copy_from_slice(px);
-        })
+        self.app
+            .render(&mut self.line, |y, x, px| {
+                fb[y * WIDTH + x.start..][..px.len()].copy_from_slice(px);
+            })
+            .is_some()
     }
 
     /// FNV-1a 64 over the framebuffer as little-endian RGB565 words, row-major. The browser's

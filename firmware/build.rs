@@ -1,8 +1,48 @@
+#[path = "build_config.rs"]
+mod build_config;
+
 fn main() {
+    // Floor for the SNTP time (radar-ui RD.8 fix 2); not a secret.
+    let built = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    println!("cargo:rustc-env=ADSB_BUILD_UNIX={built}");
+    generate_config();
     linker_be_nice();
     check_xtensa_linker_available();
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
+}
+
+fn generate_config() {
+    println!("cargo:rerun-if-changed=build_config.rs");
+    for var in build_config::VARS {
+        println!("cargo:rerun-if-env-changed={var}");
+    }
+    // firmware/.env is optional; a variable set in the environment wins over the file. Only watch the
+    // file when it exists (a missing watched file makes Cargo rerun this script on every build).
+    let env_path = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join(".env");
+    let file = match std::fs::read_to_string(&env_path) {
+        Ok(text) => {
+            println!("cargo:rerun-if-changed=.env");
+            build_config::parse_env(&text).unwrap_or_else(|msg| panic!("firmware config: {msg}"))
+        }
+        Err(_) => Vec::new(),
+    };
+    let get = |n: &str| {
+        std::env::var(n)
+            .ok()
+            .or_else(|| file.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone()))
+    };
+    match build_config::generate(get) {
+        Ok(src) => {
+            let out = std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("config.rs");
+            std::fs::write(out, src).unwrap();
+        }
+        // The message never contains a value.
+        Err(msg) => panic!("firmware config (see firmware/.env.example): {msg}"),
+    }
 }
 
 #[cfg(unix)]

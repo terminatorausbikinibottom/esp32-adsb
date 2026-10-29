@@ -1,4 +1,12 @@
-# Vendored esp-hal
+# esp-hal `Dpi::send` patch
+
+**Status (2026-10-29):** not in use. The firmware builds against stock esp-hal 1.2.2 from crates.io.
+The vendored copy (`firmware/vendor/esp-hal`) was removed; it is in the git history before this
+change. To use the patch again: copy esp-hal 1.2.2 from `~/.cargo/registry/src/*/esp-hal-1.2.2` to
+`firmware/vendor/esp-hal` (keep its license files), apply the diff below, and add
+`[patch.crates-io] esp-hal = { path = "vendor/esp-hal" }` to `firmware/Cargo.toml`.
+
+## Patch
 
 Upstream: `esp-hal` 1.2.2 from crates.io (checksum `c9e3dfd511fed638fe41fdb4595f8c7f0cbb488d0f0cf2bbc063d76d805057cf`),
 used through `[patch.crates-io]` in `firmware/Cargo.toml`. Only differences from the published crate:
@@ -23,7 +31,7 @@ used through `[patch.crates-io]` in `firmware/Cargo.toml`. Only differences from
 @@ -503,6 +494,18 @@
              w.lcd_next_frame_en().bit(next_frame_en)
          });
- 
+
 +        // Start the DMA only after the resets above (like ESP-IDF's esp_lcd_rgb_panel): resetting the
 +        // Async Tx FIFO after the DMA started drops a start-up dependent number of bytes, which
 +        // shifts the whole image horizontally.
@@ -51,14 +59,12 @@ first, then starts GDMA, then starts the LCD; this patch uses that order.
 
 Issue: to be filed in esp-rs/esp-hal (text in the step 1.3 fix loop 2 report). Add the link here once filed.
 
-Drop this vendored copy and the `[patch.crates-io]` entry once a released esp-hal contains the fix.
-
-## Switching to stock esp-hal
+## Why stock esp-hal is enough
 
 The default per-frame restart (`firmware/src/restart.rs`) resets the LCD and FIFO before every start, so
-the `Dpi::send` ordering may no longer matter. To test stock esp-hal 1.2.2: comment out `[patch.crates-io]`
-and its entry in `firmware/Cargo.toml` and rebuild. Only `Dpi::send`'s first frame, and the `no-resync`/`restart-vsync`
-variants (no reset before start), depend on the patch.
+the `Dpi::send` ordering does not matter for the default build. Only `Dpi::send`'s first frame, and the
+`no-resync`/`restart-vsync` variants (no reset before start), depend on the patch: with stock esp-hal
+they can show a horizontal image shift. Restore the patch (see the status above) before using them.
 
-**2026-10-23 (radar-ui RD.0):** stock esp-hal 1.2.2 passed on the board (39 fps, no shift), so the patch is now
-commented out in `firmware/Cargo.toml`. This directory stays until the `no-resync`/`restart-vsync` variants are dropped.
+**2026-10-23 (radar-ui RD.0):** stock esp-hal 1.2.2 passed on the board (39 fps, no shift), so the patch was
+switched off in `firmware/Cargo.toml`. **2026-10-29:** the vendored copy was removed.
